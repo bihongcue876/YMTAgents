@@ -17,3 +17,5 @@ ymtdata/
 dist/
 build/
 *.spec
+
+AGENTS.md
