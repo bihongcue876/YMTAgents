@@ -1,0 +1,42 @@
+"""共享枚举词汇。
+
+对应 docs 03 §8（状态词汇）、docs 09 §2（权限档）、spec §1.1（槽位）。
+本模块只依赖标准库，禁止 import 项目内任何其它包。
+"""
+
+from enum import Enum
+
+
+class ModuleState(str, Enum):
+    """模块运行态（docs 03 §8）。期望态见 modules.json。"""
+
+    DISABLED = "disabled"
+    STARTING = "starting"
+    READY = "ready"
+    DEGRADED = "degraded"
+    ERROR = "error"
+    STOPPING = "stopping"
+
+
+class Permission(str, Enum):
+    """工具权限档（docs 09 §2）。"""
+
+    SAFE = "safe"
+    CONFIRM = "confirm"
+    RESTRICTED = "restricted"
+
+
+class Slot(str, Enum):
+    """模型槽位（spec §1.1）。"""
+
+    MAIN = "main"
+    THINKING = "thinking"
+    FAST = "fast"
+    EMBEDDING = "embedding"
+
+
+class SessionState(str, Enum):
+    """会话状态（docs 03 §8）。"""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
