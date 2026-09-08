@@ -1,0 +1,19 @@
+docs/
+spec/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# uv / venv
+.venv/
+
+# 运行数据（绿色分发时随 EXE 同级生成，不入库）
+ymtdata/
+
+# 打包产物
+dist/
+build/
+*.spec
