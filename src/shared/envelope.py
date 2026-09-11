@@ -85,6 +85,19 @@ class SwitchModel(Envelope):
     model_id: str | None = None  # None = 回退到槽位默认
 
 
+class SetSlot(Envelope):
+    """全局槽位绑定（spec rev4 §1）。
+
+    与 SwitchModel 的作用域区分（spec rev4 §2）：
+    - SetSlot：全局配置层，写 models.json 的 slots，供模型配置页「槽位绑定区」使用；
+    - SwitchModel：会话实例层，写会话 meta.main_model 并发 model.switch 事件。
+    """
+
+    type: Literal["slot.set"] = "slot.set"
+    slot: Literal["main", "thinking", "fast", "embedding"] = "main"
+    model_id: str | None = None  # None = 清空该槽位绑定
+
+
 class NewSession(Envelope):
     type: Literal["session.new"] = "session.new"
     title: str | None = None
@@ -240,6 +253,7 @@ Request = Annotated[
         SendMessage,
         CancelTurn,
         SwitchModel,
+        SetSlot,
         NewSession,
         ResumeSession,
         ArchiveSession,

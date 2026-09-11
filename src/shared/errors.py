@@ -1,6 +1,14 @@
-"""错误码（spec §7）。
+"""错误码（spec §7 / rev5）。
 
 用于 ErrorReport.code。模型可见信息一律去敏（docs 09 §5）。
+
+码的划分依据**真实原因**，一个码只承担一种语义（spec rev5 §2）：
+- `provider_not_found` 只表示「供应商 id 不存在」，不得挪作他用；
+- 未绑定模型是**无引用**，不是「找不到」，用 `model_unbound`；
+- 模型不属于任何供应商、或被供应商拒绝，用 `model_not_found`；
+- 其余协议异常用 `protocol_error` 兜底。
+
+`ERROR_TEXT` 是「码 → 前端中文提示」的单一来源，供前端展示与后端默认文案使用。
 """
 
 from enum import Enum
@@ -8,7 +16,10 @@ from enum import Enum
 
 class ErrorCode(str, Enum):
     INVALID_REQUEST = "invalid_request"
-    PROVIDER_NOT_FOUND = "provider_not_found"
+    PROVIDER_NOT_FOUND = "provider_not_found"  # 供应商 id 不存在（本义，勿挪作他用）
+    MODEL_UNBOUND = "model_unbound"  # 未绑定任何模型：会话级与全局槽位皆空（无引用）
+    MODEL_NOT_FOUND = "model_not_found"  # 模型不属于任何已配置供应商，或被供应商拒绝
+    PROTOCOL_ERROR = "protocol_error"  # 供应商协议错误，无法归入以上
     KEY_MISSING = "key_missing"
     KEY_ERROR = "key_error"
     WHITELIST_BLOCKED = "whitelist_blocked"
@@ -27,11 +38,36 @@ class ErrorScope(str, Enum):
     SYSTEM = "system"
 
 
-# 网关异常 -> ErrorCode 的映射口径（docs 09 §5，spec §2.2）
+# 码 → 前端中文提示（单一来源）。具体场景可在 message 中补充对象与操作指引。
+ERROR_TEXT: dict[str, str] = {
+    ErrorCode.INVALID_REQUEST.value: "请求格式不合法",
+    ErrorCode.PROVIDER_NOT_FOUND.value: "供应商不存在",
+    ErrorCode.MODEL_UNBOUND.value: "尚未绑定模型",
+    ErrorCode.MODEL_NOT_FOUND.value: "该模型在供应商不可用",
+    ErrorCode.PROTOCOL_ERROR.value: "供应商拒绝了请求",
+    ErrorCode.KEY_MISSING.value: "凭据不可用",
+    ErrorCode.KEY_ERROR.value: "凭据管理器不可用",
+    ErrorCode.WHITELIST_BLOCKED.value: "已被网络白名单拦截",
+    ErrorCode.AUTH_ERROR.value: "凭据不可用",
+    ErrorCode.NETWORK_ERROR.value: "网络或连接错误",
+    ErrorCode.CONTEXT_OVERFLOW.value: "上下文超出模型窗口",
+    ErrorCode.SESSION_NOT_FOUND.value: "会话不存在",
+    ErrorCode.STORAGE_ERROR.value: "数据读写异常",
+    ErrorCode.INTERNAL.value: "内部错误",
+}
+
+
+def error_text(code: str) -> str:
+    """码 → 中文提示；未知码回退通用文案（不泄露码以外的内部信息）。"""
+    return ERROR_TEXT.get(code, "未知错误")
+
+
+# 网关异常 -> ErrorCode 的映射口径（docs 09 §5，spec §2.2）。
+# 注意：异常自带 code 时以自带为准（loop._code_of 优先取 exc.code），本表是兜底。
 GATEWAY_EXCEPTION_CODE = {
     "GatewayTimeout": ErrorCode.NETWORK_ERROR,
     "GatewayBlocked": ErrorCode.WHITELIST_BLOCKED,
     "GatewayAuthError": ErrorCode.AUTH_ERROR,
     "GatewayNetworkError": ErrorCode.NETWORK_ERROR,
-    "GatewayProtocolError": ErrorCode.NETWORK_ERROR,
+    "GatewayProtocolError": ErrorCode.PROTOCOL_ERROR,
 }
