@@ -41,6 +41,10 @@ class GatewayNetworkError(GatewayError):
 
 
 class GatewayProtocolError(GatewayError):
-    """供应商/模型不存在或协议错误。"""
+    """供应商以协议错误拒绝（404/400/422 等）。
 
-    default_code = "provider_not_found"
+    默认码为 `protocol_error`——**不再默认冒充 provider_not_found**。
+    归因到更具体的码（auth_error / model_not_found）由 `provider._map_exception` 显式给出（spec rev5 §3）。
+    """
+
+    default_code = "protocol_error"

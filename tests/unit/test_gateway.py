@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.gateway.errors import GatewayAuthError, GatewayBlocked
+from core.gateway.errors import GatewayAuthError, GatewayBlocked, GatewayProtocolError
 from core.gateway.keyring_store import KeyringStore
 from core.gateway.provider import ModelGateway
 from core.gateway.whitelist import Whitelist, domain_of
@@ -152,3 +152,83 @@ def test_upsert_provider_adds_whitelist(tmp_path):
     gateway.upsert_provider(spec, "sk-abc")
     assert "api.newhost.com" in gateway.settings.network.whitelist
     assert gateway.list_providers()[0].key_status == "stored"
+
+
+# -- 全局槽位绑定（spec rev4 §3） --------------------------------------------
+
+
+def _bare_gateway(tmp_path) -> ModelGateway:
+    store = ConfigStore(tmp_path)
+    store.ensure_defaults()
+    return ModelGateway(
+        store, keyring=KeyringStore(backend=FakeKeyring()), client_factory=make_factory([])
+    )
+
+
+def test_set_slot_persists_to_models_json(tmp_path):
+    """绑定写 models.json（含 .bak），且以文件为准可被重新装载（03 §10）。"""
+    gateway = _bare_gateway(tmp_path)
+    assert gateway.get_slots()["main"] is None
+
+    gateway.set_slot("main", "m1")
+    assert gateway.get_slots()["main"] == "m1"
+    assert ConfigStore(tmp_path).load("models").slots["main"] == "m1"
+    assert (tmp_path / "config" / "models.json.bak").exists()
+
+    gateway.set_slot("main", None)
+    assert ConfigStore(tmp_path).load("models").slots["main"] is None
+
+
+def test_set_slot_rejects_unknown_slot(tmp_path):
+    gateway = _bare_gateway(tmp_path)
+    with pytest.raises(GatewayProtocolError):
+        gateway.set_slot("nope", "m1")
+
+
+# -- 错误归因与中文提示（spec rev5 §2/§3） ----------------------------------
+
+
+def test_map_exception_attributes_precise_codes():
+    """上游异常按真实原因归码，不再一律 provider_not_found。
+
+    回归锚点：此前 Authentication/NotFound/BadRequest 三种原因压成同一个 not_found 码。
+    `_map_exception` 按异常类名归因，故此处用同名假异常。
+    """
+
+    class AuthenticationError(Exception):
+        pass
+
+    class NotFoundError(Exception):
+        pass
+
+    class BadRequestError(Exception):
+        pass
+
+    from core.gateway.provider import _map_exception
+
+    assert _map_exception(AuthenticationError()).code == "auth_error"
+    assert _map_exception(NotFoundError()).code == "model_not_found"
+    assert _map_exception(BadRequestError()).code == "model_not_found"
+    assert _map_exception(RuntimeError()).code == "network_error"
+
+
+def test_stream_chat_unknown_model_reports_model_not_found(tmp_path):
+    """模型不属于任何已配置供应商 → model_not_found（而非 provider_not_found）。"""
+    gateway = _bare_gateway(tmp_path)
+    with pytest.raises(GatewayProtocolError) as ei:
+        gateway.stream_chat("sess_1", 0, "not-a-model", [], None, lambda _s: None)
+    assert ei.value.code == "model_not_found"
+
+
+def test_gateway_protocol_error_no_longer_defaults_to_provider_not_found():
+    """GatewayProtocolError 默认码为 protocol_error，不再冒充 not_found。"""
+    assert GatewayProtocolError("x").code == "protocol_error"
+
+
+def test_error_text_covers_every_code():
+    """每个错误码都必须有中文提示（前端展示来源，rev5 §2）。"""
+    from shared.errors import ERROR_TEXT, ErrorCode
+
+    assert set(ERROR_TEXT) == {c.value for c in ErrorCode}
+    assert all(isinstance(v, str) and v.strip() for v in ERROR_TEXT.values())
+

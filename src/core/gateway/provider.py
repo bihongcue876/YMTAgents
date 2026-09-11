@@ -52,6 +52,22 @@ class IModelGateway(ABC):
     def set_slot(self, slot: str, model_id: str | None) -> None: ...
 
     @abstractmethod
+    def reload_settings(self) -> None:
+        """重新装载 settings（白名单等）。settings.update 后由 controller 调用。"""
+
+    @abstractmethod
+    def test_connection(self, provider_id: str, model_id: str) -> tuple[bool, int | None, str | None]:
+        """最小连通性探测，返回 (ok, latency_ms, error_code)。"""
+
+    @abstractmethod
+    def upsert_provider(self, spec: ProviderSpec, api_key: str | None) -> ProviderSpec:
+        """新增或更新供应商；api_key 非空时写入凭据管理器（None = 保持不变）。"""
+
+    @abstractmethod
+    def delete_provider(self, provider_id: str) -> bool:
+        """删除供应商并清理其凭据；返回是否确有删除。"""
+
+    @abstractmethod
     def stream_chat(
         self,
         session_id: str,
@@ -64,11 +80,23 @@ class IModelGateway(ABC):
 
 
 def _map_exception(exc: Exception) -> GatewayError:
+    """上游异常 → 带精确 code 的网关异常（spec rev5 §3）。
+
+    归因就原因不就现象：401/403 是凭据问题；404/400/422 在本应用的调用面
+    （固定 messages 结构 + max_tokens 探测）里几乎总是「该模型不可用」，
+    故归 `model_not_found` 而非笼统的 not_found；其余归 `protocol_error`。
+    """
     name = type(exc).__name__
     if "Authentication" in name or "Permission" in name:
         return GatewayAuthError("凭据不可用")
-    if "NotFound" in name or "BadRequest" in name or "Unprocessable" in name:
-        return GatewayProtocolError("供应商/模型不存在或请求不合法")
+    if "NotFound" in name:
+        return GatewayProtocolError(
+            "该模型在供应商不可用：供应商未提供此模型", code="model_not_found"
+        )
+    if "BadRequest" in name or "Unprocessable" in name:
+        return GatewayProtocolError(
+            "该模型在供应商不可用：供应商拒绝了该模型或请求", code="model_not_found"
+        )
     return GatewayNetworkError("网络或连接错误")
 
 
@@ -217,9 +245,12 @@ class ModelGateway(IModelGateway):
     ) -> Usage:
         provider = self._find_provider_for_model(model_id)
         if provider is None:
-            raise GatewayProtocolError("provider_not_found")
+            raise GatewayProtocolError(
+                f"该模型在供应商不可用：{model_id} 不属于任何已配置的供应商",
+                code="model_not_found",
+            )
         if not self.whitelist.is_allowed(provider.base_url):
-            raise GatewayBlocked("whitelist_blocked")
+            raise GatewayBlocked("已被网络白名单拦截：该供应商地址不在允许列表内")
         api_key = self.keyring.get_key(provider.id)
         if not api_key:
             raise GatewayAuthError("凭据不可用", code="key_missing")
