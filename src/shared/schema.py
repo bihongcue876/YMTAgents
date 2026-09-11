@@ -60,7 +60,9 @@ class LoggingSettings(BaseModel):
 
 
 class UISettings(BaseModel):
-    theme: Literal["light"] = "light"  # 暗色后置
+    """UI 选项。theme 取值与 `gui.theme.PALETTES` 一致（docs 05 §1）。"""
+
+    theme: Literal["light", "dark"] = "light"
 
 
 class SettingsConfig(BaseModel):

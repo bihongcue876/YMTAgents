@@ -8,6 +8,7 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
+from gui.theme import DEFAULT_THEME
 from gui.widgets.render.md import messages_to_html
 from gui.widgets.render.view import RendererView
 
@@ -16,6 +17,7 @@ class MessageList(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._messages: list[dict] = []
+        self._theme = DEFAULT_THEME
         self._renderer = RendererView(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -26,9 +28,17 @@ class MessageList(QWidget):
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._render)
 
+    # -- 主题 --------------------------------------------------------------
+    def set_theme(self, name: str | None) -> None:
+        """切换主题并整帧重渲染（消息内容不变，仅换色）。"""
+        name = name or DEFAULT_THEME
+        if name != self._theme:
+            self._theme = name
+            self._render()
+
     # -- 渲染 --------------------------------------------------------------
     def _render(self) -> None:
-        self._renderer.set_html(messages_to_html(self._messages))
+        self._renderer.set_html(messages_to_html(self._messages, self._theme))
 
     def _schedule(self) -> None:
         if not self._timer.isActive():

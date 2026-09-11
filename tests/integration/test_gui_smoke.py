@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from app import bootstrap as bootstrap_mod
 from app import paths
+from gui import theme
 from gui.main_window import MainWindow
-from shared.envelope import NewSession, SendMessage
+from shared.envelope import NewSession, SendMessage, SettingsUpdate
 from tests.mocks.gateway import MockGateway
 
 
@@ -31,5 +32,19 @@ def test_main_window_dispatch(tmp_path, monkeypatch, qapp):
         ctx.controller.handle(SendMessage(text="hi"))
         qapp.processEvents()
         assert any(m["role"] == "assistant" for m in window.chat.messages._messages)
+
+        # 主题切换：settings.update("ui") -> 全局 QSS 换肤 + 消息流重渲染
+        try:
+            ctx.controller.handle(SettingsUpdate(section="ui", data={"theme": "dark"}))
+            qapp.processEvents()
+            assert window._theme == "dark"
+            assert theme.palette("dark").bg in (qapp.styleSheet() or "")
+            assert window.chat.messages._theme == "dark"
+
+            ctx.controller.handle(SettingsUpdate(section="ui", data={"theme": "light"}))
+            qapp.processEvents()
+            assert window._theme == "light"
+        finally:
+            ctx.controller.handle(SettingsUpdate(section="ui", data={"theme": "light"}))
     finally:
         ctx.worker.stop()

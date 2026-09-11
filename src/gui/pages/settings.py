@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui import theme
+
 VERSION = "0.0.0"
 
 
@@ -31,6 +33,15 @@ class SettingsPage(QWidget):
 
         title = QLabel("系统设置")
         title.setStyleSheet("font-size:16px;font-weight:600;")
+        self._loading = False
+
+        # 外观（主题）
+        self._theme = QComboBox()
+        for name in theme.theme_names():
+            self._theme.addItem(theme.palette(name).label, name)
+        self._theme.currentIndexChanged.connect(self._on_theme_changed)
+        appearance_form = QFormLayout()
+        appearance_form.addRow("主题", self._theme)
 
         # 上下文策略
         self._history = QSpinBox()
@@ -76,7 +87,6 @@ class SettingsPage(QWidget):
             self._level.addItem(level)
         self._level.setCurrentText("INFO")
         self._level.currentTextChanged.connect(self._on_level_changed)
-        self._loading = False
         open_logs = QPushButton("打开日志目录")
         open_logs.clicked.connect(lambda: self._open(self._root / "logs"))
         log_row = QHBoxLayout()
@@ -90,6 +100,8 @@ class SettingsPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(title)
+        layout.addWidget(QLabel("外观"))
+        layout.addLayout(appearance_form)
         layout.addWidget(QLabel("上下文策略"))
         layout.addLayout(context_form)
         layout.addWidget(context_apply)
@@ -116,9 +128,20 @@ class SettingsPage(QWidget):
             },
         )
 
+    # -- 外观 --------------------------------------------------------------
+    def _on_theme_changed(self, index: int) -> None:
+        if self._loading:
+            return
+        name = self._theme.itemData(index)
+        if name:
+            self.settings_update.emit("ui", {"theme": name})
+
     # -- 白名单 ------------------------------------------------------------
     def load_settings(self, data: dict) -> None:
         self._loading = True
+        ui = data.get("ui", {})
+        theme_index = self._theme.findData(ui.get("theme", theme.DEFAULT_THEME))
+        self._theme.setCurrentIndex(theme_index if theme_index >= 0 else 0)
         context = data.get("context", {})
         self._history.setValue(int(context.get("history_turns", 20)))
         self._reserve.setValue(int(context.get("reserve", 4096)))

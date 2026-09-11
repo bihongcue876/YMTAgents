@@ -14,6 +14,7 @@ from shared.envelope import (
     RenameSession,
     ResumeSession,
     SendMessage,
+    SetSlot,
     SettingsUpdate,
     SwitchModel,
     TestConnection,
@@ -22,6 +23,7 @@ from shared.envelope import (
 
 from core.bus.bridge import BusBridge
 
+from gui import theme
 from gui.chat.view import ChatView
 from gui.pages.models import ModelsPage
 from gui.pages.settings import SettingsPage
@@ -42,6 +44,8 @@ class MainWindow(QMainWindow):
         self.chat = ChatView()
         self.models = ModelsPage()
         self.settings = SettingsPage(data_root)
+        self._theme: str | None = None
+        self._apply_theme(theme.DEFAULT_THEME)  # 首帧即带主题，避免默认色闪现
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.chat)
@@ -83,8 +87,9 @@ class MainWindow(QMainWindow):
         m.test_requested.connect(
             lambda pid, mid: self.bus.submit(TestConnection(provider_id=pid, model_id=mid))
         )
+        # 模型配置页·槽位绑定区 → 全局槽位（models.json 的 slots，spec rev4）
         m.slot_requested.connect(
-            lambda slot, mid: self.bus.submit(SwitchModel(slot=slot, model_id=mid or None))
+            lambda slot, mid: self.bus.submit(SetSlot(slot=slot, model_id=mid or None))
         )
 
         self.settings.settings_update.connect(
@@ -94,6 +99,20 @@ class MainWindow(QMainWindow):
     def _on_rename(self, title: str) -> None:
         if self._current_session_id:
             self.bus.submit(RenameSession(session_id=self._current_session_id, title=title))
+
+    # -- 主题 --------------------------------------------------------------
+    def _apply_theme(self, name: str | None) -> None:
+        """应用主题：全局 QSS 换肤 + 需自渲染的视图重绘。主题未变则不动。
+
+        settings.state 在每次设置更新时都会发，故此处必须幂等且廉价。
+        """
+        used = theme.palette(name).name
+        if used == self._theme:
+            return
+        self._theme = used
+        theme.apply(used)
+        self.chat.set_theme(used)
+        self.models.set_theme(used)
 
     # -- 事件分发 ----------------------------------------------------------
     def on_event(self, event) -> None:
@@ -126,4 +145,5 @@ class MainWindow(QMainWindow):
         elif t == "provider.test.result":
             self.models.on_test_result(event)
         elif t == "settings.state":
+            self._apply_theme(event.data.get("ui", {}).get("theme"))
             self.settings.load_settings(event.data)
