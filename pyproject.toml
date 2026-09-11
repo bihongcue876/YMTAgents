@@ -28,3 +28,6 @@ packages = ["src/app", "src/core", "src/gui", "src/shared"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# basetemp 固定在项目内：pytest 会话开始时会递归清理 basetemp 下的旧目录，
+# 默认落在系统 Temp 下会被沙箱/安全策略判定为批量删除而拦截。
+addopts = "--basetemp=.pytest_tmp"
