@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.bootstrap import bootstrap
 from gui.main_window import MainWindow
+from gui.widgets.text_shortcuts import install_text_shortcuts
 
 
 def _init_webengine() -> None:
@@ -29,13 +30,19 @@ def main() -> int:
     _init_webengine()
     app = QApplication(sys.argv)
     app.setApplicationName("言明通")
+    install_text_shortcuts()
 
     ctx = bootstrap()
     window = MainWindow(ctx.bridge, data_root=str(ctx.root))
-    window.show()
+    # 先推首屏数据再显示：settings.state 会先应用持久化主题，避免亮/暗色闪现
     ctx.controller.push_initial_state()
+    window.show()
 
     try:
         return app.exec()
     finally:
         ctx.worker.stop()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

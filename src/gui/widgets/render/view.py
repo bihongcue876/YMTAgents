@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 
 from PySide6.QtWidgets import QTextBrowser, QVBoxLayout, QWidget
 
+from gui.theme import DEFAULT_THEME
 from gui.widgets.render.md import markdown_to_html
 
 
 def webengine_available() -> bool:
     if os.environ.get("YMT_NO_WEBENGINE"):
         return False
-    try:
-        from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    return importlib.util.find_spec("PySide6.QtWebEngineWidgets") is not None
 
 
 class RendererView(QWidget):
@@ -41,5 +38,5 @@ class RendererView(QWidget):
     def set_html(self, html: str) -> None:
         self._view.setHtml(html)
 
-    def set_markdown(self, text: str) -> None:
-        self._view.setHtml(markdown_to_html(text))
+    def set_markdown(self, text: str, theme: str | None = DEFAULT_THEME) -> None:
+        self._view.setHtml(markdown_to_html(text, theme))
