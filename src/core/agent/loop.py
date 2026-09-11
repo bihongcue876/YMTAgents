@@ -21,7 +21,7 @@ from shared.envelope import (
     TurnStatus,
     Usage,
 )
-from shared.errors import GATEWAY_EXCEPTION_CODE, ErrorCode
+from shared.errors import GATEWAY_EXCEPTION_CODE, ErrorCode, error_text
 
 from core.agent.cancel import CancelToken
 from core.agent.context import DEFAULT_SYSTEM_PROMPT, ConfigSnapshot, ContextAssembler
@@ -40,6 +40,10 @@ _UNBOUNDED = 10**9
 class IAgentLoop(ABC):
     @abstractmethod
     def run_turn(self, session_id: str, user_message: SendMessage) -> None: ...
+
+    @abstractmethod
+    def cancel(self, session_id: str) -> None:
+        """对当前回合发取消令牌（协作式取消，docs 04 §2）。"""
 
 
 def _code_of(exc: Exception) -> str:
@@ -84,11 +88,13 @@ class AgentLoop(IAgentLoop):
                     return model.ctx_window
         return 0
 
-    def _fail(self, session_id: str, turn_seq: int, code: str, message: str) -> None:
-        err = ErrorReport(scope="session", code=code, message=message)
+    def _fail(self, session_id: str, turn_seq: int, code: str, message: str | None = None) -> None:
+        """失败收口。message 缺省时取码对应的中文提示（shared.errors.ERROR_TEXT）。"""
+        text = message or error_text(code)
+        err = ErrorReport(scope="session", code=code, message=text)
         self.store.append_event(session_id, err)
         self.emit(err)
-        self.emit(TurnStatus(turn_seq=turn_seq, state="failed", error=message))
+        self.emit(TurnStatus(turn_seq=turn_seq, state="failed", error=text))
 
     def _on_delta(self, session_id: str, turn_seq: int, delta: str, parts: list[str]) -> None:
         parts.append(delta)
@@ -105,11 +111,13 @@ class AgentLoop(IAgentLoop):
 
         model_id = self._resolve_model(meta.main_model)
         if not model_id:
+            # 「未绑定」是**无引用**，不是「找不到」——不得报 provider_not_found（spec rev5 §2）
             self._fail(
                 session_id,
                 turn_seq,
-                ErrorCode.PROVIDER_NOT_FOUND.value,
-                "未绑定模型，请先在模型配置中绑定 main 槽位",
+                ErrorCode.MODEL_UNBOUND.value,
+                "尚未绑定模型：请在「模型配置」页为 main 槽位选择一个模型，"
+                "或在对话顶部的模型下拉中选择。",
             )
             return
 
@@ -148,7 +156,7 @@ class AgentLoop(IAgentLoop):
             self._finish(session_id, turn_seq, "".join(parts), interrupted=False)
             self._fail(session_id, turn_seq, _code_of(exc), str(exc))
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("回合异常")
             self._active.pop(session_id, None)
             self._finish(session_id, turn_seq, "".join(parts), interrupted=False)

@@ -74,6 +74,18 @@ class ISessionStore(ABC):
     def archive(self, session_id: str) -> None: ...
 
     @abstractmethod
+    def unarchive(self, session_id: str) -> SessionMeta:
+        """从归档恢复（spec rev3 `session.unarchive`）。"""
+
+    @abstractmethod
+    def rename(self, session_id: str, title: str) -> SessionMeta:
+        """就地改名（spec rev3 `session.rename`）。"""
+
+    @abstractmethod
+    def set_model(self, session_id: str, model_id: str | None, slot: str = "main") -> SessionMeta:
+        """会话级模型切换，落 `model.switch` 事件（docs 03 §3.1）。"""
+
+    @abstractmethod
     def delete(self, session_id: str) -> None: ...
 
     @abstractmethod

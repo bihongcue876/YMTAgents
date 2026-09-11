@@ -25,6 +25,7 @@ from shared.envelope import (
     SessionCreated,
     SessionEvents,
     SessionIndex,
+    SetSlot,
     SettingsState,
     SettingsUpdate,
     SwitchModel,
@@ -111,6 +112,8 @@ class CoreController:
             self._on_cancel(request)
         elif t == "model.switch":
             self._on_switch(request)
+        elif t == "slot.set":
+            self._on_set_slot(request)
         elif t == "session.new":
             self._on_new(request)
         elif t == "session.resume":
@@ -155,6 +158,18 @@ class CoreController:
         if not self.current_session_id:
             return
         self.store.set_model(self.current_session_id, request.model_id, request.slot)
+        self._emit_health()
+
+    def _on_set_slot(self, request: SetSlot) -> None:
+        """全局槽位绑定（spec rev4 §3）。
+
+        与 _on_switch 的作用域区分：本方法写 models.json 的 slots（配置层，全局生效），
+        _on_switch 写会话 meta（会话实例层）。model_id=None 即清空该槽位绑定。
+        绑定是用户直接操作（同类于 09 §7 白名单编辑），不走过确认关卡；
+        归属解析留给调用路径，失败以 provider_not_found 呈现（rev1 §7）。
+        """
+        self.gateway.set_slot(request.slot, request.model_id)
+        self._emit_providers()
         self._emit_health()
 
     def _on_new(self, request: NewSession) -> None:
