@@ -6,6 +6,8 @@ from app import bootstrap as bootstrap_mod
 from app import paths
 from shared.envelope import (
     NewSession,
+    ProviderSpec,
+    ProviderUpsert,
     ResumeSession,
     SendMessage,
     SetSlot,
@@ -139,5 +141,95 @@ def test_settings_update_and_test_connection_dispatch(tmp_path, monkeypatch, qap
         result = [e for e in events if e.type == "provider.test.result"][-1]
         assert result.ok is False
         assert result.error == "model_not_found"
+    finally:
+        ctx.worker.stop()
+
+
+# -- 静默错误收口（spec rev8 §3–§5） ----------------------------------------
+
+
+def test_non_main_session_switch_is_rejected_and_leaves_main_intact(tmp_path, monkeypatch, qapp):
+    """回归锚点：会话级切换非 main 槽位不得污染 `main_model`。
+
+    实证：`set_model` 忽略 slot 参数，任何槽位都写 `meta.main_model` ——
+    切 thinking 会把主模型改掉，且 `model.switch` 事件声称的槽位与生效对象不一致。
+    """
+    gateway = MockGateway(slots={"main": None})
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(NewSession())
+        sid = ctx.controller.current_session_id
+        events.clear()
+        ctx.controller.handle(SwitchModel(slot="thinking", model_id="m-thinking"))
+
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "invalid_request"
+        assert "thinking" in errors[0].message  # 说明白哪个槽位不能用
+        assert ctx.session_store.get_meta(sid).main_model is None  # main 未被污染
+        assert not any(e["type"] == "model.switch" for e in ctx.session_store.replay(sid))
+    finally:
+        ctx.worker.stop()
+
+
+def test_invalid_settings_value_reports_invalid_request(tmp_path, monkeypatch, qapp):
+    """A10：schema 不符必须回 `invalid_request`，且既有配置保持不变。
+
+    此前该异常从 controller 直抛、被核心线程整条吞掉：既不落盘也无提示。
+    """
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(SettingsUpdate(section="ui", data={"theme": "blue"}))
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "invalid_request"
+        assert "ui" in errors[0].message
+        assert ctx.config_store.load("settings").ui.theme == "light"  # 原值保持
+        assert not any(e.type == "settings.state" for e in events)  # 不推坏状态
+    finally:
+        ctx.worker.stop()
+
+
+def test_settings_write_failure_is_reported(tmp_path, monkeypatch, qapp):
+    """落盘失败必须上报 `storage_error`（该码此前零发射，只在日志留痕）。"""
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    try:
+        monkeypatch.setattr(ctx.config_store, "save", boom)
+        ctx.controller.handle(SettingsUpdate(section="ui", data={"theme": "dark"}))
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "storage_error"
+        assert "保存失败" in errors[0].message
+        assert not any(e.type == "settings.state" for e in events)
+    finally:
+        ctx.worker.stop()
+
+
+def test_provider_write_failure_is_reported(tmp_path, monkeypatch, qapp):
+    """供应商写入失败（含凭据管理器不可用）同样上报，不得静默。"""
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("keyring unavailable")
+
+    try:
+        monkeypatch.setattr(ctx.gateway, "upsert_provider", boom)
+        ctx.controller.handle(
+            ProviderUpsert(
+                provider=ProviderSpec(id="prv_z", name="Z", base_url="https://api.z.com/v1")
+            )
+        )
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "storage_error"
+        assert "凭据管理器" in errors[0].message
     finally:
         ctx.worker.stop()

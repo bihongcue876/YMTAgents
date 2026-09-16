@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Callable
 
+from pydantic import ValidationError
+
+from shared.errors import ErrorCode, error_text
 from shared.envelope import (
     ArchiveSession,
     CancelTurn,
@@ -75,6 +79,30 @@ class CoreController:
     # -- 发射辅助 ----------------------------------------------------------
     def emit(self, event) -> None:
         self.bridge.emit_event(event)
+
+    def _report(self, scope: str, code: str, message: str, detail: str | None = None) -> None:
+        """回发错误事件。message 必须是可读中文（不得以码充文案，spec rev5 §4）。"""
+        self.emit(ErrorReport(scope=scope, code=code, message=message, detail=detail))
+
+    def _persist(
+        self,
+        action: str,
+        fn: Callable[[], object],
+        message: str,
+        scope: str = "config",
+    ) -> bool:
+        """执行一次落盘/凭据写入动作；失败**必须**上报，不得只留日志（spec rev8 §5）。
+
+        边界处统一收口：凭据管理器与文件系统的异常类型名不可控，故此处宽捕获，
+        明细进日志（去敏：不把异常正文回显给界面，避免带出路径与凭据信息）。
+        """
+        try:
+            fn()
+            return True
+        except Exception as exc:  # noqa: BLE001 - 边界收口，异常明细只进日志
+            log.exception("%s 失败", action)
+            self._report(scope, ErrorCode.STORAGE_ERROR.value, message, type(exc).__name__)
+            return False
 
     def _emit_providers(self) -> None:
         self.emit(ProviderList(providers=self.gateway.list_providers(), slots=self.gateway.get_slots()))
@@ -157,6 +185,16 @@ class CoreController:
     def _on_switch(self, request: SwitchModel) -> None:
         if not self.current_session_id:
             return
+        # 会话级覆盖目前只落地 main 槽位（`SessionMeta` 只有 `main_model`，其余槽位随轮次启用）。
+        # 早前实现把任何槽位的模型都写进 `main_model`：既污染主模型，又让 `model.switch`
+        # 事件声称的槽位与生效对象不一致（spec rev8 §3）。此处显式拒绝而非静默改错对象。
+        if request.slot != "main":
+            self._report(
+                "session",
+                ErrorCode.INVALID_REQUEST.value,
+                f"会话级模型切换目前仅支持 main 槽位；{request.slot} 随轮次启用。",
+            )
+            return
         self.store.set_model(self.current_session_id, request.model_id, request.slot)
         self._emit_health()
 
@@ -168,7 +206,11 @@ class CoreController:
         绑定是用户直接操作（同类于 09 §7 白名单编辑），不走过确认关卡；
         归属解析留给调用路径，失败以 provider_not_found 呈现（rev1 §7）。
         """
-        self.gateway.set_slot(request.slot, request.model_id)
+        self._persist(
+            "全局槽位绑定",
+            lambda: self.gateway.set_slot(request.slot, request.model_id),
+            "槽位绑定保存失败：请检查数据目录是否可写。",
+        )
         self._emit_providers()
         self._emit_health()
 
@@ -217,11 +259,19 @@ class CoreController:
 
     # -- 供应商 ------------------------------------------------------------
     def _on_upsert(self, request: ProviderUpsert) -> None:
-        self.gateway.upsert_provider(request.provider, request.api_key)
+        self._persist(
+            "供应商写入",
+            lambda: self.gateway.upsert_provider(request.provider, request.api_key),
+            "供应商保存失败：请检查系统凭据管理器与数据目录是否可用。",
+        )
         self._emit_providers()
 
     def _on_provider_delete(self, request: ProviderDelete) -> None:
-        self.gateway.delete_provider(request.provider_id)
+        self._persist(
+            "供应商删除",
+            lambda: self.gateway.delete_provider(request.provider_id),
+            "供应商删除失败：请检查数据目录是否可写。",
+        )
         self._emit_providers()
 
     def _on_test(self, request: TestConnection) -> None:
@@ -242,14 +292,36 @@ class CoreController:
     def _on_settings(self, request: SettingsUpdate) -> None:
         settings = self.config_store.load("settings")
         data = request.data
-        if request.section == "context":
-            settings.context = ContextSettings.model_validate({**settings.context.model_dump(), **data})
-        elif request.section == "network":
-            settings.network = NetworkSettings.model_validate({**settings.network.model_dump(), **data})
-        elif request.section == "logging":
-            settings.logging = LoggingSettings.model_validate({**settings.logging.model_dump(), **data})
-        elif request.section == "ui":
-            settings.ui = UISettings.model_validate({**settings.ui.model_dump(), **data})
-        self.config_store.save("settings", settings)
+        try:
+            if request.section == "context":
+                settings.context = ContextSettings.model_validate(
+                    {**settings.context.model_dump(), **data}
+                )
+            elif request.section == "network":
+                settings.network = NetworkSettings.model_validate(
+                    {**settings.network.model_dump(), **data}
+                )
+            elif request.section == "logging":
+                settings.logging = LoggingSettings.model_validate(
+                    {**settings.logging.model_dump(), **data}
+                )
+            elif request.section == "ui":
+                settings.ui = UISettings.model_validate({**settings.ui.model_dump(), **data})
+        except ValidationError as exc:
+            # A10：schema 不符必须回 invalid_request。早前此处异常直抛，被核心线程整条吞掉：
+            # 设置既未落盘、也无任何提示，界面停在无效取值上（spec rev8 §4）。
+            self._report(
+                "system",
+                ErrorCode.INVALID_REQUEST.value,
+                f"设置取值不合法（{request.section} 分区），已保持原值。",
+                str(exc)[:300],
+            )
+            return
+        if not self._persist(
+            "设置写入",
+            lambda: self.config_store.save("settings", settings),
+            "设置保存失败：请检查数据目录是否可写。",
+        ):
+            return
         self.gateway.reload_settings()
         self._emit_settings()
