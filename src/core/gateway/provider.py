@@ -89,6 +89,10 @@ def _map_exception(exc: Exception) -> GatewayError:
     name = type(exc).__name__
     if "Authentication" in name or "Permission" in name:
         return GatewayAuthError("凭据不可用")
+    if "Timeout" in name:
+        # SDK/httpx 的各类超时（APITimeoutError / ReadTimeout / ConnectTimeout）
+        # 一律归「静默超时」语义，否则会退化成笼统的 network_error（spec rev8 §2）。
+        return GatewayTimeout("静默超时：供应商在时限内未返回数据")
     if "NotFound" in name:
         return GatewayProtocolError(
             "该模型在供应商不可用：供应商未提供此模型", code="model_not_found"
@@ -121,7 +125,9 @@ class ModelGateway(IModelGateway):
     # -- 客户端 ------------------------------------------------------------
     @staticmethod
     def _default_client(base_url: str, api_key: str) -> openai.OpenAI:
-        return openai.OpenAI(base_url=base_url, api_key=api_key)
+        # max_retries=0：重试策略由网关自己持有（首 token 前至多 1 次，见 _stream_with_retry）。
+        # 若放任 SDK 默认重试，单次 60s 静默会被放大到数倍，A8「60s 无增量即失败」不成立。
+        return openai.OpenAI(base_url=base_url, api_key=api_key, max_retries=0)
 
     def _client(self, base_url: str, api_key: str) -> object:
         ck = (base_url, api_key)
@@ -298,32 +304,52 @@ class ModelGateway(IModelGateway):
         on_delta: Callable[[str], None],
         holder: dict,
     ) -> Usage:
+        """单次流式调用。
+
+        静默超时是**双重保险**：
+        1. `timeout=` 交给 SDK —— 它约束「两次数据之间的等待」，故真·静默（一个 chunk 都不来）
+           也会在阈值处中止；否则循环里的判定永远等不到下一次迭代，取消同样无法生效（spec rev8 §1）。
+        2. 循环内判定 —— 兜底自定义客户端（如测试替身）忽略 `timeout` 的情形。
+        """
         stream = client.chat.completions.create(
             model=model_id,
             messages=messages,
             stream=True,
             stream_options={"include_usage": True},
+            timeout=self.silent_timeout,
         )
         prompt = completion = total = 0
         last = time.monotonic()
-        for chunk in stream:
-            if cancel_token is not None and cancel_token.is_cancelled():
-                break
-            if time.monotonic() - last > self.silent_timeout:
-                raise GatewayTimeout("静默超时")
-            choices = getattr(chunk, "choices", None)
-            if choices:
-                delta = getattr(choices[0], "delta", None)
-                content = getattr(delta, "content", None) if delta is not None else None
-                if content:
-                    on_delta(content)
-                    holder["got_delta"] = True
-                    last = time.monotonic()
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                prompt = getattr(chunk_usage, "prompt_tokens", 0) or 0
-                completion = getattr(chunk_usage, "completion_tokens", 0) or 0
-                total = getattr(chunk_usage, "total_tokens", 0) or 0
+        try:
+            for chunk in stream:
+                now = time.monotonic()
+                if cancel_token is not None and cancel_token.is_cancelled():
+                    break
+                if now - last > self.silent_timeout:
+                    raise GatewayTimeout("静默超时")
+                # 任何 chunk 都是「链路仍在活动」的证据；只认 content 会把
+                # 推理模型的空 content 阶段误判成静默。
+                last = now
+                choices = getattr(chunk, "choices", None)
+                if choices:
+                    delta = getattr(choices[0], "delta", None)
+                    content = getattr(delta, "content", None) if delta is not None else None
+                    if content:
+                        on_delta(content)
+                        holder["got_delta"] = True
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    prompt = getattr(chunk_usage, "prompt_tokens", 0) or 0
+                    completion = getattr(chunk_usage, "completion_tokens", 0) or 0
+                    total = getattr(chunk_usage, "total_tokens", 0) or 0
+        finally:
+            # 中断/异常提前退出时显式关闭 SSE 流，避免连接悬挂到 GC 才释放。
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - 关闭失败不影响既有结果
+                    log.debug("关闭模型流失败", exc_info=True)
         return Usage(
             prompt_tokens=prompt,
             completion_tokens=completion,

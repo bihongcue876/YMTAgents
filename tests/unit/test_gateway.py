@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
-from core.gateway.errors import GatewayAuthError, GatewayBlocked, GatewayProtocolError
+from core.gateway.errors import (
+    GatewayAuthError,
+    GatewayBlocked,
+    GatewayProtocolError,
+    GatewayTimeout,
+)
 from core.gateway.keyring_store import KeyringStore
 from core.gateway.provider import ModelGateway
 from core.gateway.whitelist import Whitelist, domain_of
@@ -231,4 +238,101 @@ def test_error_text_covers_every_code():
 
     assert set(ERROR_TEXT) == {c.value for c in ErrorCode}
     assert all(isinstance(v, str) and v.strip() for v in ERROR_TEXT.values())
+
+
+# -- 静默超时与取消（spec rev8 §1） ------------------------------------------
+
+
+class _StallingStream:
+    """静默 silent_s 秒后才吐第一块；用于验证「真·静默」不再无法中止。"""
+
+    def __init__(self, silent_s: float, chunks=()) -> None:
+        self._silent_s = silent_s
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def __iter__(self):
+        import time
+
+        time.sleep(self._silent_s)
+        yield from self._chunks
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _CapturingClient:
+    """记录 create() 实收参数，并返回指定流。"""
+
+    def __init__(self, stream_factory) -> None:
+        self.kwargs: dict = {}
+        outer = self
+
+        class _Completions:
+            def create(self, **kw):
+                outer.kwargs.update(kw)
+                return stream_factory()
+
+        self.chat = types.SimpleNamespace(completions=_Completions())
+
+
+def make_gateway_with_client(tmp_path, client, silent_timeout: float | None = None) -> ModelGateway:
+    store = ConfigStore(tmp_path)
+    store.ensure_defaults()
+    seed_store(store)
+    backend = FakeKeyring()
+    backend.set_password("ymt", "prv_1", "sk-test")
+    kw = {} if silent_timeout is None else {"silent_timeout": silent_timeout}
+    return ModelGateway(
+        store, keyring=KeyringStore(backend=backend), client_factory=lambda _b, _k: client, **kw
+    )
+
+
+def test_stream_chat_passes_silence_timeout_to_client(tmp_path):
+    """回归锚点：create() 必须带 timeout，否则真·静默无法中止。
+
+    实证：旧实现既不传 timeout，又只在下一次 chunk 到达时才判定静默 ——
+    静默 2.0s 而阈值 0.5s 时耗时 2.00s 且**正常返回**（SDK 默认 600s 且自带重试）。
+    """
+    client = _CapturingClient(lambda: iter([]))
+    gateway = make_gateway_with_client(tmp_path, client, silent_timeout=0.5)
+    gateway.stream_chat("sess_1", 0, "m1", [{"role": "user", "content": "hi"}], None, lambda _s: None)
+    assert client.kwargs.get("timeout") == 0.5
+    assert client.kwargs.get("stream") is True
+
+
+def test_stalled_stream_raises_gateway_timeout_and_closes_stream(tmp_path):
+    """替身不理会 timeout 时由循环内判定兜底；提前退出必须关闭流。"""
+    stream = _StallingStream(0.3, [_Chunk("迟到")])
+    gateway = make_gateway_with_client(
+        tmp_path, _CapturingClient(lambda: stream), silent_timeout=0.05
+    )
+    with pytest.raises(GatewayTimeout):
+        gateway.stream_chat(
+            "sess_1", 0, "m1", [{"role": "user", "content": "hi"}], None, lambda _s: None
+        )
+    assert stream.closed is True
+
+
+def test_timeout_exceptions_map_to_gateway_timeout():
+    """SDK/httpx 超时归「静默超时」，不得退化成笼统 network_error（A8 语义）。"""
+    from core.gateway.provider import _map_exception
+
+    class APITimeoutError(Exception):
+        pass
+
+    class ReadTimeout(Exception):
+        pass
+
+    for exc in (APITimeoutError(), ReadTimeout()):
+        mapped = _map_exception(exc)
+        assert isinstance(mapped, GatewayTimeout)
+        assert mapped.code == "network_error"
+        assert "静默超时" in str(mapped)
+
+
+def test_default_client_disables_sdk_level_retries():
+    """重试策略归网关所有：SDK 默认重试会把单次 60s 静默放大数倍。"""
+    client = ModelGateway._default_client("https://api.test.com/v1", "sk-x")
+    assert client.max_retries == 0
 
