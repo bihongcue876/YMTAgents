@@ -45,7 +45,9 @@ class MainWindow(QMainWindow):
         self.models = ModelsPage()
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
-        self._apply_theme(theme.DEFAULT_THEME)  # 首帧即带主题，避免默认色闪现
+        self._font_size: str | None = None
+        # 首帧即带外观，避免持久化暗色/大字号启动时的默认外观闪现
+        self._apply_appearance(theme.DEFAULT_THEME, theme.DEFAULT_FONT_SIZE)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.chat)
@@ -100,18 +102,21 @@ class MainWindow(QMainWindow):
         if self._current_session_id:
             self.bus.submit(RenameSession(session_id=self._current_session_id, title=title))
 
-    # -- 主题 --------------------------------------------------------------
-    def _apply_theme(self, name: str | None) -> None:
-        """应用主题：全局 QSS 换肤 + 需自渲染的视图重绘。主题未变则不动。
+    # -- 外观 --------------------------------------------------------------
+    def _apply_appearance(self, name: str | None, font_size: str | None) -> None:
+        """应用外观（主题 + 字号）：全局 QSS + 需自渲染的视图重绘。
 
-        settings.state 在每次设置更新时都会发，故此处必须幂等且廉价。
+        settings.state 在每次设置更新时都会发，故此处必须幂等且廉价；
+        两项各自判变，改其一不牵连另一项重渲染。
         """
         used = theme.palette(name).name
-        if used == self._theme:
+        used_font = theme.font_level(font_size).name
+        if used == self._theme and used_font == self._font_size:
             return
         self._theme = used
-        theme.apply(used)
-        self.chat.set_theme(used)
+        self._font_size = used_font
+        theme.apply(used, used_font)
+        self.chat.set_theme(used, used_font)
         self.models.set_theme(used)
 
     # -- 事件分发 ----------------------------------------------------------
@@ -145,5 +150,6 @@ class MainWindow(QMainWindow):
         elif t == "provider.test.result":
             self.models.on_test_result(event)
         elif t == "settings.state":
-            self._apply_theme(event.data.get("ui", {}).get("theme"))
+            ui = event.data.get("ui", {})
+            self._apply_appearance(ui.get("theme"), ui.get("font_size"))
             self.settings.load_settings(event.data)

@@ -32,16 +32,21 @@ class SettingsPage(QWidget):
         self._root = Path(data_root) if data_root else Path(".")
 
         title = QLabel("系统设置")
-        title.setStyleSheet("font-size:16px;font-weight:600;")
+        title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
         self._loading = False
 
-        # 外观（主题）
+        # 外观（主题 + 字号）
         self._theme = QComboBox()
         for name in theme.theme_names():
             self._theme.addItem(theme.palette(name).label, name)
         self._theme.currentIndexChanged.connect(self._on_theme_changed)
+        self._font_size = QComboBox()
+        for name in theme.font_size_names():
+            self._font_size.addItem(theme.font_level(name).label, name)
+        self._font_size.currentIndexChanged.connect(self._on_font_size_changed)
         appearance_form = QFormLayout()
         appearance_form.addRow("主题", self._theme)
+        appearance_form.addRow("字号", self._font_size)
 
         # 上下文策略
         self._history = QSpinBox()
@@ -136,12 +141,21 @@ class SettingsPage(QWidget):
         if name:
             self.settings_update.emit("ui", {"theme": name})
 
+    def _on_font_size_changed(self, index: int) -> None:
+        if self._loading:
+            return
+        name = self._font_size.itemData(index)
+        if name:
+            self.settings_update.emit("ui", {"font_size": name})
+
     # -- 白名单 ------------------------------------------------------------
     def load_settings(self, data: dict) -> None:
         self._loading = True
         ui = data.get("ui", {})
         theme_index = self._theme.findData(ui.get("theme", theme.DEFAULT_THEME))
         self._theme.setCurrentIndex(theme_index if theme_index >= 0 else 0)
+        font_index = self._font_size.findData(ui.get("font_size", theme.DEFAULT_FONT_SIZE))
+        self._font_size.setCurrentIndex(font_index if font_index >= 0 else 0)
         context = data.get("context", {})
         self._history.setValue(int(context.get("history_turns", 20)))
         self._reserve.setValue(int(context.get("reserve", 4096)))

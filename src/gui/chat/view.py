@@ -46,9 +46,9 @@ class ChatView(QWidget):
     def set_title(self, title: str) -> None:
         self.header.set_title(title)
 
-    def set_theme(self, name: str | None) -> None:
-        """主题切换：消息流需整帧重渲染，其余控件由全局 QSS 换肤。"""
-        self.messages.set_theme(name)
+    def set_theme(self, name: str | None, font_size: str | None = None) -> None:
+        """外观切换：消息流需整帧重渲染，其余控件由全局 QSS 换肤/重排。"""
+        self.messages.set_theme(name, font_size)
 
     def load_session(self, title: str, events: list[dict]) -> None:
         self.header.set_title(title)

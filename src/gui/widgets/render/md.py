@@ -5,7 +5,8 @@
 - ANSI 转义（shell 输出）→ 带色 HTML
 输出喂给同一 QWebEngineView（本地离线，无外部 CDN）。
 
-主题：颜色一律来自 `gui.theme`（单一取色来源），本模块只保留结构性排版规则。
+外观：颜色与字号一律来自 `gui.theme`（单一取色 / 取字号来源），
+本模块只保留字体族、行高、间距等结构性排版规则。
 Pygments 输出的 class 名与样式无关，故高亮回调无需感知主题，仅 CSS 需要。
 """
 
@@ -20,7 +21,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.util import ClassNotFound
 
-from gui.theme import DEFAULT_THEME, ansi_colors, markdown_css, pygments_style
+from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME, ansi_colors, markdown_css, pygments_style
 
 _FORMATTER = HtmlFormatter(cssclass="highlight")
 _FORMATTERS: dict[str, HtmlFormatter] = {}
@@ -50,10 +51,10 @@ _MD = MarkdownIt("commonmark", {"highlight": _highlight}).enable("table").enable
 _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-body {{ font-family: system-ui, "Segoe UI", sans-serif; font-size: 14px; line-height: 1.6;
+body {{ font-family: system-ui, "Segoe UI", sans-serif; line-height: 1.6;
         margin: 8px 12px; }}
 pre {{ padding: 8px 10px; border-radius: 6px; overflow-x: auto; }}
-code {{ font-family: Consolas, "Courier New", monospace; font-size: 13px; }}
+code {{ font-family: Consolas, "Courier New", monospace; }}
 table {{ border-collapse: collapse; }}
 th, td {{ border: 1px solid; padding: 4px 8px; }}
 blockquote {{ border-left: 3px solid; margin: 0; padding-left: 10px; }}
@@ -62,16 +63,18 @@ blockquote {{ border-left: 3px solid; margin: 0; padding-left: 10px; }}
 .user .bubble {{ border-radius: 12px; padding: 8px 12px;
         max-width: 78%; white-space: pre-wrap; }}
 .assistant {{ display: block; }}
-.usage {{ font-size: 12px; margin-top: 4px; }}
-.tag {{ font-size: 12px; margin-left: 6px; }}
+.usage {{ margin-top: 4px; }}
+.tag {{ margin-left: 6px; }}
 .error {{ border: 1px solid; border-radius: 6px; padding: 6px 10px; }}
 {theme_css}
 {css}
 </style></head><body>{body}</body></html>"""
 
 
-def _page(theme: str | None, body: str, css: str = "") -> str:
-    return _TEMPLATE.format(theme_css=markdown_css(theme), css=css, body=body)
+def _page(
+    theme: str | None, body: str, css: str = "", font_size: str | None = DEFAULT_FONT_SIZE
+) -> str:
+    return _TEMPLATE.format(theme_css=markdown_css(theme, font_size), css=css, body=body)
 
 
 def _bubble_user(text: str) -> str:
@@ -97,7 +100,11 @@ def _block_error(message: str, detail: str | None) -> str:
     return f'<div class="msg error">{text}</div>'
 
 
-def messages_to_html(messages: list[dict], theme: str | None = DEFAULT_THEME) -> str:
+def messages_to_html(
+    messages: list[dict],
+    theme: str | None = DEFAULT_THEME,
+    font_size: str | None = DEFAULT_FONT_SIZE,
+) -> str:
     """把消息模型列表渲染为整段消息流 HTML。"""
     parts: list[str] = []
     for m in messages:
@@ -110,21 +117,27 @@ def messages_to_html(messages: list[dict], theme: str | None = DEFAULT_THEME) ->
             )
         elif role == "error":
             parts.append(_block_error(m.get("content", ""), m.get("detail")))
-    return _page(theme, "\n".join(parts), _pygments_css(theme))
+    return _page(theme, "\n".join(parts), _pygments_css(theme), font_size)
 
 
 _ANSI_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 
-def markdown_to_html(text: str, theme: str | None = DEFAULT_THEME) -> str:
-    return _page(theme, _MD.render(text or ""), _pygments_css(theme))
+def markdown_to_html(
+    text: str, theme: str | None = DEFAULT_THEME, font_size: str | None = DEFAULT_FONT_SIZE
+) -> str:
+    return _page(theme, _MD.render(text or ""), _pygments_css(theme), font_size)
 
 
-def plain_to_html(text: str, theme: str | None = DEFAULT_THEME) -> str:
-    return _page(theme, f"<pre>{_html.escape(text or '')}</pre>")
+def plain_to_html(
+    text: str, theme: str | None = DEFAULT_THEME, font_size: str | None = DEFAULT_FONT_SIZE
+) -> str:
+    return _page(theme, f"<pre>{_html.escape(text or '')}</pre>", "", font_size)
 
 
-def ansi_to_html(text: str, theme: str | None = DEFAULT_THEME) -> str:
+def ansi_to_html(
+    text: str, theme: str | None = DEFAULT_THEME, font_size: str | None = DEFAULT_FONT_SIZE
+) -> str:
     """极简 ANSI SGR 解析（颜色 / 加粗 / 重置）。"""
     colors = ansi_colors(theme)
     out: list[str] = []
@@ -151,12 +164,17 @@ def ansi_to_html(text: str, theme: str | None = DEFAULT_THEME) -> str:
     out.append(_html.escape(text[pos:]))
     if open_span:
         out.append("</span>")
-    return _page(theme, f"<pre>{''.join(out)}</pre>")
+    return _page(theme, f"<pre>{''.join(out)}</pre>", "", font_size)
 
 
-def render_to_html(kind: str, text: str, theme: str | None = DEFAULT_THEME) -> str:
+def render_to_html(
+    kind: str,
+    text: str,
+    theme: str | None = DEFAULT_THEME,
+    font_size: str | None = DEFAULT_FONT_SIZE,
+) -> str:
     if kind == "markdown":
-        return markdown_to_html(text, theme)
+        return markdown_to_html(text, theme, font_size)
     if kind == "ansi":
-        return ansi_to_html(text, theme)
-    return plain_to_html(text, theme)
+        return ansi_to_html(text, theme, font_size)
+    return plain_to_html(text, theme, font_size)

@@ -150,7 +150,7 @@ class ModelsPage(QWidget):
         self._badges: dict[str, QLabel] = {}
 
         title = QLabel("模型配置")
-        title.setStyleSheet("font-size:16px;font-weight:600;")
+        title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
         add = QPushButton("添加供应商")
         add.clicked.connect(self._on_add)
 
