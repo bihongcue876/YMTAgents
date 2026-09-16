@@ -3,6 +3,10 @@
 纯函数：同一输入必得同一输出，可独立测试。
 组装顺序：persona prompt → 记忆级联 → 挂载文件 → 环境陈述 → 历史。
 淘汰规则：files 截断（不剔除）→ history 丢最旧保最近 N。
+两条不变量（spec rev8）：
+- `file_truncate` 以 **token** 为口径，比较与截断同单位；
+- 淘汰**永不触及当前回合的用户消息**及其之后内容；若因此仍超窗，
+  由调用方（loop）以 `context_overflow` 上报，而不是发出必然失败的请求。
 """
 
 from __future__ import annotations
@@ -73,6 +77,32 @@ def _limit_turns(messages: list[dict], max_turns: int) -> list[dict]:
     return messages[user_idx[-max_turns] :]
 
 
+def _last_user_index(messages: list[dict]) -> int:
+    """最后一条 user 消息的下标；无 user 消息时返回 0。"""
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return i
+    return 0
+
+
+def _truncate_to_tokens(text: str, limit: int) -> str:
+    """按 **token** 预算截断文本。
+
+    口径必须与比较端一致：`file_truncate` 的语义是 token 近似（schema / docs 05 §1.5），
+    早前实现用 token 判定却按**字符**切（`text[:limit]`），对中英混排会得到完全不同的实际上限。
+    `limit <= 0` 表示不截断（沿用既有约定）。
+    """
+    if limit <= 0 or not text:
+        return text
+    if estimate_tokens(text) <= limit:
+        return text
+    cut = len(text)
+    while cut > 1 and estimate_tokens(text[:cut]) > limit:
+        tokens = estimate_tokens(text[:cut])
+        cut = max(1, int(cut * limit / tokens))
+    return text[:cut]
+
+
 class IContextAssembler(ABC):
     @abstractmethod
     def build(
@@ -93,8 +123,7 @@ class ContextAssembler(IContextAssembler):
         config = config_snapshot
 
         files_block = "\n\n".join(f"[文件：{name}]\n{content}" for name, content in config.files)
-        if estimate_tokens(files_block) > config.file_truncate > 0:
-            files_block = files_block[: config.file_truncate]
+        files_block = _truncate_to_tokens(files_block, config.file_truncate)
         env = _env_statement(config)
 
         system_text = "\n\n".join(p for p in (config.system_prompt, config.memory) if p)
@@ -104,16 +133,24 @@ class ContextAssembler(IContextAssembler):
         def hist_tokens() -> int:
             return sum(estimate_tokens(m["content"]) for m in history)
 
-        def total() -> int:
+        def used() -> int:
+            """**输入**侧用量（不含 reserve）。"""
             return (
                 estimate_tokens(system_text)
                 + estimate_tokens(env)
                 + estimate_tokens(files_block)
                 + hist_tokens()
-                + config.reserve
             )
 
-        while history and total() > token_budget:
+        def total() -> int:
+            return used() + config.reserve
+
+        # 淘汰判据必须拿「输入侧用量」比预算：`token_budget = window - reserve` 本已是
+        # 给输入留出的额度，若再拿含 reserve 的 total 去比，等于把 reserve 扣两次，
+        # 会淘汰掉远超需要的上下文（spec rev8 §2）。
+        while used() > token_budget:
+            if _last_user_index(history) <= 0:
+                break
             history.pop(0)
 
         content = "\n\n".join(p for p in (system_text, files_block, env) if p)

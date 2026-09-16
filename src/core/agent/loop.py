@@ -138,6 +138,20 @@ class AgentLoop(IAgentLoop):
         self.store.append_event(session_id, usage)
         self.emit(usage)
 
+        # 超窗本地拦截（spec §7 / rev8 §2）：淘汰已保不住当前提问时，请求必然被上游拒绝，
+        # 且往往被上游报成 model_not_found 一类误导性错误。判据取**输入侧**用量
+        # （total 去掉 reserve）—— 窗口约束的是送进去的上下文；reserve 只是输出预留。
+        input_tokens = usage.total - usage.segments.get("reserve", 0)
+        if config.window and input_tokens > config.window:
+            self._fail(
+                session_id,
+                turn_seq,
+                ErrorCode.CONTEXT_OVERFLOW.value,
+                f"上下文已超出模型窗口（估算 {input_tokens} tokens > {config.window}）："
+                "请在「系统设置 → 上下文策略」下调历史保留轮数或挂载文件截断上限。",
+            )
+            return
+
         self.emit(TurnStatus(turn_seq=turn_seq, state="calling"))
         token = CancelToken()
         self._active[session_id] = token
