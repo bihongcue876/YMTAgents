@@ -7,7 +7,7 @@ import os
 
 from PySide6.QtWidgets import QTextBrowser, QVBoxLayout, QWidget
 
-from gui.theme import DEFAULT_THEME
+from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME
 from gui.widgets.render.md import markdown_to_html
 
 
@@ -38,5 +38,11 @@ class RendererView(QWidget):
     def set_html(self, html: str) -> None:
         self._view.setHtml(html)
 
-    def set_markdown(self, text: str, theme: str | None = DEFAULT_THEME) -> None:
-        self._view.setHtml(markdown_to_html(text, theme))
+    def set_markdown(
+        self,
+        text: str,
+        theme: str | None = DEFAULT_THEME,
+        font_size: str | None = DEFAULT_FONT_SIZE,
+    ) -> None:
+        """渲染 Markdown；字号档位必须一并透传，否则调用方无法随外观设置缩放。"""
+        self._view.setHtml(markdown_to_html(text, theme, font_size))

@@ -6,6 +6,7 @@ from app import bootstrap as bootstrap_mod
 from app import paths
 from gui import theme
 from gui.main_window import MainWindow
+from gui.widgets.render.view import RendererView
 from shared.envelope import NewSession, SendMessage, SettingsUpdate
 from tests.mocks.gateway import MockGateway
 
@@ -72,3 +73,20 @@ def test_main_window_applies_font_size(tmp_path, monkeypatch, qapp):
         assert window._font_size == "normal"
     finally:
         ctx.worker.stop()
+
+
+def test_renderer_view_forwards_font_size(monkeypatch, qapp):
+    """回归锚点：`RendererView.set_markdown` 必须透传字号档位。
+
+    此前该入口只透传主题，调用方即便拿到用户字号也无处可传（rev7 遗留缺口）。
+    """
+    captured: dict = {}
+
+    def fake_md(text, theme=None, font_size=None):
+        captured["args"] = (text, theme, font_size)
+        return "<html></html>"
+
+    monkeypatch.setattr("gui.widgets.render.view.markdown_to_html", fake_md)
+    view = RendererView()
+    view.set_markdown("hi", "dark", "xlarge")
+    assert captured["args"] == ("hi", "dark", "xlarge")
