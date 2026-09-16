@@ -48,3 +48,27 @@ def test_main_window_dispatch(tmp_path, monkeypatch, qapp):
             ctx.controller.handle(SettingsUpdate(section="ui", data={"theme": "light"}))
     finally:
         ctx.worker.stop()
+
+
+def test_main_window_applies_font_size(tmp_path, monkeypatch, qapp):
+    """字号切换：settings.update("ui") -> 全局 QSS 重排 + 消息流整帧重渲染。"""
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
+    window = MainWindow(ctx.bridge, data_root=str(ctx.root))
+    try:
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        assert window._font_size == theme.DEFAULT_FONT_SIZE
+
+        ctx.controller.handle(SettingsUpdate(section="ui", data={"font_size": "xlarge"}))
+        qapp.processEvents()
+        assert window._font_size == "xlarge"
+        assert f"font-size: {theme.font_px('ui', 'xlarge')}px" in (qapp.styleSheet() or "")
+        assert window.chat.messages._font_size == "xlarge"
+
+        # 回到标准档（默认），确认可逆
+        ctx.controller.handle(SettingsUpdate(section="ui", data={"font_size": "normal"}))
+        qapp.processEvents()
+        assert window._font_size == "normal"
+    finally:
+        ctx.worker.stop()
