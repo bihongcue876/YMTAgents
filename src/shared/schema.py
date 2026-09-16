@@ -60,9 +60,10 @@ class LoggingSettings(BaseModel):
 
 
 class UISettings(BaseModel):
-    """UI 选项。theme 取值与 `gui.theme.PALETTES` 一致（docs 05 §1）。"""
+    """UI 选项。取值与 `gui.theme` 的 `PALETTES` / `FONT_LEVELS` 一致（docs 05 §1）。"""
 
     theme: Literal["light", "dark"] = "light"
+    font_size: Literal["small", "normal", "large", "xlarge"] = "normal"
 
 
 class SettingsConfig(BaseModel):
