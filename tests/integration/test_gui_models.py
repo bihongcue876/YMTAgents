@@ -136,17 +136,35 @@ def test_global_shortcut_table_copy(qapp, key, action, payload):
 
 
 def test_model_picker_bind_main_option(qapp):
-    """main 未绑定时默认勾选「同时设为 main」；已绑定时该选项根本不出现。"""
+    """有绑定提示时默认勾选；无提示（main 已正确绑定）则该项不出现。"""
     from gui.pages.models import ModelPickerDialog
 
-    dialog = ModelPickerDialog(["m1", "m2"], allow_bind_main=True)
+    dialog = ModelPickerDialog(["m1", "m2"], bind_hint="同时把第一个选中的模型设为 main 槽位")
     assert dialog.should_bind_main() is True
     dialog._bind_main.setChecked(False)
     assert dialog.should_bind_main() is False
 
-    plain = ModelPickerDialog(["m1"], allow_bind_main=False)
+    plain = ModelPickerDialog(["m1"], bind_hint=None)
     assert plain._bind_main is None
     assert plain.should_bind_main() is False
+
+
+def test_main_bind_hint_covers_three_cases(qapp):
+    """未绑定 → 提示；悬空绑定 → 提示改绑并说明当前值；正常绑定 → 不打扰。"""
+    from shared.envelope import ProviderSpec
+
+    page = ModelsPage()
+    provider = ProviderSpec(id="prv_1", name="P", base_url="https://api.x.com/v1", models=[])
+
+    page.update_providers([provider], {"main": None})
+    assert page._main_bind_hint(["m-a"]) is not None
+
+    page.update_providers([provider], {"main": "已废弃的模型"})
+    hint = page._main_bind_hint(["m-a", "m-b"])
+    assert hint is not None and "已废弃的模型" in hint
+
+    page.update_providers([provider], {"main": "m-a"})
+    assert page._main_bind_hint(["m-a", "m-b"]) is None
 
 
 def _patch_picker(monkeypatch, selected):
@@ -185,18 +203,61 @@ def test_models_page_binds_main_after_import(qapp, monkeypatch):
 
 
 def test_models_page_does_not_rebind_when_main_already_set(qapp, monkeypatch):
-    """main 已绑定则不打扰：不出现绑定选项，也不额外发 slot.set。"""
+    """main 已绑定且**就在候选内**则不打扰：不出现绑定选项，也不额外发 slot.set。"""
     from shared.envelope import ModelSpec, ProviderModels, ProviderSpec
 
     page = ModelsPage()
     page.update_providers(
         [ProviderSpec(id="prv_1", name="P", base_url="https://api.x.com/v1", models=[])],
-        {"main": "already"},
+        {"main": "m-a"},
     )
     slots: list = []
     page.upsert_requested.connect(lambda *_: None)
     page.slot_requested.connect(lambda slot, mid: slots.append((slot, mid)))
-    _patch_picker(monkeypatch, [ModelSpec(id="m-a")])
+    _patch_picker(monkeypatch, [ModelSpec(id="m-a"), ModelSpec(id="m-b")])
 
-    page.on_models_result(ProviderModels(provider_id="prv_1", ok=True, models=["m-a"], error=None))
+    page.on_models_result(
+        ProviderModels(provider_id="prv_1", ok=True, models=["m-a", "m-b"], error=None)
+    )
     assert slots == []
+
+
+def test_models_page_rebinds_dangling_main(qapp, monkeypatch):
+    """回归锚点：main 指着端点不再提供的模型时，导入必须顺带改绑。
+
+    这正是「换了模型表、main 还指着旧 ID」的真实情形：此时 main 已是悬空绑定，
+    若不提示改绑，用户勾完模型仍然不能对话，还得自己去找槽位下拉。
+    """
+    from shared.envelope import ModelSpec, ProviderModels, ProviderSpec
+
+    page = ModelsPage()
+    page.update_providers(
+        [
+            ProviderSpec(
+                id="prv_1",
+                name="P",
+                base_url="https://api.deepseek.com/v1",
+                models=[ModelSpec(id="已废弃的模型")],
+            )
+        ],
+        {"main": "已废弃的模型"},
+    )
+    upserts: list = []
+    slots: list = []
+    page.upsert_requested.connect(lambda spec, key: upserts.append(spec))
+    page.slot_requested.connect(lambda slot, mid: slots.append((slot, mid)))
+    _patch_picker(
+        monkeypatch, [ModelSpec(id="deepseek-v4-pro"), ModelSpec(id="deepseek-flash")]
+    )
+
+    page.on_models_result(
+        ProviderModels(
+            provider_id="prv_1",
+            ok=True,
+            models=["deepseek-v4-pro", "deepseek-flash"],
+            error=None,
+        )
+    )
+
+    assert [m.id for m in upserts[0].models] == ["deepseek-v4-pro", "deepseek-flash"]
+    assert slots == [("main", "deepseek-v4-pro")]

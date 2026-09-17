@@ -256,7 +256,7 @@ class ModelPickerDialog(QDialog):
         self,
         candidates: list[str],
         known: dict[str, int] | None = None,
-        allow_bind_main: bool = False,
+        bind_hint: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -273,10 +273,11 @@ class ModelPickerDialog(QDialog):
         hint = QLabel("勾选后点「确定」即写入该供应商的模型表；上下文窗口未知的按 0 记，可稍后编辑。")
         hint.setWordWrap(True)
 
-        # main 槽位还没绑定时，顺手绑上第一个选中的模型 —— 否则「导入了模型但还不能对话」
+        # main 没绑、或绑了个候选里没有的模型时，顺手绑到第一个选中项 ——
+        # 否则「导入了模型但还不能对话」，用户还得再去找一次槽位下拉。
         self._bind_main: QCheckBox | None = None
-        if allow_bind_main:
-            self._bind_main = QCheckBox("同时把第一个选中的模型设为 main 槽位")
+        if bind_hint:
+            self._bind_main = QCheckBox(bind_hint)
             self._bind_main.setChecked(True)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -483,7 +484,7 @@ class ModelsPage(QWidget):
 
         known = {m.id: m.ctx_window for m in provider.models}
         dialog = ModelPickerDialog(
-            event.models, known, allow_bind_main=not self._slots.get("main"), parent=self
+            event.models, known, bind_hint=self._main_bind_hint(event.models), parent=self
         )
         if dialog.exec() != QDialog.Accepted:
             return
@@ -492,6 +493,21 @@ class ModelsPage(QWidget):
         if dialog.should_bind_main() and models:
             # 导入即绑定：否则「模型导进来了但还不能对话」，还得再找一次槽位下拉
             self.slot_requested.emit("main", models[0].id)
+
+    def _main_bind_hint(self, candidates: list[str]) -> str | None:
+        """决定「同时绑定 main」是否出现、以及怎么措辞。
+
+        - main 未绑定 → 默认勾选（首次接入）
+        - main 绑的模型**不在本次候选里** → 也提示改绑：这正是「换了模型表、main 还指着旧 ID」
+          的情形，此时 main 已经是悬空绑定，不提示就会让人对着一个不能用的模型发呆。
+        - main 就在候选里 → 不打扰。
+        """
+        current = self._slots.get("main")
+        if not current:
+            return "同时把第一个选中的模型设为 main 槽位"
+        if current not in set(candidates):
+            return f"当前 main「{current}」不在本次候选内，勾选后改绑到第一个选中项"
+        return None
 
     def set_theme(self, name: str | None) -> None:
         """主题切换后重算属性选择器（Qt 不会自动重算，须显式 unpolish/polish）。"""
