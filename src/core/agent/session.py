@@ -89,6 +89,10 @@ class ISessionStore(ABC):
     def delete(self, session_id: str) -> None: ...
 
     @abstractmethod
+    def end(self, session_id: str, reason: str) -> None:
+        """收尾会话：落 `session.end` 并把事件流 fsync 到磁盘（docs 03 §10）。"""
+
+    @abstractmethod
     def append_event(self, session_id: str, event) -> None: ...
 
     @abstractmethod
@@ -246,4 +250,9 @@ class SessionStore(ISessionStore):
         self.sink.append_audit("session_delete", session_id=session_id)
 
     def end(self, session_id: str, reason: str) -> None:
+        """收尾一个会话：落 `session.end` 并把事件流 fsync 到磁盘（docs 03 §10）。
+
+        调用点：应用退出（`CoreController.shutdown`）。
+        """
         self.append(session_id, "agent", "session.end", {"reason": reason})
+        self.sink.fsync(session_id)

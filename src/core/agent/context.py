@@ -20,6 +20,10 @@ from core.agent.session import SessionSnapshot
 
 DEFAULT_SYSTEM_PROMPT = "你是言明通，一个运行在本地的个人超级 Agent。请用简体中文回答。"
 
+#: 挂载文件被截断时追加的标记。没有它，模型会以为读到的是全文，
+#: 进而基于不完整内容作答（spec rev9 §5）。
+TRUNCATION_MARK = "\n\n…[内容已截断]"
+
 
 def estimate_tokens(text: str) -> int:
     """粗略估算 token 数：CJK 每字 1，其余约每 4 字符 1。"""
@@ -86,21 +90,24 @@ def _last_user_index(messages: list[dict]) -> int:
 
 
 def _truncate_to_tokens(text: str, limit: int) -> str:
-    """按 **token** 预算截断文本。
+    """按 **token** 预算截断文本，并追加「已截断」标记。
 
     口径必须与比较端一致：`file_truncate` 的语义是 token 近似（schema / docs 05 §1.5），
     早前实现用 token 判定却按**字符**切（`text[:limit]`），对中英混排会得到完全不同的实际上限。
-    `limit <= 0` 表示不截断（沿用既有约定）。
+    `limit <= 0` 表示不截断（沿用既有约定）。标记本身占用 token，故先从预算中扣除。
     """
     if limit <= 0 or not text:
         return text
     if estimate_tokens(text) <= limit:
         return text
+    budget = limit - estimate_tokens(TRUNCATION_MARK)
+    if budget < 1:
+        return TRUNCATION_MARK  # 预算小到只够放标记
     cut = len(text)
-    while cut > 1 and estimate_tokens(text[:cut]) > limit:
+    while cut > 1 and estimate_tokens(text[:cut]) > budget:
         tokens = estimate_tokens(text[:cut])
-        cut = max(1, int(cut * limit / tokens))
-    return text[:cut]
+        cut = max(1, int(cut * budget / tokens))
+    return text[:cut] + TRUNCATION_MARK
 
 
 class IContextAssembler(ABC):

@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from shared.envelope import AssistantFinal, ModelSpec, ProviderSpec, SendMessage, Usage
-from core.agent.context import ConfigSnapshot, ContextAssembler, _truncate_to_tokens, estimate_tokens
+from core.agent.context import (
+    TRUNCATION_MARK,
+    ConfigSnapshot,
+    ContextAssembler,
+    _truncate_to_tokens,
+    estimate_tokens,
+)
 from core.agent.loop import AgentLoop
 from core.agent.session import SessionStore
 from core.store.config_store import ConfigStore
@@ -191,18 +197,23 @@ def test_file_truncate_budget_is_tokens_not_characters():
 
     旧实现用 token 判定却按**字符**切：拉丁文本 4000 字符（≈1000 tokens）在 limit=100 下
     只留 100 字符（≈25 tokens），可用额度被浪费掉约 3/4。
+    截断结果带「已截断」标记，标记占用 token 已从预算中扣除（长度断言因此放宽一个标记）。
     """
     latin = "a" * 4000
     out = _truncate_to_tokens(latin, 100)
     assert len(out) > 100  # 旧实现恰好 100
     assert len(out) >= 380
     assert estimate_tokens(out) <= 100
+    assert out.endswith("内容已截断]")
 
     cjk = _truncate_to_tokens("啊" * 5000, 100)
-    assert len(cjk) <= 100 and estimate_tokens(cjk) <= 100
+    assert len(cjk) <= 100 + len(TRUNCATION_MARK)
+    assert estimate_tokens(cjk) <= 100
+    assert cjk.endswith("内容已截断]")
 
     assert _truncate_to_tokens(latin, 0) == latin  # 0 = 不截断（沿用既有约定）
-    assert _truncate_to_tokens("short", 100) == "short"  # 未超限不动
+    assert _truncate_to_tokens("short", 100) == "short"  # 未超限不动、也不加标记
+    assert _truncate_to_tokens(latin, 3) == TRUNCATION_MARK  # 预算只够放标记
 
 
 def test_context_applies_file_truncate_end_to_end(tmp_path):
