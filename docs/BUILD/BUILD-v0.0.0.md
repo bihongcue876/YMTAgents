@@ -70,6 +70,7 @@
 - 2026-09-17：**rev12 暗色模式刷新不完整修复**（见 §15）。
 - 2026-09-17：**rev13 美化轮 A：响应式布局**（见 §16）。
 - 2026-09-17：**rev14 模型选择语义：上次使用接续**（见 §17）。
+- 2026-09-17：**rev15 安全加固：传输保密性与渲染面**（见 §18）。
 
 ## 7. rev4 轮次记录 — 槽位绑定接线补全（2026-09-11）
 
@@ -539,6 +540,48 @@ rev2 §1.3 与 A1 早已要求空状态 + 「添加模型」CTA，但此前**全
 | 全量测试 | `uv run pytest` → **151 passed, 2 skipped**（149+2 → 151+2，净增 2，只增不减） |
 | 新增用例 | `test_switch_without_session_records_last_used`（无会话切换生效 + 新对话回合用上次使用）；`test_model_dropdown_follows_session_then_last_used`（新对话回落上次使用、恢复会话显示会话自身选择且不被全局冲掉） |
 | 门禁 | 依赖方向 / 契约 / 主题与字号纪律 全部通过 |
+
+## 18. rev15 轮次记录 — 安全加固：传输保密性与渲染面（2026-09-17）
+
+用户要求：检查安全与传输保密性，保障信息安全。
+
+### 18.1 审计结论（先盘清已有防线，再补缺口）
+
+| 面 | 审计前状态 | 结论 |
+|---|---|---|
+| 凭据存储 | 只入系统凭据管理器（DPAPI），无明文回退（异常 → None → `key_missing`，fail-closed）；`models.json` 只持 `key_ref` | ✅ 已达标 |
+| 脱敏 | 三层（redact → 日志过滤器 → ErrorReport）；rev14 新增的 `_persist` 网关错误分支同样走 `_report`（过 redact） | ✅ 已达标 |
+| 出口白名单 | 默认拒绝，三个调用点全查 | ✅ 已达标 |
+| **传输保密性** | `http://` 远程端点畅通 —— API Key 走 Authorization 头**明文过网** | ❌ **本轮修复** |
+| **渲染面（WebEngine）** | 消息内链接在应用内导航（一个链接就能用钓鱼页顶掉对话流）；JS 默认开启；无 CSP | ❌ **本轮修复** |
+| TLS 校验 | openai SDK / httpx 默认 verify，未发现关闭点 | ✅（加静态门禁固化） |
+
+### 18.2 修法
+
+| # | 修订 | 落点 |
+|---|---|---|
+| 1 | **明文传输拦截**：新码 `insecure_transport`。规则：`https` 唯一合法远程传输；`http` 仅限本机回环（本地模型服务流量不出机器）；其余 scheme 拒。**入口**（`upsert_provider` 先校验后落盘）+ **调用点**（test / models / chat 三处双保险，防手改配置文件绕过） | `shared/net.py`（`is_secure_transport`，core/gui 共用）、`core/gateway/provider.py`、`shared/errors.py` |
+| 2 | **`_persist` 不再吞网关校验错误**：`GatewayError` 按真实码上报（此前会变成 `storage_error`，把「地址不安全」误导成「磁盘坏了」） | `app/controller.py` |
+| 3 | **消息内链接一律系统浏览器**：QWebEnginePage 拦 `NavigationTypeLinkClicked` → `QDesktopServices`；QTextBrowser `setOpenLinks(False)` + `anchorClicked` 外开 | `gui/widgets/render/view.py` |
+| 4 | **WebEngine 加固**：禁 JS（消息流是服务端渲染的静态 HTML，pygments 无脚本）、禁本地文件互访；模板加 **CSP**（`default-src 'none'`，脚本/连接/框架全禁，样式与图片放行） | `gui/widgets/render/view.py`、`gui/widgets/render/md.py` |
+| 5 | **静态门禁**：全 src 扫描 `verify=False` / `CERT_NONE` 等（TLS 校验不得关闭）；预设表纪律（云全 https、本地全回环 http） | `tests/unit/test_security.py` |
+
+### 18.3 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | `uv run pytest` → **161 passed, 2 skipped**（151+2 → 161+2，净增 10，只增不减） |
+| 新增用例 | 传输判定 1、TLS 静态门禁 1、预设纪律 1、网关三出口拦截 + 回环放行 4、CSP 1、外链 1、控制器报真实码 1 |
+| 真实链路 | `YMT_SELFTEST=1` → **12 passed**（https 供应商不受新拦截影响，无误伤） |
+| 门禁 | 依赖方向 / 契约 / 主题与字号纪律 全部通过 |
+
+### 18.4 留白（已知、显式不做）
+
+- **重定向降级**：openai SDK 跟随重定向（follow_redirects=True），https→http 跨协议降级未拦。
+  攻击前提是「白名单里的端点本身是恶意的」——此时密钥本就已暴露给端点，拦重定向收益有限，
+  且关闭重定向会破坏部分供应商的合法跳转。记为已知限制。
+- **远程图片**：Markdown 图片按惯例仍加载（Cherry Studio 等同），理论上存在渲染期回连；
+  CSP 已限制脚本面，图片面留待有需再做代理化。
 
 
 
