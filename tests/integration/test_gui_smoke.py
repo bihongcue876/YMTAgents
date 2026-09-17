@@ -102,6 +102,60 @@ def test_renderer_textbrowser_opens_links_externally(monkeypatch, qapp):
     assert opened == ["https://example.com/page"]
 
 
+def test_theme_token_labels_fit_real_font(tmp_path, monkeypatch, qapp):
+    """回归锚点（rev16）：主题字号 token 渲染的标签不得被**纵向**裁切。
+
+    样式表 font-size 不参与 sizeHint —— rev11 修了横向（标题省略号），
+    rev16 补纵向（截图实证：空状态两行文案同时被腰斩）。
+    所有 token 标签在档位变化后统一重算最小高。
+    """
+    from gui.widgets import text_fit
+
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        qapp.processEvents()
+        pairs = [
+            (window.chat.empty._title, "title"),
+            (window.chat.empty._tagline, "ui"),
+            (window.chat.empty._hint, "ui"),
+            (window.models._title, "title"),
+            (window.settings._title, "title"),
+        ]
+        for label, token in pairs:
+            expected = text_fit.line_height(label, token, window._font_size)
+            assert label.minimumHeight() >= expected, f"{label.objectName()} 纵向未适配"
+        # rev16 系统性修法：应用字体 = ui 档 —— 默认字号标签（含换行说明）的 sizeHint 自准
+        assert window.font().pixelSize() == theme.font_px("ui", window._font_size)
+    finally:
+        window.close()
+
+
+def test_renderer_sets_theme_background(qapp):
+    """回归锚点（rev16）：页面底色 = 主题背景 —— setHtml 重载瞬间不露白（暗色爆闪）。"""
+    from gui.widgets.render.view import RendererView
+
+    view = RendererView()  # 测试环境走 QTextBrowser 路径
+    assert view._bg is None
+    view.set_html("<html>x</html>", "#1E1F22")
+    assert view._bg == "#1E1F22"
+    assert "#1E1F22" in view._view.styleSheet()
+    # 同色重复下发不重复设置；换色即更新
+    view.set_html("<html>y</html>", "#1E1F22")
+    view.set_html("<html>z</html>", "#26282C")
+    assert view._bg == "#26282C"
+
+
+def test_message_list_passes_theme_background(qapp):
+    """消息流每次整帧渲染都随主题下发底色（爆闪修复的接线检查）。"""
+    from gui.chat.message_list import MessageList
+
+    ml = MessageList()
+    ml.set_theme("dark")
+    ml.add_user("hi")
+    assert ml._renderer._bg == theme.palette("dark").bg
+
+
 def test_sidebar_collapses_and_restores(tmp_path, monkeypatch, qapp):
     """回归锚点：侧栏折叠 = 面板藏起收成 rail 图标栏，展开回到上次宽度（rev13）。
 

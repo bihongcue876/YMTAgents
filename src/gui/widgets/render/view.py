@@ -65,21 +65,42 @@ class RendererView(QWidget):
             self._view = browser
         self._html = ""
         self._dirty = False
+        self._bg: str | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._view)
 
-    def set_html(self, html: str) -> None:
+    def set_html(self, html: str, bg: str | None = None) -> None:
         """整帧替换页面内容。
 
         **隐藏期间的内容可能不生效**：WebEngine 对不可见视图的加载/合成会被推迟或丢弃
         （用户从设置页切主题再回对话页时，消息流就停留在旧外观甚至空白）。
         故隐藏时置脏标记，`showEvent` 时重放一次。
+
+        **bg**：主题背景色（rev16 爆闪修复）。`setHtml` 是一次页面重载，
+        重载瞬间 WebEngine 露出的是**页面默认底色（白）**——暗色模式下这就是
+        用户看到的「切换主题爆闪」。把页面底色设成主题背景即可消除。
         """
         self._html = html
         self._dirty = not self.isVisible()
+        if bg and bg != self._bg:
+            self._bg = bg
+            self._apply_background()
         self._view.setHtml(html)
         self._view.update()
+
+    def _apply_background(self) -> None:
+        if not self._bg:
+            return
+        if self.using_webengine:
+            try:
+                from PySide6.QtCore import QColor
+
+                self._view.page().setBackgroundColor(QColor(self._bg))
+            except Exception:  # noqa: BLE001 - 底色失败不影响内容
+                pass
+        else:
+            self._view.setStyleSheet(f"QTextBrowser {{ background: {self._bg}; }}")
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         super().showEvent(event)

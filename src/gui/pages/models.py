@@ -34,6 +34,7 @@ from shared.ids import PRV, new_id
 from shared.net import is_local_url
 
 from gui import theme
+from gui.widgets import text_fit
 
 #: 云端预设（URL 即 OpenAI 兼容端点；Cherry Studio 式「选预设 → 填 Key → 取模型」）
 CLOUD_PRESETS = {
@@ -137,6 +138,14 @@ class ProviderDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        # 密钥可解释性（rev17）：回答「密码存哪了、为什么看不到」——
+        # 密钥只入系统凭据管理器（OS 级加密），界面永不回显
+        self._key_note = QLabel(
+            "密钥保存到系统凭据管理器（操作系统级加密），界面不回显；留空表示保持不变。"
+        )
+        self._key_note.setObjectName("mutedNote")
+        self._key_note.setWordWrap(True)
+        layout.addWidget(self._key_note)
         layout.addWidget(self._models)
         row = QHBoxLayout()
         row.addWidget(add_row)
@@ -271,6 +280,12 @@ class ModelPickerDialog(QDialog):
         self.setWindowTitle("选择要登记的模型")
         self._known = dict(known or {})
 
+        # 筛选框（rev17）：端点动辄自报几十个模型，滚动找模型不可用
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("输入关键字筛选模型…")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.textChanged.connect(self._apply_filter)
+
         self._list = QListWidget()
         for model_id in candidates:
             item = QListWidgetItem(model_id)
@@ -294,11 +309,19 @@ class ModelPickerDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"端点自报 {len(candidates)} 个模型："))
+        layout.addWidget(self._filter)
         layout.addWidget(self._list)
         layout.addWidget(hint)
         if self._bind_main is not None:
             layout.addWidget(self._bind_main)
         layout.addWidget(buttons)
+
+    def _apply_filter(self, text: str) -> None:
+        """只隐藏不匹配项，勾选状态原样保留（筛选 ≠ 取消勾选）。"""
+        text = text.strip().lower()
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            item.setHidden(bool(text) and text not in item.text().lower())
 
     def should_bind_main(self) -> bool:
         return bool(self._bind_main is not None and self._bind_main.isChecked())
@@ -327,8 +350,8 @@ class ModelsPage(QWidget):
         self._fetch_labels: dict[str, QLabel] = {}
         self._badges: dict[str, QLabel] = {}
 
-        title = QLabel("模型配置")
-        title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
+        self._title = QLabel("模型配置")
+        self._title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
         add = QPushButton("添加供应商")
         add.clicked.connect(self._on_add)
 
@@ -352,19 +375,23 @@ class ModelsPage(QWidget):
             slot_form.addRow(name, combo)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        layout.addWidget(self._title)
         layout.addWidget(add)
         layout.addLayout(self._list)
         layout.addSpacing(12)
         layout.addWidget(QLabel("槽位"))
-        last_used_note = QLabel(
-            "「上次使用」自动记录你最近选择的模型，新对话从它开始；无需手动设默认。"
-        )
-        last_used_note.setObjectName("mutedNote")
-        last_used_note.setWordWrap(True)
-        layout.addWidget(last_used_note)
+        self._note = QLabel("「上次使用」自动记录你最近选择的模型，新对话从它开始；无需手动设默认。")
+        self._note.setObjectName("mutedNote")
+        self._note.setWordWrap(True)
+        layout.addWidget(self._note)
         layout.addLayout(slot_form)
         self._loading = False
+        self.refresh_metrics()
+
+    # -- 外观（rev16：主题字号 token 不参与 sizeHint，宽高须按真实字号适配） --
+    def refresh_metrics(self, font_size: str | None = None) -> None:
+        """页标题（title token）的纵向适配；其余标签随应用字体（theme.apply 设置）自准。"""
+        self._title.setMinimumHeight(text_fit.line_height(self._title, "title", font_size))
 
     # -- 更新 --------------------------------------------------------------
     def update_providers(self, providers, slots) -> None:
@@ -428,6 +455,13 @@ class ModelsPage(QWidget):
             lambda _=False, pid=provider.id: self._on_fetch(pid)
         )
         header.addWidget(fetch)
+        # 一键逐个探测该供应商的全部模型（rev17）：逐个点「测试」在模型多时不可用
+        test_all = QPushButton("全部检测")
+        test_all.setEnabled(bool(provider.models))
+        test_all.clicked.connect(
+            lambda _=False, pid=provider.id, models=provider.models: self._test_all(pid, models)
+        )
+        header.addWidget(test_all)
         edit = QPushButton("编辑")
         edit.clicked.connect(lambda _=False, p=provider: self._on_edit(p))
         delete = QPushButton("删除")
@@ -471,6 +505,16 @@ class ModelsPage(QWidget):
             label.setText(f"失败 · {ERROR_TEXT.get(code, code)}")
         label.setProperty("testOk", bool(event.ok))
         theme.restyle(label)
+
+    def _test_all(self, provider_id: str, models) -> None:
+        """全部检测（rev17）：先把每行置「检测中…」，再逐个发探测请求。"""
+        for m in models:
+            label = self._test_labels.get((provider_id, m.id))
+            if label is not None:
+                label.setText("检测中…")
+                label.setProperty("testOk", None)
+                theme.restyle(label)
+            self.test_requested.emit(provider_id, m.id)
 
     def on_models_result(self, event) -> None:
         """处理 `provider.models.result`（rev9 §2）。

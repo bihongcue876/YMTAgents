@@ -1,4 +1,4 @@
-"""模型配置界面适配测试（自定义模型/API 选择、全局文本快捷键）。"""
+"""模型配置界面适配测试（自定义模型/API 选择、全局文本快捷键、BYOK 体验 rev17）。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import pytest
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTableWidget, QTableWidgetItem
 
-from gui.pages.models import ModelsPage, ProviderDialog
+from gui.pages.models import ModelPickerDialog, ModelsPage, ProviderDialog
 from gui.widgets import text_shortcuts
 
 
@@ -21,6 +21,55 @@ def test_main_slot_supports_custom_model(qapp):
     page._main_slot.setEditText("my-custom-model")
     page._main_slot.lineEdit().editingFinished.emit()
     assert ("main", "my-custom-model") in emitted
+
+
+def test_provider_dialog_explains_key_storage(qapp):
+    """回归锚点（rev17）：密钥行的可解释性 —— 存哪了、为什么看不到、留空是什么行为。"""
+    dialog = ProviderDialog(None)
+    notes = [
+        w for w in dialog.findChildren(QLabel, "mutedNote") if "凭据管理器" in w.text()
+    ]
+    assert notes, "编辑对话框必须有密钥存储说明"
+    text = notes[0].text()
+    assert "凭据管理器" in text and "不回显" in text and "留空" in text
+
+
+def test_card_test_all_emits_per_model(qapp):
+    """回归锚点（rev17）：「全部检测」逐个发探测请求并置「检测中…」。"""
+    from shared.envelope import ModelSpec, ProviderSpec
+
+    page = ModelsPage()
+    page.update_providers(
+        [
+            ProviderSpec(
+                id="prv_1",
+                name="P",
+                base_url="https://api.x.com/v1",
+                models=[ModelSpec(id="m-1", ctx_window=0), ModelSpec(id="m-2", ctx_window=0)],
+            )
+        ],
+        {"main": None},
+    )
+    emitted: list = []
+    page.test_requested.connect(lambda pid, mid: emitted.append((pid, mid)))
+    buttons = [b for b in page.findChildren(QPushButton) if b.text() == "全部检测"]
+    assert len(buttons) == 1
+    buttons[0].click()
+    assert emitted == [("prv_1", "m-1"), ("prv_1", "m-2")]
+    for mid in ("m-1", "m-2"):
+        assert page._test_labels[("prv_1", mid)].text() == "检测中…"
+
+
+def test_picker_dialog_filters_without_losing_checks(qapp):
+    """回归锚点（rev17）：筛选只隐藏不匹配项，勾选状态原样保留。"""
+    dialog = ModelPickerDialog(["m-alpha", "m-beta", "x-other"], {"m-alpha": 1000})
+    dialog._filter.setText("m-")
+    items = {dialog._list.item(i).text(): dialog._list.item(i) for i in range(dialog._list.count())}
+    assert items["x-other"].isHidden()
+    assert not items["m-alpha"].isHidden()
+    assert items["m-alpha"].checkState() == Qt.Checked  # 筛选不丢勾选
+    dialog._filter.setText("")
+    assert not items["x-other"].isHidden()
 
 
 def test_provider_dialog_kind_row(qapp):

@@ -8,6 +8,7 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
+from gui import theme as theme_module
 from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME
 from gui.widgets.render.md import messages_to_html
 from gui.widgets.render.view import RendererView
@@ -41,7 +42,9 @@ class MessageList(QWidget):
 
     # -- 渲染 --------------------------------------------------------------
     def _render(self) -> None:
-        self._renderer.set_html(messages_to_html(self._messages, self._theme, self._font_size))
+        html = messages_to_html(self._messages, self._theme, self._font_size)
+        # 随内容下发主题底色：setHtml 重载瞬间不露白（rev16 爆闪修复）
+        self._renderer.set_html(html, theme_module.palette(self._theme).bg)
 
     def _schedule(self) -> None:
         if not self._timer.isActive():

@@ -18,7 +18,10 @@ from shared.envelope import ContextUsage
 
 from core.agent.session import SessionSnapshot
 
-DEFAULT_SYSTEM_PROMPT = "你是言明通，一个运行在本地的个人超级 Agent。请用简体中文回答。"
+#: 基础提示词只做**客观**的行为约定（rev16）：不替应用自述身份与能力边界 ——
+#: 「言明通是什么、能做什么」属于产品叙事，由 persona 轮的 YMT 角色定义（可换、可编辑），
+#: 不该写死在底层。环境声明（工具/文件/模型）另行客观下发，见 `_env_statement`。
+DEFAULT_SYSTEM_PROMPT = "使用简体中文回答。对不确定的内容如实说明；不虚构能力、工具或信息来源。"
 
 #: 挂载文件被截断时追加的标记。没有它，模型会以为读到的是全文，
 #: 进而基于不完整内容作答（spec rev9 §5）。

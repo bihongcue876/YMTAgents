@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import theme
+from gui.widgets import text_fit
 
 VERSION = "0.0.0"
 
@@ -32,8 +33,8 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self._root = Path(data_root) if data_root else Path(".")
 
-        title = QLabel("系统设置")
-        title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
+        self._title = QLabel("系统设置")
+        self._title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
         self._loading = False
 
         # 外观（主题 + 字号）
@@ -113,7 +114,7 @@ class SettingsPage(QWidget):
         about = QLabel(f"言明通 / YMTAgents　版本 {VERSION}")
 
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        layout.addWidget(self._title)
         layout.addWidget(QLabel("外观"))
         layout.addLayout(appearance_form)
         layout.addWidget(QLabel("上下文策略"))
@@ -130,6 +131,12 @@ class SettingsPage(QWidget):
         layout.addWidget(QLabel("关于"))
         layout.addWidget(about)
         layout.addStretch(1)
+        self.refresh_metrics()
+
+    # -- 外观（rev16） ------------------------------------------------------
+    def refresh_metrics(self, font_size: str | None = None) -> None:
+        """页标题（title token）的纵向适配：主题字号不参与 sizeHint。"""
+        self._title.setMinimumHeight(text_fit.line_height(self._title, "title", font_size))
 
     # -- 上下文 ------------------------------------------------------------
     def _apply_context(self) -> None:

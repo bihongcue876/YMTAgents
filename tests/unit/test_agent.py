@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from shared.envelope import AssistantFinal, ModelSpec, ProviderSpec, SendMessage, Usage
 from core.agent.context import (
+    DEFAULT_SYSTEM_PROMPT,
     TRUNCATION_MARK,
     ConfigSnapshot,
     ContextAssembler,
@@ -13,6 +14,17 @@ from core.agent.context import (
 from core.agent.loop import AgentLoop
 from core.agent.session import SessionStore
 from core.store.config_store import ConfigStore
+
+
+def test_default_prompt_is_objective():
+    """回归锚点（rev16）：底层提示词不得自述身份与能力 —— 产品叙事归 persona 轮的 YMT 角色。
+
+    「你是……超级 Agent」这类第一人称介绍是应用替自己设计的定位，
+    客观的做法是只约定行为（语言、诚实），身份由可编辑的角色承载。
+    """
+    assert "超级" not in DEFAULT_SYSTEM_PROMPT
+    assert "你是" not in DEFAULT_SYSTEM_PROMPT  # 不做第一人称身份叙述
+    assert ConfigSnapshot().system_prompt == DEFAULT_SYSTEM_PROMPT
 
 
 class FakeGateway:

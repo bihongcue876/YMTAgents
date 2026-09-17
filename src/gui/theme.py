@@ -173,8 +173,8 @@ QPushButton#railButton {{
 QPushButton#railButton:hover {{ background: {p.surface}; }}
 QPushButton#railButton:pressed {{ background: {p.accent}; color: {p.bg}; }}
 
-/* 辅助说明小字（rev14） */
-QLabel#mutedNote {{ color: {p.muted}; font-size: {font_px("caption", font_size)}px; }}
+/* 辅助说明小字（rev14；rev16 起不再单独设字号 —— 应用字体已按 ui 档设置，sizeHint 自准） */
+QLabel#mutedNote {{ color: {p.muted}; }}
 
 /* 侧栏分隔条：默认隐形，hover 显形提示可拖拽 */
 QSplitter::handle {{ background: transparent; }}
@@ -314,4 +314,11 @@ def apply(name: str | None, font_size: str | None = None) -> str:
     if app is not None:
         app.setStyleSheet(stylesheet(p.name, font_size))
         apply_palette(p.name)
+        # 应用字体 = ui 档真实字号（rev16）：QSS 字号不参与 sizeHint，
+        # 只靠逐标签适配补不全（纵向裁切在换行标签上复发）。把 QApplication
+        # 字体本身设对，全项目 sizeHint 才从根上按真实字号计算；
+        # title 等 token 标签仍由 text_fit 逐个适配（它们比 ui 档更大）。
+        font = app.font()
+        font.setPixelSize(font_px("ui", font_size))
+        app.setFont(font)
     return p.name
