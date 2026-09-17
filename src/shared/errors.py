@@ -23,6 +23,7 @@ class ErrorCode(str, Enum):
     KEY_MISSING = "key_missing"
     KEY_ERROR = "key_error"
     WHITELIST_BLOCKED = "whitelist_blocked"
+    INSECURE_TRANSPORT = "insecure_transport"  # 明文传输：非本机地址未使用 https（rev15）
     AUTH_ERROR = "auth_error"
     NETWORK_ERROR = "network_error"
     CONTEXT_OVERFLOW = "context_overflow"
@@ -48,6 +49,7 @@ ERROR_TEXT: dict[str, str] = {
     ErrorCode.KEY_MISSING.value: "凭据不可用",
     ErrorCode.KEY_ERROR.value: "凭据管理器不可用",
     ErrorCode.WHITELIST_BLOCKED.value: "已被网络白名单拦截",
+    ErrorCode.INSECURE_TRANSPORT.value: "明文传输不安全：非本机地址必须使用 https://",
     ErrorCode.AUTH_ERROR.value: "凭据不可用",
     ErrorCode.NETWORK_ERROR.value: "网络或连接错误",
     ErrorCode.CONTEXT_OVERFLOW.value: "上下文超出模型窗口",

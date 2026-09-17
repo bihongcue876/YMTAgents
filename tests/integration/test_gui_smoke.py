@@ -83,6 +83,25 @@ def test_model_dropdown_follows_session_then_last_used(tmp_path, monkeypatch, qa
         window.close()
 
 
+def test_renderer_textbrowser_opens_links_externally(monkeypatch, qapp):
+    """回归锚点（rev15）：消息里的链接不得在应用内导航 —— 一律系统浏览器。
+
+    在应用内打开外部网站 = 一个链接就能用钓鱼页顶掉整个对话流。
+    """
+    from PySide6.QtCore import QUrl
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "gui.widgets.render.view._open_external",
+        lambda url: opened.append(url.toString()),
+    )
+    view = RendererView()  # 测试环境无 WebEngine → QTextBrowser 路径
+    assert not view.using_webengine
+    assert not view._view.openLinks(), "QTextBrowser 不得自行导航"
+    view._view.anchorClicked.emit(QUrl("https://example.com/page"))
+    assert opened == ["https://example.com/page"]
+
+
 def test_sidebar_collapses_and_restores(tmp_path, monkeypatch, qapp):
     """回归锚点：侧栏折叠 = 面板藏起收成 rail 图标栏，展开回到上次宽度（rev13）。
 

@@ -22,3 +22,19 @@ def domain_of(url: str) -> str:
 def is_local_url(url: str) -> bool:
     """该地址是否指向本机 —— 据此启用「本地模型服务」语义（免密钥）。"""
     return domain_of(url) in LOCAL_HOSTS
+
+
+def is_secure_transport(url: str) -> bool:
+    """传输保密性判定（rev15）：
+
+    - `https://` —— 唯一合法的远程传输方式（凭据与对话内容都走 TLS）；
+    - `http://` —— **仅本机回环**允许（本地模型服务没有 TLS，但流量不出机器）；
+    - 其余 scheme（file:/ftp:/无 scheme）一律不安全。
+    """
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    scheme = (parsed.scheme or "").lower()
+    if scheme == "https":
+        return True
+    if scheme == "http":
+        return domain_of(url) in LOCAL_HOSTS
+    return False

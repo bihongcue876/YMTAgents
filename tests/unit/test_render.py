@@ -41,6 +41,15 @@ def test_page_css_wraps_long_unbroken_strings():
     assert "overflow-x: auto" in html  # pre 保留横向滚动
 
 
+def test_page_carries_csp():
+    """回归锚点（rev15）：消息流页面必须带 CSP —— 脚本默认全禁（纵深防御）。"""
+    html = markdown_to_html("正文")
+    assert "Content-Security-Policy" in html
+    assert "default-src 'none'" in html
+    assert "style-src 'unsafe-inline'" in html  # pygments / 主题样式仍可用
+    assert "img-src" in html  # 图片仍可显示，但 connect/frame/script 全禁
+
+
 def test_messages_to_html():
     html = messages_to_html(
         [

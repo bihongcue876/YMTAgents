@@ -16,6 +16,7 @@ from typing import Callable, Protocol
 import openai
 
 from shared.envelope import ModelSpec, ProviderSpec, Usage
+from shared.net import is_secure_transport
 from shared.schema import ModelConfig, ModelsConfig, ProviderConfig, SettingsConfig
 
 from core.gateway.errors import (
@@ -147,6 +148,20 @@ class ModelGateway(IModelGateway):
             self._clients[ck] = self._client_factory(base_url, api_key)
         return self._clients[ck]
 
+    # -- 传输安全（rev15） ---------------------------------------------------
+    @staticmethod
+    def _ensure_secure_transport(base_url: str) -> None:
+        """凭据与对话内容不得走明文：非本机地址必须 https（本机回环的本地服务除外）。
+
+        入口（upsert）校验 + 调用点（test/models/chat）防御双保险：
+        手工改配置文件绕过入口时，调用仍会被拦。
+        """
+        if not is_secure_transport(base_url):
+            raise GatewayBlocked(
+                "明文传输不安全：非本机地址必须使用 https://",
+                code="insecure_transport",
+            )
+
     # -- 读取 --------------------------------------------------------------
     def _find_provider(self, provider_id: str) -> ProviderConfig | None:
         for p in self.models.providers:
@@ -197,6 +212,7 @@ class ModelGateway(IModelGateway):
 
     # -- 配置写入 ----------------------------------------------------------
     def upsert_provider(self, spec: ProviderSpec, api_key: str | None) -> ProviderSpec:
+        self._ensure_secure_transport(spec.base_url)  # 先校验后落盘（rev15）
         existing = self._find_provider(spec.id)
         if existing is None:
             pc = ProviderConfig(id=spec.id, name=spec.name, base_url=spec.base_url)
@@ -243,6 +259,10 @@ class ModelGateway(IModelGateway):
         provider = self._find_provider(provider_id)
         if provider is None:
             return False, None, "provider_not_found"
+        try:
+            self._ensure_secure_transport(provider.base_url)
+        except GatewayBlocked as exc:
+            return False, None, exc.code  # 契约：探测类出口返回码，不抛
         if not self.whitelist.is_allowed(provider.base_url):
             return False, None, "whitelist_blocked"
         api_key = self._api_key_for(provider)
@@ -273,6 +293,10 @@ class ModelGateway(IModelGateway):
         provider = self._find_provider(provider_id)
         if provider is None:
             return False, [], "provider_not_found"
+        try:
+            self._ensure_secure_transport(provider.base_url)
+        except GatewayBlocked as exc:
+            return False, [], exc.code  # 契约：探测类出口返回码，不抛
         if not self.whitelist.is_allowed(provider.base_url):
             return False, [], "whitelist_blocked"
         api_key = self._api_key_for(provider)
@@ -306,6 +330,7 @@ class ModelGateway(IModelGateway):
                 f"该模型在供应商不可用：{model_id} 不属于任何已配置的供应商",
                 code="model_not_found",
             )
+        self._ensure_secure_transport(provider.base_url)
         if not self.whitelist.is_allowed(provider.base_url):
             raise GatewayBlocked("已被网络白名单拦截：该供应商地址不在允许列表内")
         api_key = self._api_key_for(provider)

@@ -1,10 +1,17 @@
-"""渲染视图：QWebEngineView 本地离线渲染，QTextBrowser 降级（docs 05 §3）。"""
+"""渲染视图：QWebEngineView 本地离线渲染，QTextBrowser 降级（docs 05 §3）。
+
+安全（rev15）：消息里的链接**一律用系统浏览器打开**，绝不在应用内导航 ——
+否则点一个链接就用聊天视图加载任意外部网站（钓鱼页可直接顶掉对话流）。
+WebEngine 侧再禁 JS、禁本地文件互访；模板侧加 CSP（md.py）。
+"""
 
 from __future__ import annotations
 
 import importlib.util
 import os
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QTextBrowser, QVBoxLayout, QWidget
 
 from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME
@@ -17,20 +24,45 @@ def webengine_available() -> bool:
     return importlib.util.find_spec("PySide6.QtWebEngineWidgets") is not None
 
 
+def _open_external(url: QUrl) -> None:
+    QDesktopServices.openUrl(url)
+
+
 class RendererView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.using_webengine = webengine_available()
         if self.using_webengine:
             try:
+                from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
                 from PySide6.QtWebEngineWidgets import QWebEngineView
 
-                self._view: QWidget = QWebEngineView(self)
+                view = QWebEngineView(self)
+
+                class _ExternalPage(QWebEnginePage):
+                    """链接点击 → 系统浏览器；其余导航（setHtml 加载）照常。"""
+
+                    def acceptNavigationRequest(self, url, ntype, is_main_frame):  # noqa: N802
+                        if is_main_frame and ntype == QWebEnginePage.NavigationTypeLinkClicked:
+                            _open_external(url)
+                            return False
+                        return super().acceptNavigationRequest(url, ntype, is_main_frame)
+
+                view.setPage(_ExternalPage(view))
+                settings = view.settings()
+                # 消息流是服务端渲染的纯静态 HTML（pygments 高亮无脚本），JS 只添攻击面
+                settings.setAttribute(QWebEngineSettings.JavascriptEnabled, False)
+                settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, False)
+                settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
+                self._view: QWidget = view
             except Exception:  # noqa: BLE001 - 运行期初始化失败则降级
                 self.using_webengine = False
                 self._view = QTextBrowser(self)
         else:
-            self._view = QTextBrowser(self)
+            browser = QTextBrowser(self)
+            browser.setOpenLinks(False)  # 不得在应用内导航
+            browser.anchorClicked.connect(_open_external)
+            self._view = browser
         self._html = ""
         self._dirty = False
         layout = QVBoxLayout(self)

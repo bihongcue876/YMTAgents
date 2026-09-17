@@ -103,3 +103,49 @@ def test_session_end_appends_and_fsyncs(tmp_path, monkeypatch):
 def test_session_end_is_safe_without_events_file(tmp_path):
     store = SessionStore(tmp_path)
     store.end("sess_不存在", "app_exit")  # 目录都不存在也不得抛
+
+
+# -- 传输保密性（rev15） -------------------------------------------------------
+
+
+def test_secure_transport_rules():
+    """凭据与对话内容不得走明文：https 唯一合法，http 仅限本机回环（本地模型服务）。"""
+    from shared.net import is_secure_transport
+
+    assert is_secure_transport("https://api.deepseek.com/v1")
+    assert is_secure_transport("https://api.test.com")
+    assert is_secure_transport("http://127.0.0.1:11434/v1")  # Ollama 等本地服务
+    assert is_secure_transport("http://localhost:1234/v1")  # LM Studio
+    assert not is_secure_transport("http://api.evil.com/v1")  # 远程明文 → 拒
+    assert not is_secure_transport("http://192.168.1.10:8000/v1")  # 局域网也非本机
+    assert not is_secure_transport("ftp://api.test.com")  # 未知 scheme → 拒
+
+
+def test_static_no_tls_verification_disabled():
+    """TLS 校验不得被关闭：全 src 扫描 verify=False / CERT_NONE 等。"""
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    pattern = re.compile(r"verify\s*=\s*False|verify=False|CERT_NONE|check_hostname\s*=\s*False")
+    offenders = [
+        f"{path.relative_to(src)}:{lineno}"
+        for path in sorted(src.rglob("*.py"))
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if pattern.search(line)
+    ]
+    assert not offenders, "不得关闭 TLS 校验：\n" + "\n".join(offenders)
+
+
+def test_provider_presets_scheme_discipline():
+    """预设表纪律：云供应商全 https；本地服务全 http + 回环。"""
+    from gui.pages.models import CLOUD_PRESETS, LOCAL_PRESETS
+    from shared.net import is_local_url, is_secure_transport
+
+    for name, url in CLOUD_PRESETS.items():
+        assert url.startswith("https://"), name
+    for name, url in LOCAL_PRESETS.items():
+        assert url.startswith("http://"), name
+        assert is_local_url(url), name
+    for name, url in {**CLOUD_PRESETS, **LOCAL_PRESETS}.items():
+        assert is_secure_transport(url), name

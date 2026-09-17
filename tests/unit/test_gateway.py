@@ -161,6 +161,85 @@ def test_upsert_provider_adds_whitelist(tmp_path):
     assert gateway.list_providers()[0].key_status == "stored"
 
 
+# -- 传输保密性（rev15） ------------------------------------------------------
+
+
+def test_upsert_rejects_insecure_transport(tmp_path):
+    """非本机 http:// 在**入口**就被拒：凭据与对话内容不得明文过网。"""
+    gateway = _bare_gateway(tmp_path)
+    spec = ProviderSpec(
+        id="prv_bad",
+        name="Bad",
+        base_url="http://api.evil.com/v1",
+        models=[ModelSpec(id="mx", ctx_window=0)],
+    )
+    with pytest.raises(GatewayBlocked) as ei:
+        gateway.upsert_provider(spec, "sk-abc")
+    assert ei.value.code == "insecure_transport"
+    assert gateway._find_provider("prv_bad") is None  # 未落盘
+
+
+def test_upsert_allows_loopback_http(tmp_path):
+    """本地模型服务的 http://127.0.0.1 是唯一明文例外（流量不出机器）。"""
+    gateway = _bare_gateway(tmp_path)
+    spec = ProviderSpec(
+        id="prv_local",
+        name="Local",
+        base_url="http://127.0.0.1:11434/v1",
+        models=[ModelSpec(id="m-local", ctx_window=0)],
+        local=True,
+    )
+    gateway.upsert_provider(spec, None)
+    assert gateway._find_provider("prv_local") is not None
+
+
+def _seeded_insecure_gateway(tmp_path, base_url: str) -> ModelGateway:
+    """手工改配置文件绕过入口校验的情形：调用点仍要拦（双保险）。"""
+    store = ConfigStore(tmp_path)
+    store.ensure_defaults()
+    models = ModelsConfig()
+    models.providers.append(
+        ProviderConfig(
+            id="prv_1",
+            name="P",
+            base_url=base_url,
+            key_ref="keyring://ymt/prv_1",
+            models=[ModelConfig(id="m1", ctx_window=1000)],
+        )
+    )
+    models.slots["main"] = "m1"
+    store.save("models", models)
+    settings = SettingsConfig()
+    settings.network.whitelist = ["api.test.com"]
+    store.save("settings", settings)
+    backend = FakeKeyring()
+    backend.set_password("ymt", "prv_1", "sk-test")
+    return ModelGateway(
+        store, keyring=KeyringStore(backend=backend), client_factory=make_factory([])
+    )
+
+
+def test_stream_chat_blocks_insecure_transport(tmp_path):
+    gateway = _seeded_insecure_gateway(tmp_path, "http://api.test.com/v1")
+    with pytest.raises(GatewayBlocked) as ei:
+        gateway.stream_chat("sess_1", 0, "m1", [], None, lambda _s: None)
+    assert ei.value.code == "insecure_transport"
+
+
+def test_test_connection_reports_insecure_transport(tmp_path):
+    gateway = _seeded_insecure_gateway(tmp_path, "http://api.test.com/v1")
+    ok, latency, code = gateway.test_connection("prv_1", "m1")
+    assert ok is False
+    assert code == "insecure_transport"
+
+
+def test_list_remote_models_reports_insecure_transport(tmp_path):
+    gateway = _seeded_insecure_gateway(tmp_path, "http://api.test.com/v1")
+    ok, models, code = gateway.list_remote_models("prv_1")
+    assert ok is False
+    assert code == "insecure_transport"
+
+
 # -- 全局槽位绑定（spec rev4 §3） --------------------------------------------
 
 

@@ -50,6 +50,7 @@ _MD = MarkdownIt("commonmark", {"highlight": _highlight}).enable("table").enable
 
 _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src http: https: data:;">
 <style>
 body {{ font-family: system-ui, "Segoe UI", sans-serif; line-height: 1.6;
         margin: 8px 12px; overflow-wrap: anywhere; }}

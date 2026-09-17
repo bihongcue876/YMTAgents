@@ -49,12 +49,14 @@ from shared.schema import (
 from core.agent.loop import AgentLoop
 from core.agent.session import SessionStore
 from core.bus.bridge import BusBridge
+from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
 from core.modules.supervisor import ModuleSupervisor
 from core.registry.registry import Registry
 from core.store.config_store import ConfigStore
 
 from app import logging_setup
+from shared.errors import error_text
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +110,12 @@ class CoreController:
         try:
             fn()
             return True
+        except GatewayError as exc:
+            # 配置层的网关校验（如 rev15 明文传输拦截）按**真实码**上报，
+            # 不得吞成 storage_error —— 那会把「地址不安全」误导成「磁盘坏了」。
+            log.info("%s 被拒绝：%s", action, exc.code)
+            self._report(scope, exc.code, str(exc) or error_text(exc.code), None)
+            return False
         except Exception as exc:  # noqa: BLE001 - 边界收口，异常明细只进日志
             log.exception("%s 失败", action)
             self._report(scope, ErrorCode.STORAGE_ERROR.value, message, type(exc).__name__)
