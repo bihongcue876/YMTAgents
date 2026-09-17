@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -110,6 +111,12 @@ class ProviderDialog(QDialog):
 
         self._models = QTableWidget(0, 2)
         self._models.setHorizontalHeaderLabels(["模型 ID", "上下文窗口"])
+        # 列宽必须跟内容走：默认每列 100px 会把模型 ID 与表头都省略成「deepseek-v4-fl…」
+        # （实测「模型 ID」内容需 211px、「上下文窗口」表头需 107px）。
+        header = self._models.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._models.setMinimumWidth(420)
         if provider:
             for model in provider.models:
                 self._add_row(model.id, model.ctx_window)
@@ -137,6 +144,7 @@ class ProviderDialog(QDialog):
         layout.addLayout(row)
         layout.addWidget(buttons)
 
+        self.setMinimumWidth(560)  # 默认宽度会把 base_url 与模型表都挤到裁剪
         self._loading = False
         # 载入期 _on_kind_changed 被守卫挡住，故显式同步一次控件状态 ——
         # 否则「编辑一个本地供应商」时密钥框仍是可用的，与类型不符。

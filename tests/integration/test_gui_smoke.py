@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6.QtWidgets import QLabel
+
 from app import bootstrap as bootstrap_mod
 from app import paths
 from gui import theme
@@ -71,6 +73,52 @@ def test_main_window_applies_font_size(tmp_path, monkeypatch, qapp):
         ctx.controller.handle(SettingsUpdate(section="ui", data={"font_size": "normal"}))
         qapp.processEvents()
         assert window._font_size == "normal"
+    finally:
+        ctx.worker.stop()
+
+
+def test_empty_state_title_width_follows_font_level(tmp_path, monkeypatch, qapp):
+    """回归锚点：空状态标题「言明通 / YMTAgents」曾被裁掉（需 252px，实得 240px）。
+
+    根因是样式表字号不参与 `sizeHint`；现在按档位重算最小宽度，且换档后跟着变。
+    """
+    from PySide6.QtGui import QFont, QFontMetrics
+
+    from gui import theme
+
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
+    window = MainWindow(ctx.bridge, data_root=str(ctx.root))
+    try:
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        title = window.chat.empty._title
+
+        def needed(level: str) -> int:
+            font = QFont(title.font())
+            font.setPixelSize(theme.font_px("title", level))
+            return QFontMetrics(font).horizontalAdvance(title.text())
+
+        assert title.minimumWidth() >= needed(window._font_size)
+
+        ctx.controller.handle(SettingsUpdate(section="ui", data={"font_size": "xlarge"}))
+        qapp.processEvents()
+        assert title.minimumWidth() >= needed("xlarge")
+    finally:
+        ctx.worker.stop()
+
+
+def test_settings_context_labels_have_no_stray_characters(tmp_path, monkeypatch, qapp):
+    """回归锚点：设置页标签曾写成「历史保留轮数 N」，界面直接显示多余的 " N"。"""
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
+    window = MainWindow(ctx.bridge, data_root=str(ctx.root))
+    try:
+        qapp.processEvents()
+        texts = [label.text() for label in window.settings.findChildren(QLabel)]
+        assert "历史保留轮数" in texts
+        assert "输出预留（reserve）" in texts
+        assert not any(t.endswith(" N") for t in texts)
     finally:
         ctx.worker.stop()
 

@@ -17,7 +17,11 @@ from gui import theme
 
 GUI = Path(__file__).resolve().parents[2] / "src" / "gui"
 COLOR_LITERAL = re.compile(r"#[0-9A-Fa-f]{6}\b")
-FONT_LITERAL = re.compile(r"font-size\s*:|setPointSize|setPixelSize")
+#: 「字号字面量」= 样式表里的 `font-size:`，或**值不来自 theme** 的直接设字号调用。
+#: 后者原先按「调用名」判（`setPointSize|setPixelSize` 一律算违规），会误伤
+#: 「按 theme.font_px 构造字体做文本度量」这类合法用法（如 `gui/widgets/text_fit.py`），
+#: 故收紧为「实参不以 theme. 开头」才算违规 —— 规则本意是**单一来源**，不是禁用 API。
+FONT_LITERAL = re.compile(r"font-size\s*:|set(?:Point|Pixel)Size\s*\(\s*(?!theme\.)")
 
 
 def test_theme_names_and_labels():
@@ -149,7 +153,12 @@ def test_apply_sets_font_size(qapp):
 
 
 def test_gui_has_no_hardcoded_font_size_literals():
-    """字号纪律：GUI 内不得出现字号字面量（只允许在 gui/theme.py）。"""
+    """字号纪律：GUI 内不得出现字号字面量（只允许在 gui/theme.py）。
+
+    判据见 `FONT_LITERAL`：`font-size:` 或「值不来自 theme」的直接设字号调用。
+    合法例外是 `gui/widgets/text_fit.py` —— 它按 `theme.font_px()` 构造字体做度量，
+    字号仍取自单一来源。
+    """
     offenders: list[str] = []
     for path in sorted(GUI.rglob("*.py")):
         if path.name == "theme.py":
@@ -168,3 +177,21 @@ def test_ui_settings_font_size_matches_theme_levels():
     assert set(UISettings.model_fields["font_size"].annotation.__args__) == set(theme.FONT_LEVELS)
     with pytest.raises(ValidationError):
         UISettings(font_size="huge")
+
+
+def test_fit_label_grows_with_font_level(qapp):
+    """回归锚点：样式表字号不参与 `sizeHint`，标签最小宽度必须按档位显式重算。
+
+    否则居中 / 紧凑布局里的标题会被裁（实测空状态标题需 252px，实得 240px）。
+    """
+    from PySide6.QtWidgets import QLabel
+
+    from gui.widgets.text_fit import fit_label
+
+    label = QLabel("言明通 / YMTAgents")
+    small = fit_label(label, "title", "small")
+    assert label.minimumWidth() == small
+    assert small > 0
+
+    xlarge = fit_label(label, "title", "xlarge")
+    assert xlarge > small  # 档位调大，最小宽度必须跟着变大

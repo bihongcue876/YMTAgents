@@ -122,6 +122,8 @@ class MainWindow(QMainWindow):
         self._font_size = used_font
         theme.apply(used, used_font)
         self.chat.set_theme(used, used_font)
+        # 样式表字号不参与 sizeHint：居中/紧凑布局里的标题会被裁，故重算最小宽度
+        self.chat.empty.refresh_metrics(used_font)
         self.models.set_theme(used)
 
     # -- 事件分发 ----------------------------------------------------------

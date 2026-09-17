@@ -202,6 +202,50 @@ def test_models_page_binds_main_after_import(qapp, monkeypatch):
     assert slots == [("main", "m-a")]
 
 
+def test_provider_dialog_model_table_columns_fit_content(qapp):
+    """回归锚点：模型表两列此前是 Qt 默认的 100px，模型 ID 与表头都被裁成省略号。
+
+    实测：「模型 ID」内容需 211px、「上下文窗口」表头需 107px，而两列各 100px ——
+    用户看到的就是「deepseek-v4-fl…」这种字显示不全。
+    """
+    from shared.envelope import ModelSpec, ProviderSpec
+
+    spec = ProviderSpec(
+        id="prv",
+        name="DeepSeek",
+        base_url="https://api.deepseek.com/v1",
+        models=[ModelSpec(id="deepseek-v4-flash-0731", ctx_window=1_000_000)],
+    )
+    dialog = ProviderDialog(spec)
+    dialog.show()
+    qapp.processEvents()
+
+    header = dialog._models.horizontalHeader()
+    fm = dialog._models.fontMetrics()
+    assert header.sectionSize(0) >= fm.horizontalAdvance("deepseek-v4-flash-0731") + 8
+    assert header.sectionSize(1) >= fm.horizontalAdvance("上下文窗口") + 8
+    assert dialog.minimumWidth() >= 480  # 默认宽度会把 base_url 一起挤扁
+    dialog.close()
+
+
+def test_provider_dialog_long_base_url_not_squeezed(qapp):
+    """长 base_url 不再把表单挤到放不下（对话框有最小宽度）。"""
+    from shared.envelope import ModelSpec, ProviderSpec
+
+    spec = ProviderSpec(
+        id="prv",
+        name="X",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        models=[ModelSpec(id="qwen-max")],
+    )
+    dialog = ProviderDialog(spec)
+    dialog.show()
+    qapp.processEvents()
+    fm = dialog._base.fontMetrics()
+    assert dialog.minimumWidth() >= fm.horizontalAdvance(spec.base_url) * 0.5
+    dialog.close()
+
+
 def test_models_page_does_not_rebind_when_main_already_set(qapp, monkeypatch):
     """main 已绑定且**就在候选内**则不打扰：不出现绑定选项，也不额外发 slot.set。"""
     from shared.envelope import ModelSpec, ProviderModels, ProviderSpec

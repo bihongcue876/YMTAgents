@@ -13,6 +13,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
+from gui.widgets import text_fit
+
 APP_NAME = "言明通 / YMTAgents"
 TAGLINE = "本地优先的个人超级 Agent —— 会话、密钥与数据都留在本机。"
 HINT_NO_PROVIDER = "还没有可用模型：点「添加模型」——云端选预设并填 API Key，本地服务（Ollama / LM Studio）无需密钥。"
@@ -31,6 +33,7 @@ class EmptyState(QWidget):
 
         title = QLabel(APP_NAME)
         title.setObjectName("emptyTitle")
+        self._title = title
         tagline = QLabel(TAGLINE)
         tagline.setObjectName("emptyHint")
         tagline.setAlignment(Qt.AlignCenter)
@@ -62,6 +65,14 @@ class EmptyState(QWidget):
     def cta_text(self) -> str:
         """当前 CTA 文案（供测试断言两种空状态）。"""
         return self._cta.text()
+
+    def refresh_metrics(self, font_size: str | None = None) -> None:
+        """按当前字号档位重算标题最小宽度。
+
+        样式表字号不参与 `sizeHint`，居中布局下标题会被裁（实测需 252px、实得 240px），
+        故每次档位变化都要重算一次。
+        """
+        text_fit.fit_label(self._title, "title", font_size)
 
     def _on_cta(self) -> None:
         (self.start_chat if self._has_provider else self.add_model).emit()
