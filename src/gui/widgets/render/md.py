@@ -52,7 +52,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
 body {{ font-family: system-ui, "Segoe UI", sans-serif; line-height: 1.6;
-        margin: 8px 12px; }}
+        margin: 8px 12px; overflow-wrap: anywhere; }}
 pre {{ padding: 8px 10px; border-radius: 6px; overflow-x: auto; }}
 code {{ font-family: Consolas, "Courier New", monospace; }}
 table {{ border-collapse: collapse; }}
@@ -61,7 +61,7 @@ blockquote {{ border-left: 3px solid; margin: 0; padding-left: 10px; }}
 .msg {{ margin: 10px 0; }}
 .user {{ display: flex; justify-content: flex-end; }}
 .user .bubble {{ border-radius: 12px; padding: 8px 12px;
-        max-width: 78%; white-space: pre-wrap; }}
+        max-width: 78%; white-space: pre-wrap; overflow-wrap: anywhere; }}
 .assistant {{ display: block; }}
 .usage {{ margin-top: 4px; }}
 .tag {{ margin-left: 6px; }}

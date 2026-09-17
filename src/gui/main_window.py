@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QSplitter, QStackedWidget, QWidget
 
 from shared.envelope import (
     ArchiveSession,
@@ -55,14 +56,38 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.models)
         self.stack.addWidget(self.settings)
 
+        # 侧栏可拖拽调宽（rev13）：QSplitter 取代固定 264px；折叠逻辑见 _toggle_sidebar
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(self.stack)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([264, 836])
+        self._last_sidebar_w = 264
+
         central = QWidget()
         layout = QHBoxLayout(central)
-        layout.addWidget(self.sidebar)
-        layout.addWidget(self.stack, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.splitter)
         self.setCentralWidget(central)
 
+        self.sidebar.toggle_requested.connect(self._toggle_sidebar)
         self._connect_signals()
         bus.event_received.connect(self.on_event)
+
+    def _toggle_sidebar(self) -> None:
+        """折叠：面板藏起、侧栏收成 48px 图标栏；展开：回到上次拖拽宽度。"""
+        if self.sidebar.panel_visible():
+            self._last_sidebar_w = max(self.sidebar.width(), 264)
+            self.sidebar.set_panel_visible(False)
+            total = max(self.splitter.width() - self.splitter.handleWidth(), 100)
+            self.splitter.setSizes([48, total - 48])
+        else:
+            self.sidebar.set_panel_visible(True)
+            total = max(self.splitter.width() - self.splitter.handleWidth(), 100)
+            target = min(max(self._last_sidebar_w, 228), 360)
+            self.splitter.setSizes([target, total - target])
 
     # -- 信号 --------------------------------------------------------------
     def _connect_signals(self) -> None:

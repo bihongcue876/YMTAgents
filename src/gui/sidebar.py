@@ -1,4 +1,9 @@
-"""侧栏：会话列表 + 底部两入口（rev2 §1.2）。"""
+"""侧栏：图标栏（rail）+ 会话面板（rev2 §1.2 / rev13 响应式布局）。
+
+折叠语义：只藏会话面板，保留 48px 图标栏 —— 新对话、模型配置、系统设置入口
+折叠后仍可点，无需悬浮按钮（VS Code / Cherry Studio 同款）。
+宽度不再 setFixedWidth(264)，改由 MainWindow 的 QSplitter 管理拖拽。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -14,6 +20,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+RAIL_PX = 48  # 折叠后侧栏总宽（图标栏）
+PANEL_MIN_PX = 180  # 展开时面板最小宽
+PANEL_MAX_PX = 360  # 展开时面板最大宽
 
 
 def _rel_time(dt: datetime) -> str:
@@ -38,11 +48,44 @@ class Sidebar(QWidget):
     delete_session = Signal(str)
     open_models = Signal()
     open_settings = Signal()
+    toggle_requested = Signal()  # 折叠/展开请求（宽度由 MainWindow 的 QSplitter 落实）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(264)
+        self.setMinimumWidth(RAIL_PX + PANEL_MIN_PX)
+        self.setMaximumWidth(RAIL_PX + PANEL_MAX_PX)
 
+        # -- 图标栏（折叠后仍保留） ------------------------------------------
+        self._toggle = QPushButton("☰")
+        self._toggle.setObjectName("railButton")
+        self._toggle.setToolTip("折叠 / 展开侧栏")
+        self._toggle.setFixedSize(36, 36)
+        self._toggle.setCursor(Qt.PointingHandCursor)
+        self._toggle.clicked.connect(self.toggle_requested.emit)
+
+        self._models_btn = QPushButton("⚙")
+        self._models_btn.setObjectName("railButton")
+        self._models_btn.setToolTip("模型配置")
+        self._models_btn.setFixedSize(36, 36)
+        self._models_btn.setCursor(Qt.PointingHandCursor)
+        self._models_btn.clicked.connect(self.open_models.emit)
+
+        self._settings_btn = QPushButton("🛠")
+        self._settings_btn.setObjectName("railButton")
+        self._settings_btn.setToolTip("系统设置")
+        self._settings_btn.setFixedSize(36, 36)
+        self._settings_btn.setCursor(Qt.PointingHandCursor)
+        self._settings_btn.clicked.connect(self.open_settings.emit)
+
+        rail = QVBoxLayout()
+        rail.setContentsMargins(0, 0, 0, 0)
+        rail.setSpacing(4)
+        rail.addWidget(self._toggle)
+        rail.addStretch(1)
+        rail.addWidget(self._models_btn)
+        rail.addWidget(self._settings_btn)
+
+        # -- 会话面板（可折叠） ----------------------------------------------
         self._new = QPushButton("＋ 新对话")
         self._new.setFixedHeight(40)
         self._new.clicked.connect(self.new_session.emit)
@@ -61,18 +104,33 @@ class Sidebar(QWidget):
         self._archived.setContextMenuPolicy(Qt.CustomContextMenu)
         self._archived.customContextMenuRequested.connect(self._arch_menu)
 
-        self._models_btn = QPushButton("⚙ 模型配置")
-        self._models_btn.clicked.connect(self.open_models.emit)
-        self._settings_btn = QPushButton("⚙ 系统设置")
-        self._settings_btn.clicked.connect(self.open_settings.emit)
+        self._panel = QWidget()
+        panel_layout = QVBoxLayout(self._panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(self._new)
+        panel_layout.addWidget(self._active, 1)
+        panel_layout.addWidget(self._arch_toggle)
+        panel_layout.addWidget(self._archived)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._new)
-        layout.addWidget(self._active, 1)
-        layout.addWidget(self._arch_toggle)
-        layout.addWidget(self._archived)
-        layout.addWidget(self._models_btn)
-        layout.addWidget(self._settings_btn)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+        layout.addLayout(rail)
+        layout.addWidget(self._panel, 1)
+
+    # -- 折叠 --------------------------------------------------------------
+    def panel_visible(self) -> bool:
+        return self._panel.isVisible()
+
+    def set_panel_visible(self, visible: bool) -> None:
+        """只切面板可见性；最小宽随动（RAIL），拖拽宽度由 MainWindow 负责。"""
+        self._panel.setVisible(visible)
+        if visible:
+            self.setMinimumWidth(RAIL_PX + PANEL_MIN_PX)
+            self.setMaximumWidth(RAIL_PX + PANEL_MAX_PX)
+        else:
+            self.setMinimumWidth(RAIL_PX)
+            self.setMaximumWidth(RAIL_PX)
 
     # -- 列表 --------------------------------------------------------------
     def update_sessions(self, metas) -> None:

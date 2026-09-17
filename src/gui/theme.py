@@ -165,6 +165,19 @@ QPushButton:hover {{ border-color: {p.accent}; }}
 QPushButton:pressed {{ background: {p.accent}; color: {p.bg}; }}
 QPushButton:disabled {{ color: {p.muted}; }}
 
+/* 侧栏图标栏（rail）：无边框扁平按钮，折叠后仍常显（rev13） */
+QPushButton#railButton {{
+    background: transparent; color: {p.fg};
+    border: none; border-radius: 8px; font-size: 16px;
+}}
+QPushButton#railButton:hover {{ background: {p.surface}; }}
+QPushButton#railButton:pressed {{ background: {p.accent}; color: {p.bg}; }}
+
+/* 侧栏分隔条：默认隐形，hover 显形提示可拖拽 */
+QSplitter::handle {{ background: transparent; }}
+QSplitter::handle:hover {{ background: {p.border}; }}
+QSplitter::handle:horizontal {{ width: 4px; }}
+
 QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit, QTextBrowser {{
     background: {p.surface}; color: {p.fg};
     border: 1px solid {p.border}; border-radius: 6px; padding: 4px 6px;

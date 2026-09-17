@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -78,13 +79,21 @@ class SettingsPage(QWidget):
         wl_row.addWidget(add_rule)
         wl_row.addWidget(del_rule)
 
-        # 数据
+        # 数据（长路径：wordWrap + Ignored 双管齐下 —— wordWrap 只解决换行，
+        # minimumSizeHint 仍按最长不可断词计（长路径可达 900px+），Ignored 才真正放开下限）
+        self._data_path = QLabel(str(self._root))
+        self._data_path.setObjectName("dataPathLabel")
+        self._data_path.setWordWrap(True)
+        self._data_path.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         data_row = QHBoxLayout()
-        data_row.addWidget(QLabel(str(self._root)))
+        data_row.addWidget(self._data_path, 1)
         open_data = QPushButton("打开目录")
         open_data.clicked.connect(lambda: self._open(self._root))
         data_row.addWidget(open_data)
-        backup_note = QLabel("备份：配置文件改写前保留同目录 .bak 单代（docs 03 §10.2）。")
+        self._backup_note = QLabel("备份：配置文件改写前保留同目录 .bak 单代（docs 03 §10.2）。")
+        self._backup_note.setObjectName("backupNote")
+        self._backup_note.setWordWrap(True)
+        self._backup_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         # 日志
         self._level = QComboBox()
@@ -115,7 +124,7 @@ class SettingsPage(QWidget):
         layout.addLayout(wl_row)
         layout.addWidget(QLabel("数据"))
         layout.addLayout(data_row)
-        layout.addWidget(backup_note)
+        layout.addWidget(self._backup_note)
         layout.addWidget(QLabel("日志与诊断"))
         layout.addLayout(log_row)
         layout.addWidget(QLabel("关于"))

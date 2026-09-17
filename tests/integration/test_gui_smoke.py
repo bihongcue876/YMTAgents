@@ -8,9 +8,64 @@ from app import bootstrap as bootstrap_mod
 from app import paths
 from gui import theme
 from gui.main_window import MainWindow
+from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX
 from gui.widgets.render.view import RendererView
 from shared.envelope import NewSession, SendMessage, SettingsUpdate
 from tests.mocks.gateway import MockGateway
+
+
+def _window(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
+    return ctx, MainWindow(ctx.bridge, data_root=str(ctx.root))
+
+
+def test_sidebar_collapses_and_restores(tmp_path, monkeypatch, qapp):
+    """回归锚点：侧栏折叠 = 面板藏起收成 rail 图标栏，展开回到上次宽度（rev13）。
+
+    旧版 setFixedWidth(264) 不可折叠不可拖拽；折叠后入口（新对话/模型/设置）必须仍可点，
+    故只藏会话面板、保留 rail。
+    """
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        qapp.processEvents()
+
+        assert window.sidebar.panel_visible() is True
+        assert RAIL_PX + PANEL_MIN_PX <= window.sidebar.minimumWidth() <= RAIL_PX + PANEL_MAX_PX
+
+        window.sidebar.toggle_requested.emit()
+        qapp.processEvents()
+        assert window.sidebar.panel_visible() is False
+        assert window.sidebar.minimumWidth() == RAIL_PX
+
+        # 展开：面板回来，宽度恢复到合法区间
+        window.sidebar.toggle_requested.emit()
+        qapp.processEvents()
+        assert window.sidebar.panel_visible() is True
+        assert window.sidebar.minimumWidth() >= RAIL_PX + PANEL_MIN_PX
+    finally:
+        window.close()
+
+
+def test_main_window_min_width_fits_narrow_screens(tmp_path, monkeypatch, qapp):
+    """回归锚点：主窗口最小宽必须放得进 125% 缩放的 1366 屏（逻辑宽 ~1093px）。
+
+    旧实测：设置页两个长文本 QLabel 不换行，把整页最小宽撑到 710px、
+    窗口最小宽近千 —— 修法 = 长标签 wordWrap + 侧栏可折叠。
+    """
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        qapp.processEvents()
+        assert window.minimumSizeHint().width() <= 1093
+        # 元凶两个标签必须已开换行
+        for name in ("dataPathLabel", "backupNote"):
+            label = window.settings.findChild(QLabel, name)
+            assert label is not None, name
+            assert label.wordWrap(), f"{name} 必须开 wordWrap"
+    finally:
+        window.close()
 
 
 def test_main_window_dispatch(tmp_path, monkeypatch, qapp):

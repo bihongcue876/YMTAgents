@@ -30,6 +30,17 @@ def test_ansi_colors():
     assert "red" in html
 
 
+def test_page_css_wraps_long_unbroken_strings():
+    """回归锚点：正文与用户气泡必须能折行长 URL/长串（rev13）。
+
+    无 overflow-wrap 时长 URL 溢出容器；代码块保留横向滚动（overflow-x: auto）为业界惯例。
+    """
+    html = markdown_to_html("正文")
+    assert "overflow-wrap: anywhere" in html  # body
+    assert "overflow-wrap: anywhere" in html and "pre-wrap" in html  # .user .bubble
+    assert "overflow-x: auto" in html  # pre 保留横向滚动
+
+
 def test_messages_to_html():
     html = messages_to_html(
         [
