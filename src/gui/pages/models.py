@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -29,14 +30,44 @@ from PySide6.QtWidgets import (
 from shared.envelope import ModelSpec, ProviderSpec
 from shared.errors import ERROR_TEXT
 from shared.ids import PRV, new_id
+from shared.net import is_local_url
 
 from gui import theme
 
-PRESETS = {
-    "OpenAI": "https://api.openai.com/v1",
+#: 云端预设（URL 即 OpenAI 兼容端点；Cherry Studio 式「选预设 → 填 Key → 取模型」）
+CLOUD_PRESETS = {
     "DeepSeek": "https://api.deepseek.com/v1",
-    "Moonshot": "https://api.moonshot.cn/v1",
-    "SiliconFlow": "https://api.siliconflow.cn/v1",
+    "Moonshot Kimi": "https://api.moonshot.cn/v1",
+    "智谱 GLM": "https://open.bigmodel.cn/api/paas/v4",
+    "通义千问 DashScope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "硅基流动 SiliconFlow": "https://api.siliconflow.cn/v1",
+    "火山方舟 Ark": "https://ark.cn-beijing.volces.com/api/v3",
+    "腾讯混元": "https://api.hunyuan.cloud.tencent.com/v1",
+    "百度千帆": "https://qianfan.baidubce.com/v2",
+    "MiniMax": "https://api.minimax.chat/v1",
+    "OpenAI": "https://api.openai.com/v1",
+}
+
+#: 本地模型服务预设：**无需密钥**（spec rev10 §1）
+LOCAL_PRESETS = {
+    "Ollama（本地）": "http://127.0.0.1:11434/v1",
+    "LM Studio（本地）": "http://127.0.0.1:1234/v1",
+    "vLLM / llama.cpp（本地）": "http://127.0.0.1:8000/v1",
+    "Xinference（本地）": "http://127.0.0.1:9997/v1",
+}
+
+PRESETS = {**CLOUD_PRESETS, **LOCAL_PRESETS}
+
+#: 拉取模型列表失败时的**可操作**中文指引（码 → 文案）。
+#: 只报「网络或连接错误」等于把排查成本丢回给用户。
+FETCH_ERROR_HINT = {
+    "network_error": "无法连接该端点：请检查 base_url 与网络（该域名在本机可能不可达）",
+    "whitelist_blocked": "该域名不在网络白名单内：保存供应商后会自动加入",
+    "key_missing": "还没有可用凭据：请填入 API Key；本地服务请把接入类型选为「本地模型服务」",
+    "auth_error": "凭据被拒绝：确认这把 API Key 属于该端点",
+    "provider_not_found": "供应商不存在：刷新后重试",
+    "protocol_error": "该端点未提供模型列表（不支持 /models），请手动填写模型 ID",
+    "model_not_found": "该端点拒绝了请求，请手动填写模型 ID",
 }
 
 
@@ -49,24 +80,33 @@ class ProviderDialog(QDialog):
         self._loading = True
 
         self._name = QLineEdit(provider.name if provider else "")
-        # 接入类型：预设供应商 / 自定义模型 API（供应商仅多加这一行）
+        # 接入类型：预设供应商 / 自定义模型 API / 本地模型服务（无需密钥）
         self._kind = QComboBox()
         self._kind.addItem("预设供应商", "preset")
         self._kind.addItem("自定义模型 API", "custom")
+        self._kind.addItem("本地模型服务（无需密钥）", "local")
         self._kind.currentIndexChanged.connect(self._on_kind_changed)
+        self._auto_switching = False
 
         self._base = QComboBox()
         self._base.setEditable(True)
-        for label, url in PRESETS.items():
+        for label, url in CLOUD_PRESETS.items():
             self._base.addItem(label, url)
+        self._base.insertSeparator(self._base.count())
+        for label, url in LOCAL_PRESETS.items():
+            self._base.addItem(label, url)
+        self._base.currentTextChanged.connect(self._on_base_changed)
         self._key = QLineEdit()
         self._key.setEchoMode(QLineEdit.Password)
         self._key.setPlaceholderText("留空表示保持不变" if provider else "API Key")
 
         if provider:
             self._base.setCurrentText(provider.base_url)
-            is_preset = provider.base_url in PRESETS.values()
-            self._kind.setCurrentIndex(0 if is_preset else 1)
+            if provider.local:
+                self._kind.setCurrentIndex(2)
+            else:
+                is_preset = provider.base_url in PRESETS.values()
+                self._kind.setCurrentIndex(0 if is_preset else 1)
 
         self._models = QTableWidget(0, 2)
         self._models.setHorizontalHeaderLabels(["模型 ID", "上下文窗口"])
@@ -98,15 +138,71 @@ class ProviderDialog(QDialog):
         layout.addWidget(buttons)
 
         self._loading = False
+        # 载入期 _on_kind_changed 被守卫挡住，故显式同步一次控件状态 ——
+        # 否则「编辑一个本地供应商」时密钥框仍是可用的，与类型不符。
+        self._apply_kind(clear_fields=False)
 
     def _on_kind_changed(self, index: int) -> None:
         if self._loading:
             return
-        if index == 1:  # 自定义模型 API
-            self._base.clearEditText()
+        self._apply_kind(clear_fields=not self._auto_switching)
+
+    def _apply_kind(self, *, clear_fields: bool) -> None:
+        """把「接入类型」落到控件状态上（密钥框可用性 / 占位提示）。"""
+        data = self._kind.currentData()
+        if data == "custom":
+            if clear_fields:
+                self._base.clearEditText()
             self._base.setPlaceholderText("https://host/v1（OpenAI 兼容端点）")
+            self._key.setDisabled(False)
+            self._key.setPlaceholderText("留空表示保持不变" if self._existing else "API Key")
+        elif data == "local":
+            if clear_fields:
+                self._base.clearEditText()
+                self._key.clear()
+            self._base.setPlaceholderText("http://127.0.0.1:11434/v1（Ollama / LM Studio / vLLM）")
+            self._key.setDisabled(True)
+            self._key.setPlaceholderText("本地服务无需密钥")
         else:
             self._base.setPlaceholderText("选择或输入 OpenAI 兼容端点")
+            self._key.setDisabled(False)
+            self._key.setPlaceholderText("留空表示保持不变" if self._existing else "API Key")
+
+    def _base_url(self) -> str:
+        """解析 base_url：**以用户可见的文本为准**。
+
+        可编辑下拉里 `currentData()` 会返回残留选中项的数据 —— 此前直接取它，
+        导致「手输的 URL 被静默换成下拉里选中的预设地址」（spec rev10 §3）。
+        规则：文本命中某个预设项（标签）时取该项 URL，否则一律用文本本身。
+        """
+        text = self._base.currentText().strip()
+        if not text:
+            return ""
+        for index in range(self._base.count()):
+            if text == self._base.itemText(index):
+                return str(self._base.itemData(index) or text)
+        return text
+
+    def _on_base_changed(self, text: str) -> None:
+        """地址填成本机就自动切「本地模型服务」，填回远端则切回自定义。
+
+        本地服务（Ollama / LM Studio / vLLM）不需要鉴权，让用户自己去理解
+        「为什么本地也要填 Key」是多余的心智负担。
+        """
+        if self._loading or self._auto_switching:
+            return
+        if is_local_url(text):
+            if self._kind.currentData() != "local":
+                self._switch_kind(2)
+        elif text.strip() and self._kind.currentData() == "local":
+            self._switch_kind(1)
+
+    def _switch_kind(self, index: int) -> None:
+        self._auto_switching = True
+        try:
+            self._kind.setCurrentIndex(index)
+        finally:
+            self._auto_switching = False
 
     def _add_row(self, model_id: str, ctx_window: int) -> None:
         row = self._models.rowCount()
@@ -134,11 +230,18 @@ class ProviderDialog(QDialog):
         return ProviderSpec(
             id=self._provider_id,
             name=self._name.text().strip() or "未命名",
-            base_url=self._base.currentData() or self._base.currentText().strip(),
+            base_url=self._base_url(),
             models=models,
+            local=self.is_local(),
         )
 
+    def is_local(self) -> bool:
+        """当前接入类型是否为「本地模型服务」（免密钥）。"""
+        return self._kind.currentData() == "local"
+
     def api_key(self) -> str | None:
+        if self.is_local():
+            return None  # 本地服务不需要密钥（core 侧亦按 local 放行）
         text = self._key.text().strip()
         return text or None
 
@@ -153,6 +256,7 @@ class ModelPickerDialog(QDialog):
         self,
         candidates: list[str],
         known: dict[str, int] | None = None,
+        allow_bind_main: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -169,6 +273,12 @@ class ModelPickerDialog(QDialog):
         hint = QLabel("勾选后点「确定」即写入该供应商的模型表；上下文窗口未知的按 0 记，可稍后编辑。")
         hint.setWordWrap(True)
 
+        # main 槽位还没绑定时，顺手绑上第一个选中的模型 —— 否则「导入了模型但还不能对话」
+        self._bind_main: QCheckBox | None = None
+        if allow_bind_main:
+            self._bind_main = QCheckBox("同时把第一个选中的模型设为 main 槽位")
+            self._bind_main.setChecked(True)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -177,7 +287,12 @@ class ModelPickerDialog(QDialog):
         layout.addWidget(QLabel(f"端点自报 {len(candidates)} 个模型："))
         layout.addWidget(self._list)
         layout.addWidget(hint)
+        if self._bind_main is not None:
+            layout.addWidget(self._bind_main)
         layout.addWidget(buttons)
+
+    def should_bind_main(self) -> bool:
+        return bool(self._bind_main is not None and self._bind_main.isChecked())
 
     def selected_models(self) -> list[ModelSpec]:
         out: list[ModelSpec] = []
@@ -198,6 +313,7 @@ class ModelsPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._providers: list[ProviderSpec] = []
+        self._slots: dict = {}
         self._test_labels: dict[tuple[str, str], QLabel] = {}
         self._fetch_labels: dict[str, QLabel] = {}
         self._badges: dict[str, QLabel] = {}
@@ -237,6 +353,7 @@ class ModelsPage(QWidget):
     # -- 更新 --------------------------------------------------------------
     def update_providers(self, providers, slots) -> None:
         self._providers = list(providers)
+        self._slots = dict(slots or {})
         self._rebuild()
 
         self._loading = True
@@ -277,10 +394,16 @@ class ModelsPage(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{provider.name}</b>"))
-        status = "已存储" if provider.key_status == "stored" else "未设置"
+        if provider.local:
+            # 本地服务不需要密钥：显示「未设置」会把人引向错误的排查方向
+            status, stored = "本地 · 无需密钥", True
+        elif provider.key_status == "stored":
+            status, stored = "已存储", True
+        else:
+            status, stored = "未设置", False
         badge = QLabel(status)
         badge.setObjectName("keyBadge")
-        badge.setProperty("keyStored", provider.key_status == "stored")
+        badge.setProperty("keyStored", stored)
         self._badges[provider.id] = badge
         header.addWidget(badge)
         header.addStretch(1)
@@ -342,12 +465,10 @@ class ModelsPage(QWidget):
         label = self._fetch_labels.get(event.provider_id)
         if not event.ok:
             code = event.error or ""
-            if code == "protocol_error":
-                text = "失败 · 该端点未提供模型列表（不支持 /models），请手动填写模型 ID"
-            else:
-                text = f"失败 · {ERROR_TEXT.get(code, code)}"
+            # 指引优先于码：写清「下一步做什么」，码只作兜底（未知码直接显示）
+            hint = FETCH_ERROR_HINT.get(code) or ERROR_TEXT.get(code, code)
             if label is not None:
-                label.setText(text)
+                label.setText(f"失败 · {hint}")
                 label.setProperty("fetchOk", False)
                 theme.restyle(label)
             return
@@ -361,11 +482,16 @@ class ModelsPage(QWidget):
             theme.restyle(label)
 
         known = {m.id: m.ctx_window for m in provider.models}
-        dialog = ModelPickerDialog(event.models, known, self)
+        dialog = ModelPickerDialog(
+            event.models, known, allow_bind_main=not self._slots.get("main"), parent=self
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         models = dialog.selected_models()
         self.upsert_requested.emit(provider.model_copy(update={"models": models}), None)
+        if dialog.should_bind_main() and models:
+            # 导入即绑定：否则「模型导进来了但还不能对话」，还得再找一次槽位下拉
+            self.slot_requested.emit("main", models[0].id)
 
     def set_theme(self, name: str | None) -> None:
         """主题切换后重算属性选择器（Qt 不会自动重算，须显式 unpolish/polish）。"""

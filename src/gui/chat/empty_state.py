@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 APP_NAME = "言明通 / YMTAgents"
 TAGLINE = "本地优先的个人超级 Agent —— 会话、密钥与数据都留在本机。"
-HINT_NO_PROVIDER = "还没有可用模型：先「添加模型」，填入 API Key，再绑定 main 槽位。"
+HINT_NO_PROVIDER = "还没有可用模型：点「添加模型」——云端选预设并填 API Key，本地服务（Ollama / LM Studio）无需密钥。"
 HINT_READY = "模型已就绪，在下方输入框开始对话。"
 
 
