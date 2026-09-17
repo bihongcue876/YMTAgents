@@ -8,6 +8,7 @@ from shared.envelope import (
     ArchiveSession,
     CancelTurn,
     DeleteSession,
+    FetchModels,
     NewSession,
     ProviderDelete,
     ProviderUpsert,
@@ -80,6 +81,8 @@ class MainWindow(QMainWindow):
         c.cancel_turn.connect(lambda: self.bus.submit(CancelTurn()))
         c.switch_model.connect(lambda mid: self.bus.submit(SwitchModel(slot="main", model_id=mid)))
         c.rename_session.connect(self._on_rename)
+        # 空状态 CTA（rev9 §6）：无供应商时一键跳模型配置页
+        c.add_model.connect(lambda: self.stack.setCurrentWidget(self.models))
 
         m = self.models
         m.upsert_requested.connect(
@@ -89,6 +92,8 @@ class MainWindow(QMainWindow):
         m.test_requested.connect(
             lambda pid, mid: self.bus.submit(TestConnection(provider_id=pid, model_id=mid))
         )
+        # 模型导入（rev9 §2）：拉取端点自报的模型列表，用户勾选后走既有 upsert 落盘
+        m.models_requested.connect(lambda pid: self.bus.submit(FetchModels(provider_id=pid)))
         # 模型配置页·槽位绑定区 → 全局槽位（models.json 的 slots，spec rev4）
         m.slot_requested.connect(
             lambda slot, mid: self.bus.submit(SetSlot(slot=slot, model_id=mid or None))
@@ -130,7 +135,7 @@ class MainWindow(QMainWindow):
         elif t == "session.created":
             self._current_session_id = event.session_id
             self.chat.set_title(event.title)
-            self.chat.messages.clear()
+            self.chat.clear()
             self.stack.setCurrentWidget(self.chat)
         elif t == "session.events":
             self._current_session_id = event.session_id
@@ -149,6 +154,8 @@ class MainWindow(QMainWindow):
             self.chat.set_models(event.providers, event.slots.get("main"))
         elif t == "provider.test.result":
             self.models.on_test_result(event)
+        elif t == "provider.models.result":
+            self.models.on_models_result(event)
         elif t == "settings.state":
             ui = event.data.get("ui", {})
             self._apply_appearance(ui.get("theme"), ui.get("font_size"))

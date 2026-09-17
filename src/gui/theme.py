@@ -153,6 +153,8 @@ QWidget {{ background: {p.bg}; color: {p.fg}; font-size: {fs["ui"]}px; }}
 QMainWindow, QDialog {{ background: {p.bg}; }}
 QLabel {{ background: transparent; }}
 QLabel#pageTitle {{ font-size: {fs["title"]}px; font-weight: 600; }}
+QLabel#emptyTitle {{ font-size: {fs["title"]}px; font-weight: 600; color: {p.fg}; }}
+QLabel#emptyHint {{ color: {p.muted}; }}
 QToolTip {{ background: {p.surface}; color: {p.fg}; border: 1px solid {p.border}; }}
 
 QPushButton {{
@@ -215,6 +217,9 @@ QProgressBar::chunk {{ background: {p.accent}; }}
 /* 状态色：由属性驱动，主题切换即整体换色（勿在控件上写死颜色） */
 QLabel#keyBadge[keyStored="true"], QLabel#testResult[testOk="true"] {{ color: {p.ok}; }}
 QLabel#keyBadge[keyStored="false"], QLabel#testResult[testOk="false"] {{ color: {p.danger}; }}
+QLabel#fetchResult {{ color: {p.muted}; }}
+QLabel#fetchResult[fetchOk="true"] {{ color: {p.ok}; }}
+QLabel#fetchResult[fetchOk="false"] {{ color: {p.danger}; }}
 """
 
 

@@ -66,3 +66,7 @@ class InputBar(QWidget):
 
     def clear(self) -> None:
         self._edit.clear()
+
+    def focus(self) -> None:
+        """把焦点给输入框（空状态 CTA「开始对话」与新建会话后使用）。"""
+        self._edit.setFocus()

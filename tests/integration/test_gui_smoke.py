@@ -90,3 +90,99 @@ def test_renderer_view_forwards_font_size(monkeypatch, qapp):
     view = RendererView()
     view.set_markdown("hi", "dark", "xlarge")
     assert captured["args"] == ("hi", "dark", "xlarge")
+
+
+# -- 空状态与模型导入（spec rev9 §2/§6） -------------------------------------
+
+
+def test_empty_state_toggles_cta_and_switches_page(tmp_path, monkeypatch, qapp):
+    """回归锚点：A1 要求对话视图空状态含「添加模型」CTA —— 此前全项目没有空状态实现。
+
+    空状态与消息流互斥；CTA 随「有无供应商」切换，无供应商时点它跳模型配置页。
+    """
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
+    window = MainWindow(ctx.bridge, data_root=str(ctx.root))
+    list_providers = ctx.gateway.list_providers
+    try:
+        # 无供应商：CTA = 添加模型
+        monkeypatch.setattr(ctx.gateway, "list_providers", lambda: [])
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        assert window.chat._stack.currentWidget() is window.chat.empty
+        assert window.chat.empty.cta_text() == "添加模型"
+
+        window.chat.empty._on_cta()
+        qapp.processEvents()
+        assert window.stack.currentWidget() is window.models
+
+        # 有供应商：CTA = 开始对话；发消息后空状态让位给消息流
+        monkeypatch.setattr(ctx.gateway, "list_providers", list_providers)
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        assert window.chat.empty.cta_text() == "开始对话"
+
+        ctx.controller.handle(NewSession(title="空状态"))
+        qapp.processEvents()
+        assert window.chat._stack.currentWidget() is window.chat.empty
+
+        ctx.controller.handle(SendMessage(text="hi"))
+        qapp.processEvents()
+        assert window.chat._stack.currentWidget() is window.chat.messages
+    finally:
+        ctx.worker.stop()
+
+
+def test_models_page_reports_fetch_failure_in_chinese(tmp_path, monkeypatch, qapp):
+    """端点不支持 /models 时给出可执行的中文指引，而不是裸错误码。"""
+    from shared.envelope import ProviderModels
+
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
+    window = MainWindow(ctx.bridge, data_root=str(ctx.root))
+    try:
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        provider_id = window.models._providers[0].id
+
+        window.models.on_models_result(
+            ProviderModels(provider_id=provider_id, ok=False, models=[], error="protocol_error")
+        )
+        label = window.models._fetch_labels[provider_id]
+        assert "手动填写" in label.text()
+
+        window.models.on_models_result(
+            ProviderModels(provider_id=provider_id, ok=False, models=[], error="key_missing")
+        )
+        assert "凭据" in window.models._fetch_labels[provider_id].text()
+    finally:
+        ctx.worker.stop()
+
+
+def test_models_page_fetch_ok_opens_picker(tmp_path, monkeypatch, qapp):
+    """获取成功后弹勾选框；取消则不改配置（勾选结果经既有 upsert 落盘）。"""
+    from PySide6.QtWidgets import QDialog
+
+    from gui.pages import models as models_mod
+    from shared.envelope import ProviderModels
+
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
+    window = MainWindow(ctx.bridge, data_root=str(ctx.root))
+    seen: list = []
+    try:
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        provider_id = window.models._providers[0].id
+        monkeypatch.setattr(models_mod.ModelPickerDialog, "exec", lambda self: QDialog.Rejected)
+        window.models.upsert_requested.connect(lambda spec, key: seen.append((spec, key)))
+
+        window.models.on_models_result(
+            ProviderModels(
+                provider_id=provider_id, ok=True, models=["m-a", "m-b"], error=None
+            )
+        )
+        assert "2" in window.models._fetch_labels[provider_id].text()
+        assert seen == []  # 取消 → 不落盘
+    finally:
+        ctx.worker.stop()

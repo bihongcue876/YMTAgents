@@ -51,6 +51,10 @@ class MessageList(QWidget):
         return bool(self._messages) and self._messages[-1].get("role") == "assistant"
 
     # -- 操作 --------------------------------------------------------------
+    def is_empty(self) -> bool:
+        """消息流是否为空（空状态切换判据）。"""
+        return not self._messages
+
     def clear(self) -> None:
         self._messages.clear()
         self._render()
