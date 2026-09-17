@@ -26,6 +26,7 @@ class ProviderConfig(BaseModel):
     name: str
     base_url: str
     key_ref: str | None = None  # keyring://ymt/<prv_id>；None = 未设置密钥
+    local: bool = False  # 本地模型服务：免密钥（spec rev10 §1）
     models: list[ModelConfig] = Field(default_factory=list)
 
 

@@ -3,17 +3,14 @@
 - 规则：域名精确或 `*.后缀` 匹配。
 - 默认拒绝（P2）。
 - 约束本应用进程的一切出网；MCP 子进程不计入（界面另行明示）。
+- `domain_of` 已下沉到 `shared.net`（gui 也要用，而 gui 不得 import core），此处保留再导出。
 """
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from shared.net import domain_of
 
-
-def domain_of(url: str) -> str:
-    """从 URL 提取小写主机名；无法解析时返回空串。"""
-    parsed = urlparse(url if "://" in url else f"https://{url}")
-    return (parsed.hostname or "").lower()
+__all__ = ["Whitelist", "domain_of"]
 
 
 def _rule_matches(rule: str, host: str) -> bool:

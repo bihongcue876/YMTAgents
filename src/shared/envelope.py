@@ -53,6 +53,7 @@ class ProviderSpec(BaseModel):
     base_url: str
     models: list[ModelSpec] = Field(default_factory=list)
     key_status: Literal["stored", "missing", "error"] = "missing"
+    local: bool = False  # 本地模型服务：免密钥（spec rev10 §1）
 
 
 class SessionMeta(BaseModel):
