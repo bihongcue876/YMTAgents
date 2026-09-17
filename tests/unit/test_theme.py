@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from PySide6.QtGui import QPalette
 
 from gui import theme
 
@@ -150,6 +151,28 @@ def test_apply_sets_font_size(qapp):
         assert f"font-size: {theme.font_px('ui', 'xlarge')}px" in qapp.styleSheet()
     finally:
         theme.apply(theme.DEFAULT_THEME, theme.DEFAULT_FONT_SIZE)  # 还原，避免影响同进程其它用例
+
+
+def test_apply_syncs_qpalette(qapp):
+    """调色板必须跟随主题（spec rev12 §1）。
+
+    QSS 覆盖不到的绘制（QFrame 边框取 Mid/Dark、禁用态文字等）直接读调色板。
+    实测缺陷：应用暗色主题后 `QApplication.palette()` 仍是亮色默认
+    （Window=#efefef、Mid=#b8b8b8）→ 暗色界面残留亮灰元素。
+    """
+    from gui import app_palette
+
+    try:
+        theme.apply("dark")
+        p = theme.palette("dark")
+        pal = qapp.palette()
+        assert pal.color(QPalette.Window).name().lower() == p.bg.lower()
+        assert pal.color(QPalette.Mid).name().lower() == p.border.lower()
+        assert pal.color(QPalette.Dark).name().lower() == p.border.lower()
+        assert pal.color(QPalette.Disabled, QPalette.Text).name().lower() == p.muted.lower()
+        # 颜色仍须单一来源：app_palette 的每个取色都来自 theme token
+    finally:
+        theme.apply(theme.DEFAULT_THEME, theme.DEFAULT_FONT_SIZE)
 
 
 def test_gui_has_no_hardcoded_font_size_literals():

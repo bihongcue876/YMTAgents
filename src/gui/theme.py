@@ -170,6 +170,9 @@ QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit, QTextBrowser {{
     border: 1px solid {p.border}; border-radius: 6px; padding: 4px 6px;
     selection-background-color: {p.accent}; selection-color: {p.bg};
 }}
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{
+    color: {p.muted}; background: {p.bg}; border-color: {p.border};
+}}
 QComboBox::drop-down {{ border: 0; width: 18px; }}
 QComboBox QAbstractItemView {{
     background: {p.surface}; color: {p.fg};
@@ -278,14 +281,21 @@ a {{ color: {p.accent}; }}
 
 
 def apply(name: str | None, font_size: str | None = None) -> str:
-    """把外观 QSS 应用到当前 QApplication，返回**实际生效**的主题名。
+    """把外观（QSS + **调色板**）应用到当前 QApplication，返回**实际生效**的主题名。
+
+    QSS 覆盖控件样式，但有一批绘制**不走 QSS**、直接取调色板
+    （QFrame 边框、禁用态、微调框箭头等）—— 只换 QSS 不换调色板，
+    暗色下就会残留亮灰元素（spec rev12 §1）。故此处两者一起应用。
 
     Qt 为延迟导入：本模块在无 Qt 环境（如纯渲染单测）下仍可导入。
     """
     from PySide6.QtWidgets import QApplication
 
+    from gui.app_palette import apply as apply_palette
+
     p = palette(name)
     app = QApplication.instance()
     if app is not None:
         app.setStyleSheet(stylesheet(p.name, font_size))
+        apply_palette(p.name)
     return p.name

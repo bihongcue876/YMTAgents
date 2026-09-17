@@ -31,12 +31,30 @@ class RendererView(QWidget):
                 self._view = QTextBrowser(self)
         else:
             self._view = QTextBrowser(self)
+        self._html = ""
+        self._dirty = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._view)
 
     def set_html(self, html: str) -> None:
+        """整帧替换页面内容。
+
+        **隐藏期间的内容可能不生效**：WebEngine 对不可见视图的加载/合成会被推迟或丢弃
+        （用户从设置页切主题再回对话页时，消息流就停留在旧外观甚至空白）。
+        故隐藏时置脏标记，`showEvent` 时重放一次。
+        """
+        self._html = html
+        self._dirty = not self.isVisible()
         self._view.setHtml(html)
+        self._view.update()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        if self._dirty:
+            self._dirty = False
+            self._view.setHtml(self._html)
+            self._view.update()
 
     def set_markdown(
         self,
@@ -45,4 +63,4 @@ class RendererView(QWidget):
         font_size: str | None = DEFAULT_FONT_SIZE,
     ) -> None:
         """渲染 Markdown；字号档位必须一并透传，否则调用方无法随外观设置缩放。"""
-        self._view.setHtml(markdown_to_html(text, theme, font_size))
+        self.set_html(markdown_to_html(text, theme, font_size))

@@ -140,6 +140,35 @@ def test_renderer_view_forwards_font_size(monkeypatch, qapp):
     assert captured["args"] == ("hi", "dark", "xlarge")
 
 
+def test_renderer_view_replays_hidden_updates(qapp):
+    """回归锚点：WebEngine 对**不可见视图**的 setHtml 会被推迟或丢弃（spec rev12 §1）。
+
+    用户在设置页切主题 → 对话页隐藏期间收到重渲染 → 切回后页面停留在旧外观甚至空白。
+    修复：隐藏期置脏标记，showEvent 重放。本用例用降级路径（QTextBrowser）钉住该协议。
+    """
+    view = RendererView()
+    calls: list[str] = []
+    view._view.setHtml = lambda html: calls.append(html)  # type: ignore[method-assign]
+
+    # 隐藏期更新：应记脏（不丢弃内容），真正 setHtml 至多一次（离屏下 isVisible 可能为 False）
+    view.set_html("<html>first</html>")
+    if not view.isVisible():
+        assert view._dirty, "隐藏期更新必须置脏"
+    shown_at = len(calls)
+
+    # showEvent 重放：脏标记被消费后再次 setHtml
+    view.show()
+    qapp.processEvents()
+    assert not view._dirty
+    assert len(calls) > shown_at, "showEvent 必须重放隐藏期的更新"
+    assert calls[-1] == "<html>first</html>"
+
+    # 可见期间的更新直接生效、不置脏
+    view.set_html("<html>second</html>")
+    assert not view._dirty
+    assert calls[-1] == "<html>second</html>"
+
+
 # -- 空状态与模型导入（spec rev9 §2/§6） -------------------------------------
 
 
