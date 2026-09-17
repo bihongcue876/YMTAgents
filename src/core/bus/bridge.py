@@ -14,7 +14,8 @@ import queue
 from pydantic import ValidationError
 from PySide6.QtCore import QObject, Signal
 
-from shared.envelope import ErrorReport, parse_request
+from shared.envelope import REQUEST_MODELS, ErrorReport, parse_request
+from shared.redact import redact
 
 log = logging.getLogger(__name__)
 
@@ -27,17 +28,31 @@ class BusBridge(QObject):
         self._queue: queue.Queue = queue.Queue()
 
     def submit(self, request: object) -> None:
-        """GUI 线程调用；非阻塞，立即返回。"""
-        try:
-            if isinstance(request, dict):
+        """GUI 线程调用；非阻塞，立即返回。
+
+        校验失败**一律**回 `invalid_request`：dict 走 pydantic 校验，
+        非 dict 对象走类型守卫 —— 二者都不得静默入队或静默丢弃（spec rev9 §1）。
+        """
+        if isinstance(request, dict):
+            try:
                 request = parse_request(request)
-        except ValidationError as exc:
+            except ValidationError as exc:
+                self.emit_event(
+                    ErrorReport(
+                        scope="system",
+                        code="invalid_request",
+                        message="请求格式不合法",
+                        detail=redact(str(exc))[:500],
+                    )
+                )
+                return
+        elif not isinstance(request, REQUEST_MODELS):
             self.emit_event(
                 ErrorReport(
                     scope="system",
                     code="invalid_request",
-                    message="请求格式不合法",
-                    detail=str(exc)[:500],
+                    message="请求格式不合法：不是已知的请求类型。",
+                    detail=f"obj={type(request).__name__}",
                 )
             )
             return

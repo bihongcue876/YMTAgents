@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Union, get_args
 
 from pydantic import BaseModel, Field, TypeAdapter, field_serializer
 
@@ -149,6 +149,17 @@ class TestConnection(Envelope):
     __test__ = False  # 阻止 pytest 误收集
 
 
+class FetchModels(Envelope):
+    """拉取供应商端点自报的模型 ID 列表（spec rev9 §2）。
+
+    用途：模型导入免手填 —— 用户不必凭空知道模型 ID，点一下即从端点取回候选。
+    取回的是**候选**，是否登记仍由用户决定（不自动写配置）。
+    """
+
+    type: Literal["provider.models"] = "provider.models"
+    provider_id: str
+
+
 class SettingsUpdate(Envelope):
     type: Literal["settings.update"] = "settings.update"
     section: Literal["context", "network", "logging", "ui"] = "context"
@@ -225,6 +236,16 @@ class TestResult(Envelope):
     error: str | None = None
 
 
+class ProviderModels(Envelope):
+    """`provider.models` 的结果（spec rev9 §2）：端点自报的模型 ID 列表。"""
+
+    type: Literal["provider.models.result"] = "provider.models.result"
+    provider_id: str
+    ok: bool
+    models: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
 class HealthReport(Envelope):
     type: Literal["health.report"] = "health.report"
     modules: dict[str, str] = Field(default_factory=dict)
@@ -263,6 +284,7 @@ Request = Annotated[
         ProviderUpsert,
         ProviderDelete,
         TestConnection,
+        FetchModels,
         SettingsUpdate,
     ],
     Field(discriminator="type"),
@@ -279,12 +301,18 @@ Event = Annotated[
         SessionEvents,
         ProviderList,
         TestResult,
+        ProviderModels,
         HealthReport,
         ErrorReport,
         SettingsState,
     ],
     Field(discriminator="type"),
 ]
+
+# 联合成员类型元组：供边界层做**实例类型守卫**（不入队的对象必须回 invalid_request，
+# 而不是被静默丢弃，spec rev9 §1）。由上面的联合派生，避免两处清单漂移。
+REQUEST_MODELS: tuple[type[BaseModel], ...] = get_args(get_args(Request)[0])
+EVENT_MODELS: tuple[type[BaseModel], ...] = get_args(get_args(Event)[0])
 
 _REQUEST_ADAPTER = TypeAdapter(Request)
 _EVENT_ADAPTER = TypeAdapter(Event)

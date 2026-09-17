@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,22 @@ class EventSink:
         if truncated:
             self.append_audit("event_stream_truncated", session_id=session_id)
         return events
+
+    def fsync(self, session_id: str) -> None:
+        """把该会话事件流刷到磁盘（docs 03 §10「会话结束时 fsync」）。
+
+        append 已逐条 flush；fsync 进一步把 OS 缓冲落到物理介质，
+        使「正常结束」的会话不再受断电影响（A12 只容忍**未 flush**的末条）。
+        """
+        path = self.events_path(session_id)
+        if not path.exists():
+            return
+        try:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError:
+            log.warning("事件流 fsync 失败：%s", session_id)
 
     def append_audit(self, action: str, **fields: Any) -> None:
         path = self.root / "logs" / "audit.jsonl"
