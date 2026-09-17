@@ -411,3 +411,113 @@ def test_list_remote_models_maps_upstream_errors(tmp_path):
     empty = make_gateway_with_client(tmp_path, _ModelListClient([]))
     assert empty.list_remote_models("prv_1") == (False, [], "protocol_error")
 
+
+# -- 本地模型服务：免密钥（spec rev10 §1） ------------------------------------
+
+
+def test_is_local_url_recognises_loopback():
+    from shared.net import is_local_url
+
+    for url in (
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:1234/v1",
+        "127.0.0.1:8000",
+        "http://0.0.0.0:9997/v1",
+        "http://[::1]:8080/v1",
+    ):
+        assert is_local_url(url), url
+    for url in ("https://api.deepseek.com/v1", "https://api.openai.com/v1", ""):
+        assert not is_local_url(url), url
+
+
+class _LocalCompletions:
+    def create(self, **_kwargs):
+        return object()  # 非流式探测：只要求不抛
+
+
+class _LocalClient:
+    """同时具备 models.list 与 chat.completions.create 的本地服务替身。"""
+
+    def __init__(self, ids: list[str]) -> None:
+        self.models = _ModelsEndpoint(ids)
+        self.chat = types.SimpleNamespace(completions=_LocalCompletions())
+
+
+def seed_local_store(store: ConfigStore, base_url="http://127.0.0.1:11434/v1") -> None:
+    models = ModelsConfig()
+    models.providers.append(
+        ProviderConfig(
+            id="prv_local",
+            name="Ollama",
+            base_url=base_url,
+            local=True,
+            models=[ModelConfig(id="llama3", ctx_window=8192)],
+        )
+    )
+    models.slots["main"] = "llama3"
+    store.save("models", models)
+    settings = SettingsConfig()
+    settings.network.whitelist = ["127.0.0.1"]
+    store.save("settings", settings)
+
+
+def make_local_gateway(tmp_path, client, backend=None) -> ModelGateway:
+    store = ConfigStore(tmp_path)
+    store.ensure_defaults()
+    seed_local_store(store)
+    return ModelGateway(
+        store,
+        keyring=KeyringStore(backend=backend or FakeKeyring()),
+        client_factory=lambda _b, _k: client,
+    )
+
+
+def test_local_provider_works_without_api_key(tmp_path):
+    """回归锚点：本地服务此前一律要求密钥 —— Ollama / LM Studio 永远 `key_missing`（等于不支持）。
+
+    现在 `local=True` 的供应商三条路径都放行：取模型列表 / 测试连接 / 流式对话。
+    """
+    gateway = make_local_gateway(tmp_path, _LocalClient(["llama3"]))
+    assert gateway.list_remote_models("prv_local") == (True, ["llama3"], None)
+    assert gateway.test_connection("prv_local", "llama3")[0] is True
+
+    streamed: list[str] = []
+    store_gateway = make_local_gateway(tmp_path, _Client([_Chunk("本地"), _Chunk(usage=_Usage(3, 1))]))
+    usage = store_gateway.stream_chat(
+        "sess", 0, "llama3", [{"role": "user", "content": "hi"}], None, streamed.append
+    )
+    assert "".join(streamed) == "本地"
+    assert usage.total_tokens == 4
+    assert gateway.list_providers()[0].local is True
+
+
+def test_upsert_local_provider_does_not_store_key(tmp_path):
+    """本地类型即便被塞了密钥也不写凭据管理器；`local` 标记随配置落盘。"""
+    backend = FakeKeyring()
+    store = ConfigStore(tmp_path)
+    store.ensure_defaults()
+    gateway = ModelGateway(
+        store, keyring=KeyringStore(backend=backend), client_factory=make_factory([])
+    )
+    gateway.upsert_provider(
+        ProviderSpec(
+            id="prv_l",
+            name="Ollama",
+            base_url="http://127.0.0.1:11434/v1",
+            models=[ModelSpec(id="llama3")],
+            local=True,
+        ),
+        "不该被存储",
+    )
+    assert backend.data == {}
+    assert gateway.list_providers()[0].local is True
+    assert ConfigStore(tmp_path).load("models").providers[0].local is True
+    assert "127.0.0.1" in gateway.settings.network.whitelist  # 本地地址同样进白名单
+
+
+def test_remote_provider_still_requires_key(tmp_path):
+    """本地放行不得放宽远端：缺密钥仍是 `key_missing`。"""
+    gateway = make_gateway(tmp_path, [], key=None)
+    assert gateway.list_remote_models("prv_1")[2] == "key_missing"
+    assert gateway.test_connection("prv_1", "m1")[2] == "key_missing"
+

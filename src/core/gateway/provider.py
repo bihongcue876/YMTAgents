@@ -36,6 +36,10 @@ log = logging.getLogger(__name__)
 SILENT_TIMEOUT_S = 60.0
 CONNECT_TIMEOUT_S = 15.0
 
+#: 本地模型服务（Ollama / LM Studio / vLLM）不需要鉴权，但 OpenAI SDK 要求 api_key 非空，
+#: 故用一个明确的占位串 —— 它不会被发往任何远程端点（spec rev10 §1）。
+LOCAL_API_KEY = "local-no-key"
+
 
 class CancelTokenLike(Protocol):
     def is_cancelled(self) -> bool: ...
@@ -165,8 +169,19 @@ class ModelGateway(IModelGateway):
                 ModelSpec(id=m.id, ctx_window=m.ctx_window, tags=list(m.tags))
                 for m in pc.models
             ],
-            key_status=self.keyring.status(pc.id),
+            key_status=self.keyring.status(pc.id) if not pc.local else "missing",
+            local=pc.local,
         )
+
+    def _api_key_for(self, pc: ProviderConfig) -> str | None:
+        """取该供应商的调用凭据；`None` 表示缺凭据（调用方据此回 `key_missing`）。
+
+        本地服务按 `local` 标记放行：此前一律要求密钥，导致 Ollama / LM Studio
+        这类无需鉴权的本地端点永远报 `key_missing`（等于不支持，spec rev10 §1）。
+        """
+        if pc.local:
+            return LOCAL_API_KEY
+        return self.keyring.get_key(pc.id)
 
     def list_providers(self) -> list[ProviderSpec]:
         return [self._to_spec(p) for p in self.models.providers]
@@ -190,11 +205,12 @@ class ModelGateway(IModelGateway):
             pc = existing
         pc.name = spec.name
         pc.base_url = spec.base_url
+        pc.local = spec.local
         pc.models = [
             ModelConfig(id=m.id, ctx_window=m.ctx_window, tags=list(m.tags))
             for m in spec.models
         ]
-        if api_key:
+        if api_key and not pc.local:
             self.keyring.set_key(spec.id, api_key)
             pc.key_ref = f"keyring://{self.keyring.service}/{spec.id}"
         self.store.save("models", self.models)
@@ -229,7 +245,7 @@ class ModelGateway(IModelGateway):
             return False, None, "provider_not_found"
         if not self.whitelist.is_allowed(provider.base_url):
             return False, None, "whitelist_blocked"
-        api_key = self.keyring.get_key(provider_id)
+        api_key = self._api_key_for(provider)
         if not api_key:
             return False, None, "key_missing"
         client = self._client(provider.base_url, api_key)
@@ -259,7 +275,7 @@ class ModelGateway(IModelGateway):
             return False, [], "provider_not_found"
         if not self.whitelist.is_allowed(provider.base_url):
             return False, [], "whitelist_blocked"
-        api_key = self.keyring.get_key(provider_id)
+        api_key = self._api_key_for(provider)
         if not api_key:
             return False, [], "key_missing"
         client = self._client(provider.base_url, api_key)
@@ -292,7 +308,7 @@ class ModelGateway(IModelGateway):
             )
         if not self.whitelist.is_allowed(provider.base_url):
             raise GatewayBlocked("已被网络白名单拦截：该供应商地址不在允许列表内")
-        api_key = self.keyring.get_key(provider.id)
+        api_key = self._api_key_for(provider)
         if not api_key:
             raise GatewayAuthError("凭据不可用", code="key_missing")
         client = self._client(provider.base_url, api_key)
