@@ -1,4 +1,8 @@
-docs/
+# 文档与规格：本地-only，不入库（用户要求）。唯一例外：docs/BUILD/ 允许更新并入库。
+# 注意：不能写成「docs/ + !docs/BUILD/」—— git 无法重新包含被排除目录下的内容，
+#      必须先忽略内容（docs/*）、再放行子目录。
+docs/*
+!docs/BUILD/
 spec/
 
 # Python
@@ -14,11 +18,11 @@ __pycache__/
 ymtdata/
 
 # 打包产物
-dist/
-build/
+/dist/
+/build/
 *.spec
 
-AGENTS.md
+/AGENTS.md
 
 # pytest 临时目录（--basetemp 挪入项目内，避免递归删除系统 Temp）
 .pytest_tmp/
