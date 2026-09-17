@@ -21,6 +21,7 @@ class MockGateway(IModelGateway):
         timeout: bool = False,
         fail: Exception | None = None,
         test_result: tuple[bool, int | None, str | None] = (True, 12, None),
+        remote_models: tuple[bool, list[str], str | None] = (True, ["mock-model"], None),
     ) -> None:
         self._chunks = list(chunks)
         self._slots = slots if slots is not None else {"main": model_id}
@@ -30,6 +31,7 @@ class MockGateway(IModelGateway):
         self._timeout = timeout
         self._fail = fail
         self._test_result = test_result
+        self._remote_models = remote_models
         self.calls: list[dict] = []
         self._providers: list[ProviderSpec] = []
 
@@ -69,6 +71,10 @@ class MockGateway(IModelGateway):
     def test_connection(self, provider_id: str, model_id: str) -> tuple[bool, int | None, str | None]:
         self.calls.append({"test_connection": (provider_id, model_id)})
         return self._test_result
+
+    def list_remote_models(self, provider_id: str) -> tuple[bool, list[str], str | None]:
+        self.calls.append({"list_remote_models": provider_id})
+        return self._remote_models
 
     def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta) -> Usage:
         self.calls.append({"model_id": model_id, "messages": messages, "turn_seq": turn_seq})

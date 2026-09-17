@@ -60,6 +60,10 @@ class IModelGateway(ABC):
         """最小连通性探测，返回 (ok, latency_ms, error_code)。"""
 
     @abstractmethod
+    def list_remote_models(self, provider_id: str) -> tuple[bool, list[str], str | None]:
+        """拉取端点自报的模型 ID 列表，返回 (ok, model_ids, error_code)（spec rev9 §2）。"""
+
+    @abstractmethod
     def upsert_provider(self, spec: ProviderSpec, api_key: str | None) -> ProviderSpec:
         """新增或更新供应商；api_key 非空时写入凭据管理器（None = 保持不变）。"""
 
@@ -87,6 +91,10 @@ def _map_exception(exc: Exception) -> GatewayError:
     故归 `model_not_found` 而非笼统的 not_found；其余归 `protocol_error`。
     """
     name = type(exc).__name__
+    if isinstance(exc, GatewayError):
+        # 已是网关异常：保原码。否则「GatewayBlocked / GatewayAuthError」这类类名
+        # 不匹配任何前缀，会被兜底成 network_error，丢掉精确归因（spec rev9 §1）。
+        return exc
     if "Authentication" in name or "Permission" in name:
         return GatewayAuthError("凭据不可用")
     if "Timeout" in name:
@@ -238,6 +246,33 @@ class ModelGateway(IModelGateway):
             mapped = _map_exception(exc)
             return False, None, mapped.code
         return True, int((time.perf_counter() - start) * 1000), None
+
+    # -- 拉取端点模型列表（spec rev9 §2） ------------------------------------
+    def list_remote_models(self, provider_id: str) -> tuple[bool, list[str], str | None]:
+        """GET /models（OpenAI 兼容）取回可用模型 ID，供「模型导入」免手填。
+
+        与 `test_connection` 同一条通道：白名单 → 密钥 → 客户端；错误按 rev5 口径归码。
+        取回的是**候选**：不写任何配置，登记与否由用户决定。
+        """
+        provider = self._find_provider(provider_id)
+        if provider is None:
+            return False, [], "provider_not_found"
+        if not self.whitelist.is_allowed(provider.base_url):
+            return False, [], "whitelist_blocked"
+        api_key = self.keyring.get_key(provider_id)
+        if not api_key:
+            return False, [], "key_missing"
+        client = self._client(provider.base_url, api_key)
+        try:
+            page = client.models.list(timeout=CONNECT_TIMEOUT_S)
+            raw = getattr(page, "data", None) or []
+            ids = {str(getattr(m, "id", "")).strip() for m in raw}
+        except Exception as exc:  # noqa: BLE001 - 统一归码后返回，不抛给调用方
+            return False, [], _map_exception(exc).code
+        models = sorted(i for i in ids if i)
+        if not models:
+            return False, [], "protocol_error"
+        return True, models, None
 
     # -- 流式调用 ----------------------------------------------------------
     def stream_chat(

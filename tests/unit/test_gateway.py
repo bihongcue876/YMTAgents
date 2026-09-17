@@ -336,3 +336,78 @@ def test_default_client_disables_sdk_level_retries():
     client = ModelGateway._default_client("https://api.test.com/v1", "sk-x")
     assert client.max_retries == 0
 
+
+def test_map_exception_preserves_gateway_error_code():
+    """回归锚点：网关异常再次归因会退化成 network_error，丢掉精确码（spec rev9 §1）。"""
+    from core.gateway.provider import _map_exception
+
+    original = GatewayBlocked("已被网络白名单拦截")
+    mapped = _map_exception(original)
+    assert mapped is original
+    assert mapped.code == "whitelist_blocked"
+
+
+# -- 端点模型列表：模型导入免手填（spec rev9 §2） -----------------------------
+
+
+class _ModelObj:
+    def __init__(self, model_id: str) -> None:
+        self.id = model_id
+
+
+class _ModelsResult:
+    def __init__(self, ids: list[str]) -> None:
+        self.data = [_ModelObj(i) for i in ids]
+
+
+class _ModelsEndpoint:
+    def __init__(self, ids: list[str], exc: Exception | None = None) -> None:
+        self._ids = ids
+        self._exc = exc
+
+    def list(self, **_kwargs):
+        if self._exc is not None:
+            raise self._exc
+        return _ModelsResult(self._ids)
+
+
+class _ModelListClient:
+    """只实现 models.list 的替身（list_remote_models 不触碰 chat）。"""
+
+    def __init__(self, ids: list[str], exc: Exception | None = None) -> None:
+        self.models = _ModelsEndpoint(ids, exc)
+        self.chat = types.SimpleNamespace(completions=None)
+
+
+def test_list_remote_models_returns_sorted_unique_ids(tmp_path):
+    client = _ModelListClient(["m2", "m1 ", "m1", ""])
+    gateway = make_gateway_with_client(tmp_path, client)
+    ok, models, error = gateway.list_remote_models("prv_1")
+    assert ok is True and error is None
+    assert models == ["m1", "m2"]  # 去空白、去重、排序
+
+
+def test_list_remote_models_reports_reason_codes(tmp_path):
+    gateway = make_gateway_with_client(tmp_path, _ModelListClient(["m1"]))
+    assert gateway.list_remote_models("不存在") == (False, [], "provider_not_found")
+
+    blocked = make_gateway(tmp_path, [], whitelist=False)
+    assert blocked.list_remote_models("prv_1")[2] == "whitelist_blocked"
+
+    no_key = make_gateway(tmp_path, [], key=None)
+    assert no_key.list_remote_models("prv_1")[2] == "key_missing"
+
+
+def test_list_remote_models_maps_upstream_errors(tmp_path):
+    class AuthenticationError(Exception):
+        pass
+
+    auth = make_gateway_with_client(tmp_path, _ModelListClient([], AuthenticationError()))
+    assert auth.list_remote_models("prv_1") == (False, [], "auth_error")
+
+    network = make_gateway_with_client(tmp_path, _ModelListClient([], RuntimeError()))
+    assert network.list_remote_models("prv_1") == (False, [], "network_error")
+
+    empty = make_gateway_with_client(tmp_path, _ModelListClient([]))
+    assert empty.list_remote_models("prv_1") == (False, [], "protocol_error")
+
