@@ -68,6 +68,7 @@
 - 2026-09-17：**rev10 模型导入对齐 Cherry Studio · 本地模型服务**（见 §13）。
 - 2026-09-17：**rev11 显示裁剪修复与文案清理**（见 §14）。
 - 2026-09-17：**rev12 暗色模式刷新不完整修复**（见 §15）。
+- 2026-09-17：**rev13 美化轮 A：响应式布局**（见 §16）。
 
 ## 7. rev4 轮次记录 — 槽位绑定接线补全（2026-09-11）
 
@@ -469,6 +470,43 @@ rev2 §1.3 与 A1 早已要求空状态 + 「添加模型」CTA，但此前**全
 |---|---|
 | 全量测试 | `uv run pytest` → **146 passed, 2 skipped**（144+2 → 146+2，净增 2，只增不减） |
 | 新增用例 | `test_apply_syncs_qpalette`（调色板跟随主题，含 Disabled/Mid/Dark 组）；`test_renderer_view_replays_hidden_updates`（隐藏期置脏 + showEvent 重放 + 可见期不置脏） |
+| 门禁 | 依赖方向 / 契约 / 主题与字号纪律 全部通过 |
+
+## 16. rev13 轮次记录 — 美化轮 A：响应式布局（2026-09-17）
+
+用户裁决：美化提案里先做 A（响应式布局）；「AI 不方便导入」暂不展开；暗色修复由用户真机验证。
+
+### 16.1 问题（探针实测）
+
+| 项 | 实测 |
+|---|---|
+| 主窗口最小宽 | **1208px**（用户字号档）——125% 缩放的 1366 屏逻辑宽仅 ~1093px → 窗口放不下 |
+| 侧栏 | `setFixedWidth(264)`：不可拖拽、不可折叠 |
+| 消息流 | 正文无 `overflow-wrap` → 长 URL 溢出容器 |
+| 设置页 | 长文本 QLabel 不换行，最小宽被撑到 710px |
+
+### 16.2 修法
+
+| # | 修订 | 落点 |
+|---|---|---|
+| 1 | **侧栏重构为 rail（48px 图标栏）+ 可折叠面板**：折叠后 ☰/⚙/🛠 三个入口仍可点（无需悬浮按钮）；面板宽 180–360 可拖拽；折叠/展开宽度由 MainWindow 的 QSplitter 落实（记住上次宽度） | `gui/sidebar.py`、`gui/main_window.py` |
+| 2 | 主窗口改 **QSplitter**（侧栏 \| 主区），handle 4px、hover 显形（样式入 theme.stylesheet，取色走 token） | `gui/main_window.py`、`gui/theme.py` |
+| 3 | 设置页两个长标签（数据目录路径 / 备份说明）：`wordWrap` + `QSizePolicy.Ignored` —— **wordWrap 只解决换行，minimumSizeHint 仍按最长不可断词计**（长路径实测可到 900px+），Ignored 才真正放开下限 | `gui/pages/settings.py` |
+| 4 | 消息流正文与用户气泡加 `overflow-wrap: anywhere`（长 URL/长串折行）；代码块保留 `overflow-x: auto`（横向滚动为代码块惯例） | `gui/widgets/render/md.py` |
+
+### 16.3 排障记录（一次有价值的反复）
+
+- 加 wordWrap 后最小宽**不降反升**（测试环境 995px）：wordWrap 标签的 minimumSizeHint
+  按**最长不可断词**计算，tmp 路径长于探针路径即被打回原形 → 补 `QSizePolicy.Ignored` 后达标。
+- 教训入 spec rev13 §3：**验证布局修复要用与真实使用等长的输入**（探针里短路径测不出）。
+
+### 16.4 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | `uv run pytest` → **149 passed, 2 skipped**（146+2 → 149+2，净增 3，只增不减） |
+| 新增用例 | 侧栏折叠/展开协议；窗口最小宽 ≤1093px（含两个标签 wordWrap 断言）；消息流 overflow-wrap CSS |
+| 最小宽实测 | 探针环境 998 → **640px**（用户字号档下 1208 → 同比例达标） |
 | 门禁 | 依赖方向 / 契约 / 主题与字号纪律 全部通过 |
 
 
