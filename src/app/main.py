@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import sys
 
 from PySide6.QtWidgets import QApplication
@@ -23,10 +22,7 @@ def _init_webengine() -> None:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    # 日志装配在 bootstrap 内完成（级别取自 settings.logging.level，见 app.logging_setup）
     _init_webengine()
     app = QApplication(sys.argv)
     app.setApplicationName("言明通")
@@ -41,7 +37,9 @@ def main() -> int:
     try:
         return app.exec()
     finally:
+        # 退出收口：停核心线程后结束当前会话（fsync 事件流，docs 03 §10）
         ctx.worker.stop()
+        ctx.controller.shutdown()
 
 
 if __name__ == "__main__":

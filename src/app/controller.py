@@ -13,15 +13,18 @@ from typing import Callable
 from pydantic import ValidationError
 
 from shared.errors import ErrorCode, error_text
+from shared.redact import redact
 from shared.envelope import (
     ArchiveSession,
     CancelTurn,
     DeleteSession,
     ErrorReport,
+    FetchModels,
     HealthReport,
     NewSession,
     ProviderDelete,
     ProviderList,
+    ProviderModels,
     ProviderUpsert,
     RenameSession,
     ResumeSession,
@@ -50,6 +53,8 @@ from core.gateway.provider import ModelGateway
 from core.modules.supervisor import ModuleSupervisor
 from core.registry.registry import Registry
 from core.store.config_store import ConfigStore
+
+from app import logging_setup
 
 log = logging.getLogger(__name__)
 
@@ -81,8 +86,12 @@ class CoreController:
         self.bridge.emit_event(event)
 
     def _report(self, scope: str, code: str, message: str, detail: str | None = None) -> None:
-        """回发错误事件。message 必须是可读中文（不得以码充文案，spec rev5 §4）。"""
-        self.emit(ErrorReport(scope=scope, code=code, message=message, detail=detail))
+        """回发错误事件。message 必须是可读中文（不得以码充文案，spec rev5 §4）。
+
+        detail 一律过脱敏（spec rev9 §3）：错误信息是最容易夹带密钥的出口，
+        且 error 事件会落进 events.jsonl，一旦夹带即持久化。
+        """
+        self.emit(ErrorReport(scope=scope, code=code, message=message, detail=redact(detail)))
 
     def _persist(
         self,
@@ -160,10 +169,19 @@ class CoreController:
             self._on_provider_delete(request)
         elif t == "provider.test":
             self._on_test(request)
+        elif t == "provider.models":
+            self._on_fetch_models(request)
         elif t == "settings.update":
             self._on_settings(request)
         else:
+            # 未知类型**不得静默**：此前只写一条 warning，调用方拿不到任何反馈（spec rev9 §1）。
             log.warning("未知请求类型：%s", t)
+            self._report(
+                "system",
+                ErrorCode.INVALID_REQUEST.value,
+                "请求格式不合法：未知请求类型。",
+                f"type={t!r}",
+            )
 
     # -- 会话 --------------------------------------------------------------
     def _ensure_session(self) -> str:
@@ -288,6 +306,16 @@ class CoreController:
             )
         )
 
+    def _on_fetch_models(self, request: FetchModels) -> None:
+        """拉取端点自报的模型列表（spec rev9 §2）。
+
+        只读探测：结果经 `ProviderModels` 回发，**不写任何配置** —— 是否登记由用户在界面上决定。
+        """
+        ok, models, error = self.gateway.list_remote_models(request.provider_id)
+        self.emit(
+            ProviderModels(provider_id=request.provider_id, ok=ok, models=models, error=error)
+        )
+
     # -- 设置 --------------------------------------------------------------
     def _on_settings(self, request: SettingsUpdate) -> None:
         settings = self.config_store.load("settings")
@@ -323,5 +351,23 @@ class CoreController:
             "设置保存失败：请检查数据目录是否可写。",
         ):
             return
+        if request.section == "logging":
+            # 日志级别**即时生效**：此前只落盘，从不应用（rev9 §4）。
+            logging_setup.apply_level(settings.logging.level)
         self.gateway.reload_settings()
         self._emit_settings()
+
+    # -- 退出收口 ----------------------------------------------------------
+    def shutdown(self) -> None:
+        """结束当前会话并把事件流 fsync 到磁盘（docs 03 §10）。
+
+        由应用入口在**核心线程停止之后**调用，故此处不存在并发写；
+        退出路径不得再向外抛异常。
+        """
+        session_id = self.current_session_id
+        if not session_id:
+            return
+        try:
+            self.store.end(session_id, "app_exit")
+        except Exception:  # noqa: BLE001 - 退出路径不抛
+            log.exception("会话收尾失败")

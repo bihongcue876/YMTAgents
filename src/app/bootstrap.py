@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from app import paths
+from app import logging_setup, paths
 from app.controller import CoreController
 from app.core_thread import CoreWorker
 from core.agent.loop import AgentLoop
@@ -47,6 +47,10 @@ def bootstrap(gateway_factory: Callable[[ConfigStore], ModelGateway] | None = No
     migrate_all(root)
 
     config_store = ConfigStore(root)
+    # 日志装配：级别取自 settings.logging.level（此前该设置从不生效），
+    # 文件落 <数据根>/logs/app.log，并挂脱敏过滤器（rev9 §3/§4）。
+    logging_setup.configure(root, config_store.load("settings").logging.level)
+
     bridge = BusBridge()
     sink = EventSink(root)
     session_store = SessionStore(root, sink)

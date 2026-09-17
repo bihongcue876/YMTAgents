@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from app import bootstrap as bootstrap_mod
 from app import paths
 from shared.envelope import (
+    FetchModels,
     NewSession,
     ProviderSpec,
     ProviderUpsert,
@@ -231,5 +234,110 @@ def test_provider_write_failure_is_reported(tmp_path, monkeypatch, qapp):
         errors = [e for e in events if e.type == "error"]
         assert errors and errors[0].code == "storage_error"
         assert "凭据管理器" in errors[0].message
+    finally:
+        ctx.worker.stop()
+
+
+# -- 未知请求不再静默（spec rev9 §1） ----------------------------------------
+
+
+def test_unknown_request_type_is_reported_not_silent(tmp_path, monkeypatch, qapp):
+    """回归锚点：未知请求类型此前只写一条 warning，调用方拿不到任何反馈。"""
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(SimpleNamespace(type="bogus.request"))
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "invalid_request"
+        assert "未知请求类型" in errors[0].message
+    finally:
+        ctx.worker.stop()
+
+
+def test_bridge_rejects_non_envelope_object(tmp_path, monkeypatch, qapp):
+    """非 dict、也非任一信封类型的对象必须回 invalid_request，而不是静默入队后被丢弃。"""
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.bridge.submit("这不是信封")  # type: ignore[arg-type]
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "invalid_request"
+        assert "str" in (errors[0].detail or "")
+    finally:
+        ctx.worker.stop()
+
+
+def test_error_detail_is_redacted(tmp_path, monkeypatch, qapp):
+    """错误详情一律脱敏：`error` 事件会落进 events.jsonl，夹带密钥即等于持久化泄漏。"""
+    from shared.redact import MASK
+
+    secret = "sk-LEAK1234567890"
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        # 让「失败字段本身就是密钥」：pydantic 会把它写进错误文本，脱敏层必须拦下
+        ctx.controller.handle(SettingsUpdate(section="ui", data={"theme": [secret]}))
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "invalid_request"
+        assert secret not in (errors[0].detail or "")
+        assert MASK in (errors[0].detail or "")
+    finally:
+        ctx.worker.stop()
+
+
+# -- 端点模型列表（spec rev9 §2） -------------------------------------------
+
+
+def test_fetch_models_dispatch(tmp_path, monkeypatch, qapp):
+    """`provider.models` → `provider.models.result`：只读探测，不写任何配置。"""
+    gateway = MockGateway(remote_models=(True, ["a-model", "b-model"], None))
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    before = ctx.config_store.load("models").model_dump()
+    try:
+        ctx.controller.handle(FetchModels(provider_id="prv_mock"))
+        result = [e for e in events if e.type == "provider.models.result"][-1]
+        assert result.ok is True
+        assert result.models == ["a-model", "b-model"]
+        assert ctx.config_store.load("models").model_dump() == before  # 未改配置
+    finally:
+        ctx.worker.stop()
+
+
+def test_fetch_models_failure_is_reported(tmp_path, monkeypatch, qapp):
+    gateway = MockGateway(remote_models=(False, [], "auth_error"))
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(FetchModels(provider_id="prv_mock"))
+        result = [e for e in events if e.type == "provider.models.result"][-1]
+        assert result.ok is False and result.error == "auth_error"
+    finally:
+        ctx.worker.stop()
+
+
+def test_shutdown_ends_current_session(tmp_path, monkeypatch, qapp):
+    """退出收口：结束当前会话并 fsync（docs 03 §10）。"""
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    try:
+        ctx.controller.handle(NewSession())
+        sid = ctx.controller.current_session_id
+        ctx.controller.shutdown()
+        events = ctx.session_store.replay(sid)
+        assert events[-1]["type"] == "session.end"
+        assert events[-1]["payload"]["reason"] == "app_exit"
+    finally:
+        ctx.worker.stop()
+
+
+def test_shutdown_without_session_is_safe(tmp_path, monkeypatch, qapp):
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    try:
+        ctx.controller.shutdown()  # 无当前会话：不得抛
     finally:
         ctx.worker.stop()
