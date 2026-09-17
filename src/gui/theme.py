@@ -173,6 +173,9 @@ QPushButton#railButton {{
 QPushButton#railButton:hover {{ background: {p.surface}; }}
 QPushButton#railButton:pressed {{ background: {p.accent}; color: {p.bg}; }}
 
+/* 辅助说明小字（rev14） */
+QLabel#mutedNote {{ color: {p.muted}; font-size: {font_px("caption", font_size)}px; }}
+
 /* 侧栏分隔条：默认隐形，hover 显形提示可拖拽 */
 QSplitter::handle {{ background: transparent; }}
 QSplitter::handle:hover {{ background: {p.border}; }}

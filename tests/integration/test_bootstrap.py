@@ -103,6 +103,28 @@ def test_slot_set_dispatch_syncs_providers_and_health(tmp_path, monkeypatch, qap
         ctx.worker.stop()
 
 
+def test_switch_without_session_records_last_used(tmp_path, monkeypatch, qapp):
+    """rev14：模型选择 = 「上次使用接续」，没有手动「全局默认」。
+
+    - **无会话**时切换模型不再被丢弃：自动记为上次使用（发消息前先选模型是合法操作）；
+    - 新对话不选模型直接发消息 → 回合用**上次使用**的模型（对齐 Cherry Studio / LobeChat）。
+    """
+    gateway = MockGateway(slots={"main": None})
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(SwitchModel(slot="main", model_id="mock-model"))
+        providers = [e for e in events if e.type == "provider.list"][-1]
+        assert providers.slots["main"] == "mock-model"
+
+        ctx.controller.handle(NewSession(title="L"))
+        ctx.controller.handle(SendMessage(text="hi"))
+        assert gateway.calls[-1]["model_id"] == "mock-model"
+    finally:
+        ctx.worker.stop()
+
+
 def test_unbound_slot_fails_turn_with_model_unbound(tmp_path, monkeypatch, qapp):
     """全局与会话级均未绑定时，回合以 model_unbound 失败而非静默（spec rev5 §2）。
 

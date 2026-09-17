@@ -201,8 +201,6 @@ class CoreController:
             self.agent.cancel(self.current_session_id)
 
     def _on_switch(self, request: SwitchModel) -> None:
-        if not self.current_session_id:
-            return
         # 会话级覆盖目前只落地 main 槽位（`SessionMeta` 只有 `main_model`，其余槽位随轮次启用）。
         # 早前实现把任何槽位的模型都写进 `main_model`：既污染主模型，又让 `model.switch`
         # 事件声称的槽位与生效对象不一致（spec rev8 §3）。此处显式拒绝而非静默改错对象。
@@ -213,7 +211,18 @@ class CoreController:
                 f"会话级模型切换目前仅支持 main 槽位；{request.slot} 随轮次启用。",
             )
             return
-        self.store.set_model(self.current_session_id, request.model_id, request.slot)
+        # rev14 语义：没有「全局默认模型」，只有「上次使用的模型」——
+        # 任何一次选择都自动记为上次使用，新对话从它开始（对齐 Cherry Studio / LobeChat）。
+        # 无会话时也生效：允许「发消息前先选模型」。
+        if request.model_id != self.gateway.get_slots().get("main"):
+            self._persist(
+                "记录最近使用的模型",
+                lambda: self.gateway.set_slot("main", request.model_id),
+                "记录最近使用的模型失败。",
+            )
+        if self.current_session_id:
+            self.store.set_model(self.current_session_id, request.model_id, request.slot)
+        self._emit_providers()
         self._emit_health()
 
     def _on_set_slot(self, request: SetSlot) -> None:

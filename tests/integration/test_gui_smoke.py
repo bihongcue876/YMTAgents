@@ -10,7 +10,16 @@ from gui import theme
 from gui.main_window import MainWindow
 from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX
 from gui.widgets.render.view import RendererView
-from shared.envelope import NewSession, SendMessage, SettingsUpdate
+from shared.envelope import (
+    ModelSpec,
+    NewSession,
+    ProviderSpec,
+    ProviderUpsert,
+    ResumeSession,
+    SendMessage,
+    SettingsUpdate,
+    SwitchModel,
+)
 from tests.mocks.gateway import MockGateway
 
 
@@ -18,6 +27,60 @@ def _window(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
     ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
     return ctx, MainWindow(ctx.bridge, data_root=str(ctx.root))
+
+
+def test_model_dropdown_follows_session_then_last_used(tmp_path, monkeypatch, qapp):
+    """回归锚点（rev14）：模型下拉显示**当前会话**的选择；新对话回落「上次使用」。
+
+    此前下拉恒显 slots.main：恢复一个换过模型的会话，头条显示的却是全局值 —— 说谎。
+    """
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        # 给 mock 端点补两个模型，供切换区分
+        ctx.controller.handle(
+            ProviderUpsert(
+                provider=ProviderSpec(
+                    id="prv_mock",
+                    name="Mock",
+                    base_url="https://mock.local",
+                    models=[
+                        ModelSpec(id="mock-model", ctx_window=8192),
+                        ModelSpec(id="m2", ctx_window=8192),
+                        ModelSpec(id="m3", ctx_window=8192),
+                    ],
+                ),
+                api_key=None,
+            )
+        )
+        qapp.processEvents()
+
+        combo = window.chat.header._model
+        assert combo.currentData() == "mock-model"
+
+        # 会话 A 切到 m2（会话覆盖 + 上次使用）
+        ctx.controller.handle(NewSession(title="A"))
+        qapp.processEvents()
+        sid_a = ctx.controller.current_session_id
+        ctx.controller.handle(SwitchModel(slot="main", model_id="m2"))
+        qapp.processEvents()
+        assert combo.currentData() == "m2"
+
+        # 新会话 B：无自身选择 → 回落「上次使用」= m2（而不是最初的 mock-model）
+        ctx.controller.handle(NewSession(title="B"))
+        qapp.processEvents()
+        assert combo.currentData() == "m2"
+
+        # B 切到 m3；恢复 A → 下拉显示 A 自己的 m2（不被全局 m3 冲掉）
+        ctx.controller.handle(SwitchModel(slot="main", model_id="m3"))
+        qapp.processEvents()
+        assert combo.currentData() == "m3"
+        ctx.controller.handle(ResumeSession(session_id=sid_a))
+        qapp.processEvents()
+        assert combo.currentData() == "m2"
+    finally:
+        window.close()
 
 
 def test_sidebar_collapses_and_restores(tmp_path, monkeypatch, qapp):

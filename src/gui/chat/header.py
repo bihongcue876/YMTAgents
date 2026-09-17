@@ -18,6 +18,7 @@ class ChatHeader(QWidget):
         self._title.editingFinished.connect(self._commit_title)
 
         self._model = QComboBox()
+        self._model.setToolTip("选择对话使用的模型；新对话将从这里选的模型开始")
         self._model.currentIndexChanged.connect(self._on_model_changed)
 
         self._new = QPushButton("新建会话")

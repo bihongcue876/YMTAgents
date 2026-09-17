@@ -281,8 +281,8 @@ class ModelPickerDialog(QDialog):
         hint = QLabel("勾选后点「确定」即写入该供应商的模型表；上下文窗口未知的按 0 记，可稍后编辑。")
         hint.setWordWrap(True)
 
-        # main 没绑、或绑了个候选里没有的模型时，顺手绑到第一个选中项 ——
-        # 否则「导入了模型但还不能对话」，用户还得再去找一次槽位下拉。
+        # 上次使用为空、或指着的模型不在候选里时，顺手设为第一个选中项 ——
+        # 否则「导入了模型但还不能对话」，用户还得再去找一次模型下拉（rev14 语义）。
         self._bind_main: QCheckBox | None = None
         if bind_hint:
             self._bind_main = QCheckBox(bind_hint)
@@ -342,7 +342,8 @@ class ModelsPage(QWidget):
         self._main_slot.lineEdit().editingFinished.connect(self._on_slot_typed)
         self._other_slots = []
         slot_form = QFormLayout()
-        slot_form.addRow("main", self._main_slot)
+        # rev14 语义：main 槽位 = 「上次使用的模型」，自动记录、不用手动设默认
+        slot_form.addRow("上次使用", self._main_slot)
         for name in ("thinking", "fast", "embedding"):
             combo = QComboBox()
             combo.addItem("随轮次启用", "")
@@ -355,7 +356,13 @@ class ModelsPage(QWidget):
         layout.addWidget(add)
         layout.addLayout(self._list)
         layout.addSpacing(12)
-        layout.addWidget(QLabel("槽位绑定"))
+        layout.addWidget(QLabel("槽位"))
+        last_used_note = QLabel(
+            "「上次使用」自动记录你最近选择的模型，新对话从它开始；无需手动设默认。"
+        )
+        last_used_note.setObjectName("mutedNote")
+        last_used_note.setWordWrap(True)
+        layout.addWidget(last_used_note)
         layout.addLayout(slot_form)
         self._loading = False
 
@@ -503,18 +510,18 @@ class ModelsPage(QWidget):
             self.slot_requested.emit("main", models[0].id)
 
     def _main_bind_hint(self, candidates: list[str]) -> str | None:
-        """决定「同时绑定 main」是否出现、以及怎么措辞。
+        """决定「设为开始对话的模型」是否出现、以及怎么措辞（rev14 语义）。
 
-        - main 未绑定 → 默认勾选（首次接入）
-        - main 绑的模型**不在本次候选里** → 也提示改绑：这正是「换了模型表、main 还指着旧 ID」
-          的情形，此时 main 已经是悬空绑定，不提示就会让人对着一个不能用的模型发呆。
-        - main 就在候选里 → 不打扰。
+        - 上次使用为空 → 默认勾选（首次接入）
+        - 上次使用的模型**不在本次候选里** → 也提示改用：这正是「换了模型表、上次使用
+          还指着旧 ID」的情形，不提示就会让人对着一个不能用的模型发呆。
+        - 上次使用的模型就在候选里 → 不打扰。
         """
         current = self._slots.get("main")
         if not current:
-            return "同时把第一个选中的模型设为 main 槽位"
+            return "把第一个选中的模型设为开始对话的模型"
         if current not in set(candidates):
-            return f"当前 main「{current}」不在本次候选内，勾选后改绑到第一个选中项"
+            return f"上次使用的「{current}」不在本次候选内，勾选后改用第一个选中项"
         return None
 
     def set_theme(self, name: str | None) -> None:

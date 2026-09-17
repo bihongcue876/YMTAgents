@@ -41,6 +41,10 @@ class MainWindow(QMainWindow):
 
         self._current_session_id: str | None = None
         self._session_titles: dict[str, str] = {}
+        # rev14：模型下拉 = 会话自身的选择，无则回落「上次使用」（slots.main）
+        self._session_models: dict[str, str | None] = {}
+        self._providers_cache: list = []
+        self._slots_cache: dict = {}
 
         self.sidebar = Sidebar()
         self.chat = ChatView()
@@ -75,6 +79,14 @@ class MainWindow(QMainWindow):
         self.sidebar.toggle_requested.connect(self._toggle_sidebar)
         self._connect_signals()
         bus.event_received.connect(self.on_event)
+
+    def _sync_model_dropdown(self) -> None:
+        """模型下拉同步（rev14）：显示**当前会话**的选择；无会话/会话未选时回落「上次使用」。
+
+        此前下拉恒显 slots.main：恢复一个换过模型的会话，头条显示的却是全局值 —— 说谎。
+        """
+        current = self._session_models.get(self._current_session_id or "")
+        self.chat.set_models(self._providers_cache, current or self._slots_cache.get("main"))
 
     def _toggle_sidebar(self) -> None:
         """折叠：面板藏起、侧栏收成 48px 图标栏；展开：回到上次拖拽宽度。"""
@@ -156,7 +168,9 @@ class MainWindow(QMainWindow):
         t = event.type
         if t == "session.index":
             self._session_titles = {m.id: m.title for m in event.sessions}
+            self._session_models = {m.id: m.main_model for m in event.sessions}
             self.sidebar.update_sessions(event.sessions)
+            self._sync_model_dropdown()
             if self._current_session_id in self._session_titles:
                 self.chat.set_title(self._session_titles[self._current_session_id])
         elif t == "session.created":
@@ -164,10 +178,12 @@ class MainWindow(QMainWindow):
             self.chat.set_title(event.title)
             self.chat.clear()
             self.stack.setCurrentWidget(self.chat)
+            self._sync_model_dropdown()
         elif t == "session.events":
             self._current_session_id = event.session_id
             self.chat.load_session(self._session_titles.get(event.session_id, ""), event.events)
             self.stack.setCurrentWidget(self.chat)
+            self._sync_model_dropdown()
         elif t == "msg.assistant.delta":
             self.chat.on_delta(event)
         elif t == "msg.assistant.final":
@@ -177,8 +193,10 @@ class MainWindow(QMainWindow):
         elif t == "error":
             self.chat.on_error(event)
         elif t == "provider.list":
+            self._providers_cache = list(event.providers)
+            self._slots_cache = dict(event.slots or {})
             self.models.update_providers(event.providers, event.slots)
-            self.chat.set_models(event.providers, event.slots.get("main"))
+            self._sync_model_dropdown()
         elif t == "provider.test.result":
             self.models.on_test_result(event)
         elif t == "provider.models.result":
