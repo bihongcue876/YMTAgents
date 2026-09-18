@@ -29,10 +29,11 @@ def _window(tmp_path, monkeypatch):
     return ctx, MainWindow(ctx.bridge, data_root=str(ctx.root))
 
 
-def test_model_dropdown_follows_session_then_last_used(tmp_path, monkeypatch, qapp):
-    """回归锚点（rev14）：模型下拉显示**当前会话**的选择；新对话回落「上次使用」。
+def test_model_dropdown_follows_session_then_global_default(tmp_path, monkeypatch, qapp):
+    """回归锚点（rev14/rev23 修订）：下拉显示**当前会话**的选择；新对话用全局默认。
 
-    此前下拉恒显 slots.main：恢复一个换过模型的会话，头条显示的却是全局值 —— 说谎。
+    rev23 语义（对齐 Coding agents 平台）：对话内切换只属于该对话，不再登记「上次使用」
+    —— 新会话 B 用的是全局默认 mock-model，而恢复会话 A 仍显示 A 自己的 m2。
     """
     ctx, window = _window(tmp_path, monkeypatch)
     try:
@@ -59,7 +60,7 @@ def test_model_dropdown_follows_session_then_last_used(tmp_path, monkeypatch, qa
         combo = window.chat.header._model
         assert combo.currentData() == "mock-model"
 
-        # 会话 A 切到 m2（会话覆盖 + 上次使用）
+        # 会话 A 切到 m2（会话级选择）
         ctx.controller.handle(NewSession(title="A"))
         qapp.processEvents()
         sid_a = ctx.controller.current_session_id
@@ -67,15 +68,12 @@ def test_model_dropdown_follows_session_then_last_used(tmp_path, monkeypatch, qa
         qapp.processEvents()
         assert combo.currentData() == "m2"
 
-        # 新会话 B：无自身选择 → 回落「上次使用」= m2（而不是最初的 mock-model）
+        # 新会话 B：全局默认未被 A 的会话内选择漂移 → 仍是 mock-model
         ctx.controller.handle(NewSession(title="B"))
         qapp.processEvents()
-        assert combo.currentData() == "m2"
+        assert combo.currentData() == "mock-model"
 
-        # B 切到 m3；恢复 A → 下拉显示 A 自己的 m2（不被全局 m3 冲掉）
-        ctx.controller.handle(SwitchModel(slot="main", model_id="m3"))
-        qapp.processEvents()
-        assert combo.currentData() == "m3"
+        # 恢复 A → 下拉显示 A 自己的 m2（会话级选择不丢）
         ctx.controller.handle(ResumeSession(session_id=sid_a))
         qapp.processEvents()
         assert combo.currentData() == "m2"
@@ -161,6 +159,53 @@ def test_rail_buttons_carry_text_and_default_size_is_large(tmp_path, monkeypatch
         w, h = window._default_size()
         assert w >= 1024 and h >= 720
         assert w <= 1440 and h <= 920
+    finally:
+        window.close()
+
+
+def test_persona_ui_wiring(tmp_path, monkeypatch, qapp):
+    """阶段 2 第一片（rev23）：角色页 + 头条角色下拉端到端接通。"""
+    import time
+
+    from PySide6.QtWidgets import QPushButton
+
+    def wait_for(qapp, cond, timeout_s: float = 5.0) -> bool:
+        """经 worker 线程的请求是异步的：轮询事件循环直至条件成立。"""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            if cond():
+                return True
+            time.sleep(0.02)
+        return False
+
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        # rail 有「角色」入口，角色页已在 stack
+        assert any("角色" in b.text() for b in window.sidebar.findChildren(QPushButton))
+        assert window.stack.widget(2) is window.personas_page
+        # persona.list 已推送：预置角色在下拉里
+        assert window._personas_cache and any(
+            p.id == "prs_ymt" and p.builtin for p in window._personas_cache
+        )
+        combo = window.chat.header._persona
+        assert combo.count() >= 1 and combo.itemData(0) == "prs_ymt"
+
+        # 新建角色（页面请求，经 worker 线程异步）→ 列表刷新出现
+        window.personas_page.save_requested.emit(None, "评审员", "你是评审员。")
+        appeared = wait_for(
+            qapp, lambda: any(p.name == "评审员" for p in window._personas_cache)
+        )
+        assert appeared, "保存角色后 persona.list 必须刷新到界面"
+        pid = next(p.id for p in window._personas_cache if p.name == "评审员")
+
+        # 会话切换角色 → 下拉跟随（本例无会话 → 落到全局默认）
+        window.chat.switch_persona.emit(pid)
+        switched = wait_for(qapp, lambda: window._default_persona == pid)
+        assert switched
+        assert combo.currentData() == pid
     finally:
         window.close()
 

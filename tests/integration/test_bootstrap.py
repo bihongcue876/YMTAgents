@@ -8,7 +8,11 @@ from app import bootstrap as bootstrap_mod
 from app import paths
 from shared.envelope import (
     FetchModels,
+    ModelSpec,
     NewSession,
+    PersonaDelete,
+    PersonaSave,
+    PersonaSwitch,
     ProviderSpec,
     ProviderUpsert,
     ResumeSession,
@@ -104,10 +108,9 @@ def test_slot_set_dispatch_syncs_providers_and_health(tmp_path, monkeypatch, qap
 
 
 def test_switch_without_session_records_last_used(tmp_path, monkeypatch, qapp):
-    """rev14：模型选择 = 「上次使用接续」，没有手动「全局默认」。
+    """rev14/rev23：**无会话**时切换模型 = 设置新对话的默认（仍登记 slots.main）。
 
-    - **无会话**时切换模型不再被丢弃：自动记为上次使用（发消息前先选模型是合法操作）；
-    - 新对话不选模型直接发消息 → 回合用**上次使用**的模型（对齐 Cherry Studio / LobeChat）。
+    rev23 修订：会话内切换不再登记上次使用（单对话选择，见 test_in_session_switch_stays_in_session）。
     """
     gateway = MockGateway(slots={"main": None})
     ctx = _boot(tmp_path, monkeypatch, gateway)
@@ -121,6 +124,98 @@ def test_switch_without_session_records_last_used(tmp_path, monkeypatch, qapp):
         ctx.controller.handle(NewSession(title="L"))
         ctx.controller.handle(SendMessage(text="hi"))
         assert gateway.calls[-1]["model_id"] == "mock-model"
+    finally:
+        ctx.worker.stop()
+
+
+def test_in_session_switch_stays_in_session(tmp_path, monkeypatch, qapp):
+    """rev23：对话内切换模型**只属于该对话**，不再登记「上次使用」。
+
+    用户裁决（对齐 Coding agents 平台）：单对话选择、单对话不一致；
+    新对话的默认由全局默认决定，不随会话内选择漂移。
+    """
+    gateway = MockGateway(slots={"main": "mock-model"})
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        # 给端点补一个可切换的第二模型
+        ctx.controller.handle(
+            ProviderUpsert(
+                provider=ProviderSpec(
+                    id="prv_mock",
+                    name="Mock",
+                    base_url="https://mock.local",
+                    models=[ModelSpec(id="mock-model", ctx_window=8192), ModelSpec(id="m2", ctx_window=8192)],
+                ),
+                api_key=None,
+            )
+        )
+        ctx.controller.handle(NewSession(title="A"))
+        events.clear()
+        ctx.controller.handle(SwitchModel(slot="main", model_id="m2"))
+        providers = [e for e in events if e.type == "provider.list"][-1]
+        assert providers.slots["main"] == "mock-model", "会话内切换不得改写全局默认"
+        meta = ctx.session_store.get_meta(ctx.controller.current_session_id)
+        assert meta.main_model == "m2", "会话级选择生效"
+    finally:
+        ctx.worker.stop()
+
+
+def test_persona_end_to_end(tmp_path, monkeypatch, qapp):
+    """阶段 2 第一片端到端：保存角色 → 会话切换 → 回合 system 段 = 该角色 prompt。"""
+    gateway = MockGateway()
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.push_initial_state()
+        assert any(e.type == "persona.list" for e in events)
+
+        # 保存角色（无 id = 新建）
+        ctx.controller.handle(PersonaSave(name="评审员", prompt="你是严格的代码评审员。"))
+        listing = [e for e in events if e.type == "persona.list"][-1]
+        created = [p for p in listing.personas if p.name == "评审员"]
+        assert created and not created[0].is_default
+
+        # 新会话默认用全局默认角色（YMT）；切换到评审员后回合 system 段 = 评审员 prompt
+        ctx.controller.handle(NewSession(title="P"))
+        ctx.controller.handle(SendMessage(text="hi"))
+        ymt_system = gateway.calls[-1]["messages"][0]["content"]
+        assert "言明通" in ymt_system  # YMT 预置兜底
+
+        ctx.controller.handle(PersonaSwitch(persona_id=created[0].id))
+        ctx.controller.handle(SendMessage(text="评审一下"))
+        custom_system = gateway.calls[-1]["messages"][0]["content"]
+        # system 段 = 角色 prompt 开头 + 环境陈述（组装顺序：system → files → env）
+        assert custom_system.startswith("你是严格的代码评审员。")
+
+        # 会话记录了自己的角色（单对话选择、单对话不一致）
+        meta = ctx.session_store.get_meta(ctx.controller.current_session_id)
+        assert meta.persona_id == created[0].id
+
+        # 删除被会话引用的角色 → 装配回退 YMT，不空转
+        ctx.controller.handle(PersonaDelete(persona_id=created[0].id))
+        ctx.controller.handle(SendMessage(text="还在吗"))
+        fallback_system = gateway.calls[-1]["messages"][0]["content"]
+        assert "言明通" in fallback_system
+    finally:
+        ctx.worker.stop()
+
+
+def test_persona_delete_builtin_rejected(tmp_path, monkeypatch, qapp):
+    """YMT 预置角色不可删除（invalid_request，而非静默忽略）。"""
+    from core.agent.persona import YMT_PERSONA_ID
+
+    gateway = MockGateway()
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(PersonaDelete(persona_id=YMT_PERSONA_ID))
+        errors = [e for e in events if e.type == "error"]
+        assert errors and errors[0].code == "invalid_request"
+        assert ctx.controller.personas.get(YMT_PERSONA_ID) is not None
     finally:
         ctx.worker.stop()
 
