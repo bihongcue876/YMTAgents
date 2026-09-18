@@ -96,6 +96,17 @@ def test_update_script_is_valid_json_literal():
     assert "scrollHeight" in script  # 在底部才自动跟底，上翻不打扰
 
 
+def test_update_script_jump_bottom_is_unconditional():
+    """回归锚点（rev21）：会话切换/清空 → 无条件回底；普通帧仍是「在底部才跟」。"""
+    from gui.widgets.render.view import RendererView
+
+    assert "if(nb)" not in RendererView._update_script("<p>x</p>", jump_bottom=True)
+    assert "window.scrollTo(0,document.body.scrollHeight);" in RendererView._update_script(
+        "<p>x</p>", jump_bottom=True
+    )
+    assert "if(nb)" in RendererView._update_script("<p>x</p>")  # 普通帧保持条件跟底
+
+
 # -- 字号档位透传 -------------------------------------------------------------
 
 

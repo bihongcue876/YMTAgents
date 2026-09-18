@@ -36,6 +36,32 @@ log = logging.getLogger(__name__)
 Emit = Callable[[object], None]
 _UNBOUNDED = 10**9
 
+#: 自适应上限（rev20，用户裁决：预算要按 200K/300K/1M 级窗口的尺度来）
+_RESERVE_CAP = 32768
+_FILE_CAP = 65536
+
+
+def effective_reserve(configured: int, window: int) -> int:
+    """输出预留**有效值**：随窗口自适应（≈1/8，封顶 32K），且不超过窗口 1/4。
+
+    - 200K 窗 → 25K；300K/1M 窗 → 32K（封顶）；存量配置里的旧默认 4096 被自动放大，
+      无需迁移；
+    - 小窗口（8K）被 1/4 上限压回 2K —— 保证输入侧仍有一半以上窗口可用；
+    - 窗口未知（ctx_window=0）用配置值。
+    """
+    if window <= 0:
+        return configured
+    target = min(window // 8, _RESERVE_CAP)
+    ceiling = max(1024, window // 4)
+    return min(max(configured, target), ceiling)
+
+
+def effective_file_cap(configured: int, window: int) -> int:
+    """挂载文件**每文件**上限有效值：≈窗口 1/4，封顶 64K；窗口未知用配置值。"""
+    if window <= 0:
+        return configured
+    return max(configured, min(window // 4, _FILE_CAP))
+
 
 class IAgentLoop(ABC):
     @abstractmethod
@@ -122,13 +148,15 @@ class AgentLoop(IAgentLoop):
             return
 
         settings = self.config_store.load("settings")
+        window = self._ctx_window(model_id)
         config = ConfigSnapshot(
             system_prompt=DEFAULT_SYSTEM_PROMPT,
             memory=read_cascade(self.root, session_id),
             history_turns=settings.context.history_turns,
-            reserve=settings.context.reserve,
-            file_truncate=settings.context.file_truncate,
-            window=self._ctx_window(model_id),
+            # rev20：预留与文件上限随窗口自适应放大（用户可配置，配置值是下限）
+            reserve=effective_reserve(settings.context.reserve, window),
+            file_truncate=effective_file_cap(settings.context.file_truncate, window),
+            window=window,
             main_model=model_id,
             tool_names=[],
         )

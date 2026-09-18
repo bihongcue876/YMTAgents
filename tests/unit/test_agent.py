@@ -159,6 +159,8 @@ def test_context_never_drops_the_current_question(tmp_path):
 
     实证：旧实现 `while history and total() > budget: history.pop(0)` 会一路 pop 到空 ——
     非 system 消息剩 0 条，模型收到「只有 system、没有提问」，用户侧却毫无提示。
+    rev20 起：文件不可被淘汰也不得撑爆预算 → 超出「输入预算 − system − env」时
+    整块按余量截断（带标记，用户可见），当前提问照旧保留。
     """
     store = make_store(tmp_path)
     meta = store.create(None, None)
@@ -167,13 +169,55 @@ def test_context_never_drops_the_current_question(tmp_path):
         system_prompt="SYS",
         memory="",
         files=[("big.txt", "啊" * 20000)],
-        file_truncate=0,  # 0 = 不截断，人为制造超预算
+        file_truncate=0,  # 0 = 每文件不截断；由总额护栏兜底
         reserve=0,
         history_turns=20,
     )
     messages, _usage = ContextAssembler().build(store.resume(meta.id), config, 100)
     assert [m["content"] for m in messages if m["role"] == "user"] == ["问题2"]
     assert messages[0]["role"] == "system"
+    assert "内容已截断]" in messages[0]["content"], "文件超预算必须截断并带可见标记"
+
+
+def test_context_file_truncate_is_per_file(tmp_path):
+    """回归锚点（rev20）：`file_truncate` 语义 = **每文件**上限。
+
+    旧实现是全部文件共享一个总额（8K），挂两个文件各分一半 ——
+    对超级 Agent 的文件工作流完全不够用。新语义：每个文件各自截断到上限。
+    """
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    store.append_event(meta.id, SendMessage(text="问"))
+    config = ConfigSnapshot(
+        system_prompt="",
+        memory="",
+        files=[("a.txt", "a" * 30000), ("b.txt", "b" * 30000)],  # 各 ≈7500 tokens
+        file_truncate=8000,
+        reserve=0,
+    )
+    messages, usage = ContextAssembler().build(store.resume(meta.id), config, 10**9)
+    content = messages[0]["content"]
+    assert content.count("a") > 6000 and content.count("b") > 6000, "两个文件都必须完整保留"
+    assert usage.segments["files"] > 12000, "总额不再被单个 8K 上限卡死"
+
+
+def test_context_files_capped_by_input_budget(tmp_path):
+    """回归锚点（rev20）：文件不可淘汰，故总额对「输入预算 − system − env」护栏。"""
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    store.append_event(meta.id, SendMessage(text="问"))
+    config = ConfigSnapshot(
+        system_prompt="",
+        memory="",
+        files=[("f.txt", "啊" * 30000)],  # ≈30000 tokens，远超预算
+        file_truncate=0,  # 每文件不限，逼出总额护栏
+        reserve=0,
+        window=1000,
+    )
+    messages, usage = ContextAssembler().build(store.resume(meta.id), config, 1000)
+    assert estimate_tokens(messages[0]["content"]) <= 1000 + len("内容已截断]")
+    assert "内容已截断]" in messages[0]["content"]
+    assert usage.total <= 1000 + usage.segments["reserve"] + len("内容已截断]")
 
 
 def test_context_keeps_question_even_with_negative_budget(tmp_path):
@@ -258,3 +302,28 @@ def test_loop_reports_context_overflow(tmp_path):
     assert "窗口" in errors[0].message
     assert emitted[-1].type == "turn.status" and emitted[-1].state == "failed"
     assert not any(e.type == "turn.status" and e.state == "calling" for e in emitted)
+
+
+# -- 上下文预算自适应（spec rev20） ---------------------------------------------
+
+
+def test_effective_reserve_scales_with_window():
+    """用户裁决：预算要按 200K/300K/1M 级窗口的尺度来，且配置值是下限。"""
+    from core.agent.loop import effective_reserve
+
+    assert effective_reserve(4096, 200_000) == 25_000  # ≈1/8
+    assert effective_reserve(4096, 300_000) == 32_768  # 封顶
+    assert effective_reserve(4096, 1_000_000) == 32_768  # 封顶
+    assert effective_reserve(8192, 128_000) == 16_000  # 配置值更大则取更大者
+    assert effective_reserve(4096, 8_000) == 2_000  # 小窗口被 1/4 上限压回，保输入侧
+    assert effective_reserve(4096, 0) == 4096  # 窗口未知用配置值
+    assert effective_reserve(65536, 100_000) == 25_000  # 超配也会被 1/4 上限压回
+
+
+def test_effective_file_cap_scales_with_window():
+    from core.agent.loop import effective_file_cap
+
+    assert effective_file_cap(8192, 200_000) == 50_000  # ≈1/4
+    assert effective_file_cap(8192, 1_000_000) == 65_536  # 封顶
+    assert effective_file_cap(8192, 8_000) == 8_192  # 小窗口：配置值即上限（只增不减）
+    assert effective_file_cap(8192, 0) == 8192  # 窗口未知用配置值

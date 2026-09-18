@@ -63,9 +63,16 @@ class SettingsPage(QWidget):
         context_form = QFormLayout()
         context_form.addRow("历史保留轮数", self._history)
         context_form.addRow("输出预留（reserve）", self._reserve)
-        context_form.addRow("挂载文件截断上限", self._truncate)
+        context_form.addRow("挂载文件截断（每文件）", self._truncate)
         context_apply = QPushButton("应用上下文策略")
         context_apply.clicked.connect(self._apply_context)
+        # rev20：有效值随窗口自适应，配置值是**下限** —— 否则界面上的小数字会误导
+        self._context_hint = QLabel(
+            "输出预留与文件截断随模型窗口自适应放大（约窗口 1/8 与 1/4，"
+            "封顶 32K/64K tokens）；此处填写为下限，调大可进一步放宽。"
+        )
+        self._context_hint.setObjectName("mutedNote")
+        self._context_hint.setWordWrap(True)
 
         # 网络白名单
         self._whitelist = QListWidget()
@@ -119,6 +126,7 @@ class SettingsPage(QWidget):
         layout.addLayout(appearance_form)
         layout.addWidget(QLabel("上下文策略"))
         layout.addLayout(context_form)
+        layout.addWidget(self._context_hint)
         layout.addWidget(context_apply)
         layout.addWidget(QLabel("网络白名单"))
         layout.addWidget(self._whitelist)

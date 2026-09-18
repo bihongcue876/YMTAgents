@@ -132,11 +132,22 @@ class ContextAssembler(IContextAssembler):
     ) -> tuple[list[dict], ContextUsage]:
         config = config_snapshot
 
-        files_block = "\n\n".join(f"[文件：{name}]\n{content}" for name, content in config.files)
-        files_block = _truncate_to_tokens(files_block, config.file_truncate)
         env = _env_statement(config)
-
         system_text = "\n\n".join(p for p in (config.system_prompt, config.memory) if p)
+
+        # rev20：file_truncate 语义 = **每文件**上限（此前全部文件共享一个总额，
+        # 挂多个文件时每个只能分到零头 —— 对超级 Agent 的文件工作流完全不够用）。
+        # 文件不可被淘汰（淘汰只动 history），故总额再对「输入预算 − system − env」护栏：
+        # 超出时整块按余量截断（保留截断标记，用户在界面上可见）。
+        # 窗口未知时 token_budget 为 10^9 哨兵，护栏自然不触发，由每文件上限兜底。
+        per_file = [
+            (name, _truncate_to_tokens(content, config.file_truncate))
+            for name, content in config.files
+        ]
+        files_block = "\n\n".join(f"[文件：{name}]\n{content}" for name, content in per_file)
+        headroom = token_budget - estimate_tokens(system_text) - estimate_tokens(env)
+        if estimate_tokens(files_block) > headroom:
+            files_block = _truncate_to_tokens(files_block, max(headroom, 0))
 
         history = _limit_turns(_history_messages(session_snapshot.events), config.history_turns)
 
