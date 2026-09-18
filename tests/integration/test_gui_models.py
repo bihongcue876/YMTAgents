@@ -72,6 +72,17 @@ def test_picker_dialog_filters_without_losing_checks(qapp):
     assert not items["x-other"].isHidden()
 
 
+def test_provider_dialog_is_roomy(qapp):
+    """回归锚点（rev18）：编辑对话框此前 560 宽、高度随内容 —— 用户反馈「太小、看着不舒服」。"""
+    dialog = ProviderDialog(None)
+    assert dialog.minimumWidth() >= 680
+    assert dialog.minimumHeight() >= 520
+    assert dialog._models.minimumHeight() >= 180  # 模型表给足高度
+    picker = ModelPickerDialog(["m-1", "m-2"], {})
+    assert picker.minimumWidth() >= 520
+    assert picker.minimumHeight() >= 400
+
+
 def test_provider_dialog_kind_row(qapp):
     dialog = ProviderDialog(None)
     assert dialog._kind.count() == 3

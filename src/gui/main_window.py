@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QSplitter, QStackedWidget, QWidget
 
 from shared.envelope import (
@@ -29,7 +30,7 @@ from gui import theme
 from gui.chat.view import ChatView
 from gui.pages.models import ModelsPage
 from gui.pages.settings import SettingsPage
-from gui.sidebar import Sidebar
+from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX, Sidebar
 
 
 class MainWindow(QMainWindow):
@@ -37,7 +38,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.bus = bus
         self.setWindowTitle("言明通 / YMTAgents")
-        self.resize(1100, 720)
+        self.resize(*self._default_size())
 
         self._current_session_id: str | None = None
         self._session_titles: dict[str, str] = {}
@@ -67,8 +68,8 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.stack)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([264, 836])
-        self._last_sidebar_w = 264
+        self.splitter.setSizes([312, 836])
+        self._last_sidebar_w = 312
 
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -80,6 +81,21 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         bus.event_received.connect(self.on_event)
 
+    @staticmethod
+    def _default_size() -> tuple[int, int]:
+        """启动尺寸（rev18）：按可用桌面面积的 ~86% 取，上下限兜底。
+
+        原先固定 1100×720 —— 在高分屏上开局就显小、四周空一大圈。
+        上限 1440×920 防止超宽屏上拉出过长行宽；下限 1024×720 保证三视图可用。
+        """
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return 1024, 720
+        avail = screen.availableGeometry()
+        w = min(1440, max(1024, int(avail.width() * 0.86)))
+        h = min(920, max(720, int(avail.height() * 0.86)))
+        return w, h
+
     def _sync_model_dropdown(self) -> None:
         """模型下拉同步（rev14）：显示**当前会话**的选择；无会话/会话未选时回落「上次使用」。
 
@@ -89,16 +105,16 @@ class MainWindow(QMainWindow):
         self.chat.set_models(self._providers_cache, current or self._slots_cache.get("main"))
 
     def _toggle_sidebar(self) -> None:
-        """折叠：面板藏起、侧栏收成 48px 图标栏；展开：回到上次拖拽宽度。"""
+        """折叠：面板藏起、侧栏收成 rail 图标条；展开：回到上次拖拽宽度。"""
         if self.sidebar.panel_visible():
-            self._last_sidebar_w = max(self.sidebar.width(), 264)
+            self._last_sidebar_w = max(self.sidebar.width(), RAIL_PX + PANEL_MIN_PX)
             self.sidebar.set_panel_visible(False)
             total = max(self.splitter.width() - self.splitter.handleWidth(), 100)
-            self.splitter.setSizes([48, total - 48])
+            self.splitter.setSizes([RAIL_PX, total - RAIL_PX])
         else:
             self.sidebar.set_panel_visible(True)
             total = max(self.splitter.width() - self.splitter.handleWidth(), 100)
-            target = min(max(self._last_sidebar_w, 228), 360)
+            target = min(max(self._last_sidebar_w, RAIL_PX + PANEL_MIN_PX), RAIL_PX + PANEL_MAX_PX)
             self.splitter.setSizes([target, total - target])
 
     # -- 信号 --------------------------------------------------------------

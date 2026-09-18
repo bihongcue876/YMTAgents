@@ -8,7 +8,7 @@ from app import bootstrap as bootstrap_mod
 from app import paths
 from gui import theme
 from gui.main_window import MainWindow
-from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX
+from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_BTN_W, RAIL_PX
 from gui.widgets.render.view import RendererView
 from shared.envelope import (
     ModelSpec,
@@ -154,6 +154,27 @@ def test_message_list_passes_theme_background(qapp):
     ml.set_theme("dark")
     ml.add_user("hi")
     assert ml._renderer._bg == theme.palette("dark").bg
+
+
+def test_rail_buttons_carry_text_and_default_size_is_large(tmp_path, monkeypatch, qapp):
+    """回归锚点（rev18）：rail 按钮图标右侧带文字；启动尺寸比旧的 1100×720 大。
+
+    只看图标猜不出功能（用户反馈）；启动尺寸在高分屏上应占可用区域的大部分（上限 1440×920）。
+    """
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        for btn, word in (
+            (window.sidebar._toggle, "侧栏"),
+            (window.sidebar._models_btn, "模型"),
+            (window.sidebar._settings_btn, "设置"),
+        ):
+            assert word in btn.text(), f"rail 按钮缺文字：{btn.text()!r}"
+            assert btn.width() == RAIL_BTN_W
+        w, h = window._default_size()
+        assert w >= 1024 and h >= 720
+        assert w <= 1440 and h <= 920
+    finally:
+        window.close()
 
 
 def test_sidebar_collapses_and_restores(tmp_path, monkeypatch, qapp):

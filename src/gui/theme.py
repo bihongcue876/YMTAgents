@@ -165,10 +165,11 @@ QPushButton:hover {{ border-color: {p.accent}; }}
 QPushButton:pressed {{ background: {p.accent}; color: {p.bg}; }}
 QPushButton:disabled {{ color: {p.muted}; }}
 
-/* 侧栏图标栏（rail）：无边框扁平按钮，折叠后仍常显（rev13） */
+/* 侧栏图标栏（rail）：带文字的扁平按钮，折叠后仍常显（rev13/rev18）。
+   不设 font-size —— 随应用字体（theme.apply 已设为 ui 档），避免与 sizeHint 脱节 */
 QPushButton#railButton {{
     background: transparent; color: {p.fg};
-    border: none; border-radius: 8px; font-size: 16px;
+    border: none; border-radius: 8px; text-align: left; padding: 0 8px;
 }}
 QPushButton#railButton:hover {{ background: {p.surface}; }}
 QPushButton#railButton:pressed {{ background: {p.accent}; color: {p.bg}; }}

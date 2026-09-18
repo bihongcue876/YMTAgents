@@ -118,6 +118,7 @@ class ProviderDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._models.setMinimumWidth(420)
+        self._models.setMinimumHeight(220)  # rev18：表格太扁看着憋屈，给足高度
         if provider:
             for model in provider.models:
                 self._add_row(model.id, model.ctx_window)
@@ -153,7 +154,9 @@ class ProviderDialog(QDialog):
         layout.addLayout(row)
         layout.addWidget(buttons)
 
-        self.setMinimumWidth(560)  # 默认宽度会把 base_url 与模型表都挤到裁剪
+        # rev18：对话框此前最小 560 宽、高度随内容 → 看着局促，也不便编辑长 base_url 与模型表
+        self.setMinimumSize(720, 560)
+        self.resize(860, 640)
         self._loading = False
         # 载入期 _on_kind_changed 被守卫挡住，故显式同步一次控件状态 ——
         # 否则「编辑一个本地供应商」时密钥框仍是可用的，与类型不符。
@@ -315,6 +318,9 @@ class ModelPickerDialog(QDialog):
         if self._bind_main is not None:
             layout.addWidget(self._bind_main)
         layout.addWidget(buttons)
+        # rev18：勾选对话框同样给足尺寸（模型多时要能一眼看一屏）
+        self.setMinimumSize(560, 460)
+        self.resize(680, 620)
 
     def _apply_filter(self, text: str) -> None:
         """只隐藏不匹配项，勾选状态原样保留（筛选 ≠ 取消勾选）。"""

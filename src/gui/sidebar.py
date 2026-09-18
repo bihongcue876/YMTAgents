@@ -21,9 +21,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-RAIL_PX = 48  # 折叠后侧栏总宽（图标栏）
+RAIL_PX = 96  # 折叠后侧栏总宽（图标 + 文字，rev18）
 PANEL_MIN_PX = 180  # 展开时面板最小宽
 PANEL_MAX_PX = 360  # 展开时面板最大宽
+RAIL_BTN_W = RAIL_PX - 12  # 按钮宽 = rail 减左右边距
+RAIL_BTN_H = 34
 
 
 def _rel_time(dt: datetime) -> str:
@@ -55,25 +57,25 @@ class Sidebar(QWidget):
         self.setMinimumWidth(RAIL_PX + PANEL_MIN_PX)
         self.setMaximumWidth(RAIL_PX + PANEL_MAX_PX)
 
-        # -- 图标栏（折叠后仍保留） ------------------------------------------
-        self._toggle = QPushButton("☰")
+        # -- 图标栏（折叠后仍保留；rev18：图标右侧带文字，只看图标猜不出功能） --
+        self._toggle = QPushButton("☰ 侧栏")
         self._toggle.setObjectName("railButton")
         self._toggle.setToolTip("折叠 / 展开侧栏")
-        self._toggle.setFixedSize(36, 36)
+        self._toggle.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
         self._toggle.setCursor(Qt.PointingHandCursor)
         self._toggle.clicked.connect(self.toggle_requested.emit)
 
-        self._models_btn = QPushButton("⚙")
+        self._models_btn = QPushButton("⚙ 模型")
         self._models_btn.setObjectName("railButton")
         self._models_btn.setToolTip("模型配置")
-        self._models_btn.setFixedSize(36, 36)
+        self._models_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
         self._models_btn.setCursor(Qt.PointingHandCursor)
         self._models_btn.clicked.connect(self.open_models.emit)
 
-        self._settings_btn = QPushButton("🛠")
+        self._settings_btn = QPushButton("🛠 设置")
         self._settings_btn.setObjectName("railButton")
         self._settings_btn.setToolTip("系统设置")
-        self._settings_btn.setFixedSize(36, 36)
+        self._settings_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
         self._settings_btn.setCursor(Qt.PointingHandCursor)
         self._settings_btn.clicked.connect(self.open_settings.emit)
 
