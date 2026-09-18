@@ -76,6 +76,7 @@
 - 2026-09-18：**rev18 尺寸与可读性 · 测试进程退出修复**（见 §21）。
 - 2026-09-18：**rev19 渲染通道重做：壳 + 局部更新 · 惰性创建**（见 §22）。
 - 2026-09-18：**rev20 上下文预算自适应 · 每文件截断**（见 §23）。
+- 2026-09-18：**rev22 复杂度巡检：结构简化（零行为变化）**（见 §24）。
 
 ## 7. rev4 轮次记录 — 槽位绑定接线补全（2026-09-11）
 
@@ -732,6 +733,33 @@ loadFinished → 应用排队帧
 | 全量测试 | **177 passed, 2 skipped，退出码 0**（170+2 → 177+2，净增 7，只增不减） |
 | 新增用例 | 自适应公式 ×2（200K/300K/1M/8K/未知）、每文件语义、总额护栏、文件超预算带标记、跳底脚本无条件分支、设置页提示 |
 | 门禁 | 依赖方向 / 契约 / 主题与字号纪律 全部通过 |
+
+## 24. rev22 轮次记录 — 复杂度巡检：结构简化（2026-09-18）
+
+用户要求：检查有没有写得太复杂的地方，做同类优化。方法：AST 探针扫全 src
+（超长文件 / 超长函数 / 疑似未引用定义），只挑**真实可简化且不改变行为**的点。
+
+### 24.1 已简化
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `gui/pages/settings.py` | `__init__` 111 行 → 20 行组装 + 5 个分区构建器（`_build_appearance/_context/_whitelist/_data/_logging`），组装顺序即页面顺序 |
+| 2 | `core/agent/loop.py` | `run_turn` 82 行 → 45 行：装配段抽成 `_prepare_context`（设置装载 → 自适应预算 → 组装 → 超窗拦截），超窗返回 None 由 run_turn 收口 |
+| 3 | `gui/widgets/render/view.py` | `_ExternalPage` 由「每次建视图都在方法里定义类」提为 `_make_external_page()` 模块级工厂（WebEngine import 仍惰性） |
+
+### 24.2 巡检后判定保留（不简化，避免为改而改）
+
+| 项 | 理由 |
+|---|---|
+| `core/registry`（register/list_tools/execute） | 阶段 4 Skills/MCP 契约占位（探针显示「未引用」是因为实现轮未到） |
+| `md.render_to_html / plain_to_html / ansi_to_html` | 阶段 5 shell 输出渲染管线的契约面（docs 09 §2） |
+| `theme.stylesheet`（97 行 f-string） | 声明式 QSS，拆分不会更简单 |
+| `empty_state.cta_text` / `md.messages_to_html` | 探针误报 —— 分别被测试与降级路径使用 |
+| `context.build` / `provider._stream_once` | 近轮刚按 spec 重构过，再拆属于为拆而拆 |
+
+### 24.3 冒烟结果
+
+全量 **177 passed, 2 skipped，退出码 0**（零行为变化、零用例增减）；门禁全绿。
 
 
 
