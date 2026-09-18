@@ -48,34 +48,51 @@ def _highlight(code: str, lang: str, _attrs: str = "") -> str:
 
 _MD = MarkdownIt("commonmark", {"highlight": _highlight}).enable("table").enable("strikethrough")
 
+# 结构性排版（与主题无关）放在页面骨架里，只装载一次；
+# 主题色与字号（随外观变化）放进 #stream 内的 <style>，随 innerHTML 局部更新（rev19）。
+_BASE_CSS = """body { font-family: system-ui, "Segoe UI", sans-serif; line-height: 1.6;
+        margin: 8px 12px; overflow-wrap: anywhere; }
+pre { padding: 8px 10px; border-radius: 6px; overflow-x: auto; }
+code { font-family: Consolas, "Courier New", monospace; }
+table { border-collapse: collapse; }
+th, td { border: 1px solid; padding: 4px 8px; }
+blockquote { border-left: 3px solid; margin: 0; padding-left: 10px; }
+.msg { margin: 10px 0; }
+.user { display: flex; justify-content: flex-end; }
+.user .bubble { border-radius: 12px; padding: 8px 12px;
+        max-width: 78%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant { display: block; }
+.usage { margin-top: 4px; }
+.tag { margin-left: 6px; }
+.error { border: 1px solid; border-radius: 6px; padding: 6px 10px; }"""
+
 _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src http: https: data:;">
-<style>
-body {{ font-family: system-ui, "Segoe UI", sans-serif; line-height: 1.6;
-        margin: 8px 12px; overflow-wrap: anywhere; }}
-pre {{ padding: 8px 10px; border-radius: 6px; overflow-x: auto; }}
-code {{ font-family: Consolas, "Courier New", monospace; }}
-table {{ border-collapse: collapse; }}
-th, td {{ border: 1px solid; padding: 4px 8px; }}
-blockquote {{ border-left: 3px solid; margin: 0; padding-left: 10px; }}
-.msg {{ margin: 10px 0; }}
-.user {{ display: flex; justify-content: flex-end; }}
-.user .bubble {{ border-radius: 12px; padding: 8px 12px;
-        max-width: 78%; white-space: pre-wrap; overflow-wrap: anywhere; }}
-.assistant {{ display: block; }}
-.usage {{ margin-top: 4px; }}
-.tag {{ margin-left: 6px; }}
-.error {{ border: 1px solid; border-radius: 6px; padding: 6px 10px; }}
-{theme_css}
-{css}
-</style></head><body>{body}</body></html>"""
+<style>{base_css}</style></head><body><div id="stream">{inner}</div></body></html>"""
+
+
+def _inner(theme: str | None, body: str, css: str, font_size: str | None) -> str:
+    """流内容片段（innerHTML 更新的载荷）：<style>（主题色与字号）+ 消息体。"""
+    return f"<style>\n{markdown_css(theme, font_size)}\n{css}\n</style>\n{body}"
+
+
+def assemble(inner: str) -> str:
+    """流片段 → 完整文档（QTextBrowser 降级路径与 WebEngine 初始壳共用）。"""
+    return _TEMPLATE.format(base_css=_BASE_CSS, inner=inner)
+
+
+def stub_doc() -> str:
+    """空壳文档：WebEngine 初始加载用它（恒小于 setHtml 的 2MB data: URL 上限）。"""
+    return assemble("")
+
+
 
 
 def _page(
     theme: str | None, body: str, css: str = "", font_size: str | None = DEFAULT_FONT_SIZE
 ) -> str:
-    return _TEMPLATE.format(theme_css=markdown_css(theme, font_size), css=css, body=body)
+    return assemble(_inner(theme, body, css, font_size))
 
 
 def _bubble_user(text: str) -> str:
@@ -101,12 +118,7 @@ def _block_error(message: str, detail: str | None) -> str:
     return f'<div class="msg error">{text}</div>'
 
 
-def messages_to_html(
-    messages: list[dict],
-    theme: str | None = DEFAULT_THEME,
-    font_size: str | None = DEFAULT_FONT_SIZE,
-) -> str:
-    """把消息模型列表渲染为整段消息流 HTML。"""
+def _messages_body(messages: list[dict]) -> str:
     parts: list[str] = []
     for m in messages:
         role = m.get("role")
@@ -118,7 +130,32 @@ def messages_to_html(
             )
         elif role == "error":
             parts.append(_block_error(m.get("content", ""), m.get("detail")))
-    return _page(theme, "\n".join(parts), _pygments_css(theme), font_size)
+    return "\n".join(parts)
+
+
+def messages_inner(
+    messages: list[dict],
+    theme: str | None = DEFAULT_THEME,
+    font_size: str | None = DEFAULT_FONT_SIZE,
+) -> str:
+    """消息流 → innerHTML 片段（rev19：WebEngine 局部更新的载荷）。"""
+    return _inner(theme, _messages_body(messages), _pygments_css(theme), font_size)
+
+
+def markdown_inner(
+    text: str, theme: str | None = DEFAULT_THEME, font_size: str | None = DEFAULT_FONT_SIZE
+) -> str:
+    """单段 Markdown → innerHTML 片段。"""
+    return _inner(theme, _MD.render(text or ""), _pygments_css(theme), font_size)
+
+
+def messages_to_html(
+    messages: list[dict],
+    theme: str | None = DEFAULT_THEME,
+    font_size: str | None = DEFAULT_FONT_SIZE,
+) -> str:
+    """把消息模型列表渲染为整段消息流 HTML（QTextBrowser 降级路径用）。"""
+    return assemble(messages_inner(messages, theme, font_size))
 
 
 _ANSI_RE = re.compile(r"\x1b\[([0-9;]*)m")

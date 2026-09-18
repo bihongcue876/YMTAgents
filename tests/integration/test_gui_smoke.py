@@ -97,6 +97,7 @@ def test_renderer_textbrowser_opens_links_externally(monkeypatch, qapp):
     )
     view = RendererView()  # 测试环境无 WebEngine → QTextBrowser 路径
     assert not view.using_webengine
+    view.set_stream("<p>hi</p>")  # rev19 起视图惰性创建：先渲染才有视图
     assert not view._view.openLinks(), "QTextBrowser 不得自行导航"
     view._view.anchorClicked.emit(QUrl("https://example.com/page"))
     assert opened == ["https://example.com/page"]
@@ -131,29 +132,16 @@ def test_theme_token_labels_fit_real_font(tmp_path, monkeypatch, qapp):
         window.close()
 
 
-def test_renderer_sets_theme_background(qapp):
-    """回归锚点（rev16）：页面底色 = 主题背景 —— setHtml 重载瞬间不露白（暗色爆闪）。"""
-    from gui.widgets.render.view import RendererView
-
-    view = RendererView()  # 测试环境走 QTextBrowser 路径
-    assert view._bg is None
-    view.set_html("<html>x</html>", "#1E1F22")
-    assert view._bg == "#1E1F22"
-    assert "#1E1F22" in view._view.styleSheet()
-    # 同色重复下发不重复设置；换色即更新
-    view.set_html("<html>y</html>", "#1E1F22")
-    view.set_html("<html>z</html>", "#26282C")
-    assert view._bg == "#26282C"
-
-
 def test_message_list_passes_theme_background(qapp):
-    """消息流每次整帧渲染都随主题下发底色（爆闪修复的接线检查）。"""
+    """消息流每次整帧渲染都随主题下发底色（rev16 爆闪修复的接线检查，rev19 起走片段接口）。"""
     from gui.chat.message_list import MessageList
 
     ml = MessageList()
+    assert ml._renderer._view is None  # 惰性：无消息不建视图
     ml.set_theme("dark")
     ml.add_user("hi")
     assert ml._renderer._bg == theme.palette("dark").bg
+    assert ml._renderer._view is not None  # 首帧后视图已建
 
 
 def test_rail_buttons_carry_text_and_default_size_is_large(tmp_path, monkeypatch, qapp):
@@ -342,14 +330,31 @@ def test_renderer_view_forwards_font_size(monkeypatch, qapp):
     """
     captured: dict = {}
 
-    def fake_md(text, theme=None, font_size=None):
+    def fake_inner(text, theme=None, font_size=None):
         captured["args"] = (text, theme, font_size)
-        return "<html></html>"
+        return "<p>hi</p>"
 
-    monkeypatch.setattr("gui.widgets.render.view.markdown_to_html", fake_md)
+    monkeypatch.setattr("gui.widgets.render.view.markdown_inner", fake_inner)
     view = RendererView()
     view.set_markdown("hi", "dark", "xlarge")
     assert captured["args"] == ("hi", "dark", "xlarge")
+
+
+def test_renderer_view_is_lazy_and_uses_stub_plus_js(qapp):
+    """回归锚点（rev19）：视图惰性创建（启动提速）+ 壳只加载一次 + 后续帧走 JS 更新。
+
+    用降级路径（QTextBrowser）钉住协议：未渲染前不建视图；首帧后视图存在。
+    JS 路径的脚本正确性另由 `_update_script` 单测覆盖，真实 WebEngine 由联网自检覆盖。
+    """
+    view = RendererView()
+    assert view._view is None, "未渲染前不得创建视图（WebEngine 拉起渲染进程是启动慢的大头）"
+    view.set_stream("<p>first</p>", "#FFFFFF")
+    assert view._view is not None
+    assert view._bg == "#FFFFFF"
+    # 同色重复下发不重复设置；换色即更新
+    view.set_stream("<p>second</p>", "#FFFFFF")
+    view.set_stream("<p>third</p>", "#26282C")
+    assert view._bg == "#26282C"
 
 
 def test_renderer_view_replays_hidden_updates(qapp):
@@ -359,11 +364,13 @@ def test_renderer_view_replays_hidden_updates(qapp):
     修复：隐藏期置脏标记，showEvent 重放。本用例用降级路径（QTextBrowser）钉住该协议。
     """
     view = RendererView()
+    view.set_stream("<p>first</p>")  # 先建视图（隐藏状态下）
     calls: list[str] = []
     view._view.setHtml = lambda html: calls.append(html)  # type: ignore[method-assign]
+    view._inner = ""
 
     # 隐藏期更新：应记脏（不丢弃内容），真正 setHtml 至多一次（离屏下 isVisible 可能为 False）
-    view.set_html("<html>first</html>")
+    view.set_stream("<p>first</p>")
     if not view.isVisible():
         assert view._dirty, "隐藏期更新必须置脏"
     shown_at = len(calls)
@@ -373,12 +380,12 @@ def test_renderer_view_replays_hidden_updates(qapp):
     qapp.processEvents()
     assert not view._dirty
     assert len(calls) > shown_at, "showEvent 必须重放隐藏期的更新"
-    assert calls[-1] == "<html>first</html>"
+    assert "first" in calls[-1]
 
     # 可见期间的更新直接生效、不置脏
-    view.set_html("<html>second</html>")
+    view.set_stream("<p>second</p>")
     assert not view._dirty
-    assert calls[-1] == "<html>second</html>"
+    assert "second" in calls[-1]
 
 
 # -- 空状态与模型导入（spec rev9 §2/§6） -------------------------------------

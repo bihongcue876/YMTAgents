@@ -1,13 +1,25 @@
-"""渲染视图：QWebEngineView 本地离线渲染，QTextBrowser 降级（docs 05 §3）。
+"""渲染视图：QWebEngineView 本地渲染 + QTextBrowser 降级（docs 05 §3）。
 
-安全（rev15）：消息里的链接**一律用系统浏览器打开**，绝不在应用内导航 ——
-否则点一个链接就用聊天视图加载任意外部网站（钓鱼页可直接顶掉对话流）。
-WebEngine 侧再禁 JS、禁本地文件互访；模板侧加 CSP（md.py）。
+渲染策略（rev19，依据社区经验与 Qt 文档交叉验证）：
+- WebEngine 首次渲染只加载一次**空壳文档**；此后所有帧（流式增量 / 主题切换 / 会话回放）
+  用 `runJavaScript` 只替换 `#stream` 的 innerHTML —— 不再整页重载。动机：
+  1. `setHtml` 每次都是页面重载：旧页销毁 → 新渲染表面，切换瞬间露出未初始化帧
+     （黑屏 / 爆闪，亮暗两态都有）；
+  2. `setHtml` 走 data: URL，**内容超 2MB 直接 loadFinished(success=false)** ——
+     长对话渲染失败的隐藏坑；JS 局部更新无此限制；
+  3. 整页重载会把滚动位置重置到顶部：流式输出期间用户上翻会被硬拽回去；
+     JS 更新保持滚动，且仅在「原本就在底部」时自动跟底。
+- **惰性创建**（rev19）：WebEngine 首视图要拉起 GPU/渲染子进程（启动慢的大头），
+  推迟到首条消息才创建视图；空状态先上屏。
+- 隐藏期重放（rev12）：不可见时置脏，`showEvent` 重放。
+- 安全（rev15）：消息内链接一律系统浏览器打开；CSP `default-src 'none'` 拦内容侧脚本
+  （`runJavaScript` 是嵌入方 API，不受页面 CSP 约束，更新通道不会被自己拦掉）。
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 
 from PySide6.QtCore import QUrl
@@ -15,7 +27,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QTextBrowser, QVBoxLayout, QWidget
 
 from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME
-from gui.widgets.render.md import markdown_to_html
+from gui.widgets.render.md import assemble, markdown_inner, stub_doc
 
 
 def webengine_available() -> bool:
@@ -28,10 +40,28 @@ def _open_external(url: QUrl) -> None:
     QDesktopServices.openUrl(url)
 
 
+#: 距底多少像素内视为「在底部」（更新后自动跟底；上翻阅读则不打扰）
+NEAR_BOTTOM_PX = 64
+
+
 class RendererView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.using_webengine = webengine_available()
+        self._view: QWidget | None = None  # 惰性创建（见模块 docstring）
+        self._inner = ""
+        self._dirty = False
+        self._bg: str | None = None
+        self._loaded = False  # WebEngine：初始壳 loadFinished 已到
+        self._loading = False  # 初始壳加载中（期间的新帧排队）
+        self._pending: str | None = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+
+    # -- 视图创建 ----------------------------------------------------------
+    def _ensure_view(self) -> None:
+        if self._view is not None:
+            return
         if self.using_webengine:
             try:
                 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
@@ -40,7 +70,7 @@ class RendererView(QWidget):
                 view = QWebEngineView(self)
 
                 class _ExternalPage(QWebEnginePage):
-                    """链接点击 → 系统浏览器；其余导航（setHtml 加载）照常。"""
+                    """链接点击 → 系统浏览器；其余导航（壳加载）照常。"""
 
                     def acceptNavigationRequest(self, url, ntype, is_main_frame):  # noqa: N802
                         if is_main_frame and ntype == QWebEnginePage.NavigationTypeLinkClicked:
@@ -50,63 +80,51 @@ class RendererView(QWidget):
 
                 view.setPage(_ExternalPage(view))
                 settings = view.settings()
-                # 消息流是服务端渲染的纯静态 HTML（pygments 高亮无脚本），JS 只添攻击面
-                settings.setAttribute(QWebEngineSettings.JavascriptEnabled, False)
+                # JS 必须开：局部更新通道走 runJavaScript；内容侧脚本由 CSP 拦（default-src 'none'）
+                settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
                 settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, False)
                 settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
-                self._view: QWidget = view
+                view.loadFinished.connect(self._on_load_finished)
+                self._view = view
             except Exception:  # noqa: BLE001 - 运行期初始化失败则降级
                 self.using_webengine = False
-                self._view = QTextBrowser(self)
+                self._view = self._make_browser()
         else:
-            browser = QTextBrowser(self)
-            browser.setOpenLinks(False)  # 不得在应用内导航
-            browser.anchorClicked.connect(_open_external)
-            self._view = browser
-        self._html = ""
-        self._dirty = False
-        self._bg: str | None = None
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._view)
+            self._view = self._make_browser()
+        self._layout.addWidget(self._view)
 
-    def set_html(self, html: str, bg: str | None = None) -> None:
-        """整帧替换页面内容。
+    @staticmethod
+    def _make_browser() -> QTextBrowser:
+        browser = QTextBrowser()
+        browser.setOpenLinks(False)  # 不得在应用内导航
+        browser.anchorClicked.connect(_open_external)
+        return browser
 
-        **隐藏期间的内容可能不生效**：WebEngine 对不可见视图的加载/合成会被推迟或丢弃
-        （用户从设置页切主题再回对话页时，消息流就停留在旧外观甚至空白）。
-        故隐藏时置脏标记，`showEvent` 时重放一次。
+    # -- 内容 --------------------------------------------------------------
+    def set_stream(self, inner: str, bg: str | None = None) -> None:
+        """整帧更新流内容（innerHTML 片段）。
 
-        **bg**：主题背景色（rev16 爆闪修复）。`setHtml` 是一次页面重载，
-        重载瞬间 WebEngine 露出的是**页面默认底色（白）**——暗色模式下这就是
-        用户看到的「切换主题爆闪」。把页面底色设成主题背景即可消除。
+        WebEngine 路径：首帧加载空壳 + 排队；壳就绪后（loadFinished）本帧与后续帧
+        全部走 JS 局部更新。QTextBrowser 路径：直接整文档 setHtml（无重载/2MB 问题）。
+        bg：主题背景色（壳底色，防加载瞬间露白）。
         """
-        self._html = html
+        self._inner = inner
         self._dirty = not self.isVisible()
+        self._ensure_view()
         if bg and bg != self._bg:
             self._bg = bg
             self._apply_background()
-        self._view.setHtml(html)
-        self._view.update()
-
-    def _apply_background(self) -> None:
-        if not self._bg:
-            return
         if self.using_webengine:
-            try:
-                from PySide6.QtCore import QColor
-
-                self._view.page().setBackgroundColor(QColor(self._bg))
-            except Exception:  # noqa: BLE001 - 底色失败不影响内容
-                pass
+            if self._loaded:
+                self._run_update(inner)
+            elif self._loading:
+                self._pending = inner  # 壳加载中：最新帧排队
+            else:
+                self._loading = True
+                self._view.setHtml(stub_doc())  # 空壳恒小于 2MB 上限
+                self._pending = inner
         else:
-            self._view.setStyleSheet(f"QTextBrowser {{ background: {self._bg}; }}")
-
-    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        super().showEvent(event)
-        if self._dirty:
-            self._dirty = False
-            self._view.setHtml(self._html)
+            self._view.setHtml(assemble(inner))
             self._view.update()
 
     def set_markdown(
@@ -116,4 +134,60 @@ class RendererView(QWidget):
         font_size: str | None = DEFAULT_FONT_SIZE,
     ) -> None:
         """渲染 Markdown；字号档位必须一并透传，否则调用方无法随外观设置缩放。"""
-        self.set_html(markdown_to_html(text, theme, font_size))
+        self.set_stream(markdown_inner(text, theme, font_size))
+
+    @staticmethod
+    def _update_script(inner: str) -> str:
+        """局部更新脚本：替换 #stream 内容；原本在底部才自动跟底（不拽走上翻的读者）。"""
+        payload = json.dumps(inner, ensure_ascii=False)  # 合法 JS 字符串字面量（任意内容安全转义）
+        return (
+            "var nb=(window.innerHeight+window.scrollY)"
+            f">=document.body.scrollHeight-{NEAR_BOTTOM_PX};"
+            f"document.getElementById('stream').innerHTML={payload};"
+            "if(nb){window.scrollTo(0,document.body.scrollHeight);}"
+        )
+
+    def _run_update(self, inner: str) -> None:
+        self._view.page().runJavaScript(self._update_script(inner))
+
+    def _on_load_finished(self, ok: bool) -> None:
+        self._loading = False
+        self._loaded = True
+        if self._pending is not None:
+            inner, self._pending = self._pending, None
+            self._run_update(inner)
+
+    # -- 外观 --------------------------------------------------------------
+    def _apply_background(self) -> None:
+        if not self._bg:
+            return
+        if self.using_webengine and self._view is not None:
+            try:
+                from PySide6.QtCore import QColor
+
+                self._view.page().setBackgroundColor(QColor(self._bg))
+            except Exception:  # noqa: BLE001 - 底色失败不影响内容
+                pass
+        elif self._view is not None:
+            self._view.setStyleSheet(f"QTextBrowser {{ background: {self._bg}; }}")
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        if self._dirty and self._inner:
+            self._dirty = False
+            self._replay()
+
+    def _replay(self) -> None:
+        """隐藏期置脏后的重放（rev12）：WebEngine 对隐藏视图的加载可能被丢弃。"""
+        if self._view is None:
+            self._ensure_view()
+        if self.using_webengine:
+            if self._loaded:
+                self._run_update(self._inner)
+            else:
+                self._loading = True
+                self._view.setHtml(stub_doc())
+                self._pending = self._inner
+        else:
+            self._view.setHtml(assemble(self._inner))
+            self._view.update()

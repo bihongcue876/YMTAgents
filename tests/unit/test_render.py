@@ -63,6 +63,39 @@ def test_messages_to_html():
     assert "boom" in html
 
 
+def test_stream_fragment_and_stub_structure():
+    """回归锚点（rev19）：壳/片段分离 —— 壳恒小（绕开 setHtml 的 2MB 上限），片段带主题样式。"""
+    from gui.widgets.render.md import assemble, messages_inner, stub_doc
+
+    stub = stub_doc()
+    assert '<div id="stream"></div>' in stub
+    assert len(stub) < 4096, "壳必须恒小：初始 setHtml 走 data: URL，超 2MB 直接失败"
+
+    inner = messages_inner([{"role": "user", "content": "hi"}], "dark", "normal")
+    assert "<style>" in inner and "bubble" in inner  # 样式随片段走（主题切换即换色）
+    doc = assemble(inner)
+    assert doc.startswith("<!DOCTYPE html>") and '<div id="stream">' in doc
+    # 拼回完整文档后仍能通过既有断言（QTextBrowser 降级路径共用）
+    assert "hi" in doc
+
+
+def test_update_script_is_valid_json_literal():
+    """回归锚点（rev19）：局部更新脚本 —— 载荷必须是合法 JS 字符串字面量（任意内容安全转义）。"""
+    import json as json_mod
+
+    from gui.widgets.render.view import RendererView
+
+    nasty = '<p id="x">"引号" \\ 反斜杠</p><script>alert(1)</script>'
+    script = RendererView._update_script(nasty)
+    start = script.index("innerHTML=") + len("innerHTML=")
+    end = script.index(";if(nb)")
+    payload = script[start:end]
+    assert payload.startswith('"') and payload.endswith('"'), "载荷必须是 JS 字符串字面量"
+    assert json_mod.loads(payload) == nasty  # 转义无损往返
+    assert "getElementById('stream')" in script
+    assert "scrollHeight" in script  # 在底部才自动跟底，上翻不打扰
+
+
 # -- 字号档位透传 -------------------------------------------------------------
 
 

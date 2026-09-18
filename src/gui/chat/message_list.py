@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from gui import theme as theme_module
 from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME
-from gui.widgets.render.md import messages_to_html
+from gui.widgets.render import md
 from gui.widgets.render.view import RendererView
 
 
@@ -42,9 +42,9 @@ class MessageList(QWidget):
 
     # -- 渲染 --------------------------------------------------------------
     def _render(self) -> None:
-        html = messages_to_html(self._messages, self._theme, self._font_size)
-        # 随内容下发主题底色：setHtml 重载瞬间不露白（rev16 爆闪修复）
-        self._renderer.set_html(html, theme_module.palette(self._theme).bg)
+        inner = md.messages_inner(self._messages, self._theme, self._font_size)
+        # 随帧下发主题底色；WebEngine 侧走 innerHTML 局部更新（rev19：不重载、不闪、无 2MB 限）
+        self._renderer.set_stream(inner, theme_module.palette(self._theme).bg)
 
     def _schedule(self) -> None:
         if not self._timer.isActive():
