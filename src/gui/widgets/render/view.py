@@ -40,6 +40,23 @@ def _open_external(url: QUrl) -> None:
     QDesktopServices.openUrl(url)
 
 
+def _make_external_page(parent) -> object:
+    """构造「链接点击 → 系统浏览器」的页面（rev22：提到模块级，避免每次建视图都定义类）。
+
+    嵌入方 API：QWebEnginePage 只在此处 import（WebEngine 缺失时整个分支不会走到）。
+    """
+    from PySide6.QtWebEngineCore import QWebEnginePage
+
+    class _ExternalPage(QWebEnginePage):
+        def acceptNavigationRequest(self, url, ntype, is_main_frame):  # noqa: N802
+            if is_main_frame and ntype == QWebEnginePage.NavigationTypeLinkClicked:
+                _open_external(url)
+                return False
+            return super().acceptNavigationRequest(url, ntype, is_main_frame)
+
+    return _ExternalPage(parent)
+
+
 #: 距底多少像素内视为「在底部」（更新后自动跟底；上翻阅读则不打扰）
 NEAR_BOTTOM_PX = 64
 
@@ -64,21 +81,11 @@ class RendererView(QWidget):
             return
         if self.using_webengine:
             try:
-                from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+                from PySide6.QtWebEngineCore import QWebEngineSettings
                 from PySide6.QtWebEngineWidgets import QWebEngineView
 
                 view = QWebEngineView(self)
-
-                class _ExternalPage(QWebEnginePage):
-                    """链接点击 → 系统浏览器；其余导航（壳加载）照常。"""
-
-                    def acceptNavigationRequest(self, url, ntype, is_main_frame):  # noqa: N802
-                        if is_main_frame and ntype == QWebEnginePage.NavigationTypeLinkClicked:
-                            _open_external(url)
-                            return False
-                        return super().acceptNavigationRequest(url, ntype, is_main_frame)
-
-                view.setPage(_ExternalPage(view))
+                view.setPage(_make_external_page(view))
                 settings = view.settings()
                 # JS 必须开：局部更新通道走 runJavaScript；内容侧脚本由 CSP 拦（default-src 'none'）
                 settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)

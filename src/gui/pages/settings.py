@@ -32,12 +32,31 @@ class SettingsPage(QWidget):
     def __init__(self, data_root: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._root = Path(data_root) if data_root else Path(".")
+        self._loading = False
 
         self._title = QLabel("系统设置")
         self._title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
-        self._loading = False
 
-        # 外观（主题 + 字号）
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._title)
+        layout.addWidget(QLabel("外观"))
+        layout.addLayout(self._build_appearance())
+        layout.addWidget(QLabel("上下文策略"))
+        layout.addLayout(self._build_context())
+        layout.addWidget(QLabel("网络白名单"))
+        layout.addLayout(self._build_whitelist())
+        layout.addWidget(QLabel("数据"))
+        layout.addLayout(self._build_data())
+        layout.addWidget(QLabel("日志与诊断"))
+        layout.addLayout(self._build_logging())
+        layout.addWidget(QLabel("关于"))
+        layout.addWidget(QLabel(f"言明通 / YMTAgents　版本 {VERSION}"))
+        layout.addStretch(1)
+        self.refresh_metrics()
+
+    # -- 分区构建（rev22：原 111 行构造器按分区拆开，组装顺序即页面顺序） -----
+    def _build_appearance(self) -> QFormLayout:
+        """主题 + 字号。"""
         self._theme = QComboBox()
         for name in theme.theme_names():
             self._theme.addItem(theme.palette(name).label, name)
@@ -46,11 +65,13 @@ class SettingsPage(QWidget):
         for name in theme.font_size_names():
             self._font_size.addItem(theme.font_level(name).label, name)
         self._font_size.currentIndexChanged.connect(self._on_font_size_changed)
-        appearance_form = QFormLayout()
-        appearance_form.addRow("主题", self._theme)
-        appearance_form.addRow("字号", self._font_size)
+        form = QFormLayout()
+        form.addRow("主题", self._theme)
+        form.addRow("字号", self._font_size)
+        return form
 
-        # 上下文策略
+    def _build_context(self) -> QVBoxLayout:
+        """历史轮数 / 输出预留 / 文件截断 + 自适应说明 + 应用按钮。"""
         self._history = QSpinBox()
         self._history.setRange(1, 200)
         self._history.setValue(20)
@@ -60,10 +81,10 @@ class SettingsPage(QWidget):
         self._truncate = QSpinBox()
         self._truncate.setRange(0, 10_000_000)
         self._truncate.setValue(8192)
-        context_form = QFormLayout()
-        context_form.addRow("历史保留轮数", self._history)
-        context_form.addRow("输出预留（reserve）", self._reserve)
-        context_form.addRow("挂载文件截断（每文件）", self._truncate)
+        form = QFormLayout()
+        form.addRow("历史保留轮数", self._history)
+        form.addRow("输出预留（reserve）", self._reserve)
+        form.addRow("挂载文件截断（每文件）", self._truncate)
         context_apply = QPushButton("应用上下文策略")
         context_apply.clicked.connect(self._apply_context)
         # rev20：有效值随窗口自适应，配置值是**下限** —— 否则界面上的小数字会误导
@@ -73,8 +94,14 @@ class SettingsPage(QWidget):
         )
         self._context_hint.setObjectName("mutedNote")
         self._context_hint.setWordWrap(True)
+        box = QVBoxLayout()
+        box.addLayout(form)
+        box.addWidget(self._context_hint)
+        box.addWidget(context_apply)
+        return box
 
-        # 网络白名单
+    def _build_whitelist(self) -> QVBoxLayout:
+        """白名单列表 + 添加/删除行。"""
         self._whitelist = QListWidget()
         self._rule = QLineEdit()
         self._rule.setPlaceholderText("api.example.com 或 *.example.com")
@@ -82,28 +109,41 @@ class SettingsPage(QWidget):
         add_rule.clicked.connect(self._add_rule)
         del_rule = QPushButton("删除选中")
         del_rule.clicked.connect(self._remove_rule)
-        wl_row = QHBoxLayout()
-        wl_row.addWidget(self._rule, 1)
-        wl_row.addWidget(add_rule)
-        wl_row.addWidget(del_rule)
+        row = QHBoxLayout()
+        row.addWidget(self._rule, 1)
+        row.addWidget(add_rule)
+        row.addWidget(del_rule)
+        box = QVBoxLayout()
+        box.addWidget(self._whitelist)
+        box.addLayout(row)
+        return box
 
-        # 数据（长路径：wordWrap + Ignored 双管齐下 —— wordWrap 只解决换行，
-        # minimumSizeHint 仍按最长不可断词计（长路径可达 900px+），Ignored 才真正放开下限）
+    def _build_data(self) -> QVBoxLayout:
+        """数据目录 + 备份说明。
+
+        长路径：wordWrap + Ignored 双管齐下 —— wordWrap 只解决换行，
+        minimumSizeHint 仍按最长不可断词计（长路径可达 900px+），Ignored 才真正放开下限。
+        """
         self._data_path = QLabel(str(self._root))
         self._data_path.setObjectName("dataPathLabel")
         self._data_path.setWordWrap(True)
         self._data_path.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        data_row = QHBoxLayout()
-        data_row.addWidget(self._data_path, 1)
+        row = QHBoxLayout()
+        row.addWidget(self._data_path, 1)
         open_data = QPushButton("打开目录")
         open_data.clicked.connect(lambda: self._open(self._root))
-        data_row.addWidget(open_data)
+        row.addWidget(open_data)
         self._backup_note = QLabel("备份：配置文件改写前保留同目录 .bak 单代（docs 03 §10.2）。")
         self._backup_note.setObjectName("backupNote")
         self._backup_note.setWordWrap(True)
         self._backup_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        box = QVBoxLayout()
+        box.addLayout(row)
+        box.addWidget(self._backup_note)
+        return box
 
-        # 日志
+    def _build_logging(self) -> QHBoxLayout:
+        """日志级别 + 打开日志目录。"""
         self._level = QComboBox()
         for level in ("DEBUG", "INFO", "WARN", "ERROR"):
             self._level.addItem(level)
@@ -111,35 +151,12 @@ class SettingsPage(QWidget):
         self._level.currentTextChanged.connect(self._on_level_changed)
         open_logs = QPushButton("打开日志目录")
         open_logs.clicked.connect(lambda: self._open(self._root / "logs"))
-        log_row = QHBoxLayout()
-        log_row.addWidget(QLabel("日志级别"))
-        log_row.addWidget(self._level)
-        log_row.addWidget(open_logs)
-        log_row.addStretch(1)
-
-        # 关于
-        about = QLabel(f"言明通 / YMTAgents　版本 {VERSION}")
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._title)
-        layout.addWidget(QLabel("外观"))
-        layout.addLayout(appearance_form)
-        layout.addWidget(QLabel("上下文策略"))
-        layout.addLayout(context_form)
-        layout.addWidget(self._context_hint)
-        layout.addWidget(context_apply)
-        layout.addWidget(QLabel("网络白名单"))
-        layout.addWidget(self._whitelist)
-        layout.addLayout(wl_row)
-        layout.addWidget(QLabel("数据"))
-        layout.addLayout(data_row)
-        layout.addWidget(self._backup_note)
-        layout.addWidget(QLabel("日志与诊断"))
-        layout.addLayout(log_row)
-        layout.addWidget(QLabel("关于"))
-        layout.addWidget(about)
-        layout.addStretch(1)
-        self.refresh_metrics()
+        row = QHBoxLayout()
+        row.addWidget(QLabel("日志级别"))
+        row.addWidget(self._level)
+        row.addWidget(open_logs)
+        row.addStretch(1)
+        return row
 
     # -- 外观（rev16） ------------------------------------------------------
     def refresh_metrics(self, font_size: str | None = None) -> None:

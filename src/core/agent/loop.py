@@ -147,38 +147,9 @@ class AgentLoop(IAgentLoop):
             )
             return
 
-        settings = self.config_store.load("settings")
-        window = self._ctx_window(model_id)
-        config = ConfigSnapshot(
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
-            memory=read_cascade(self.root, session_id),
-            history_turns=settings.context.history_turns,
-            # rev20：预留与文件上限随窗口自适应放大（用户可配置，配置值是下限）
-            reserve=effective_reserve(settings.context.reserve, window),
-            file_truncate=effective_file_cap(settings.context.file_truncate, window),
-            window=window,
-            main_model=model_id,
-            tool_names=[],
-        )
-        budget = config.window - config.reserve if config.window else _UNBOUNDED
-        snapshot = self.store.resume(session_id)
-        messages, usage = self.assembler.build(snapshot, config, budget)
-        self.store.append_event(session_id, usage)
-        self.emit(usage)
-
-        # 超窗本地拦截（spec §7 / rev8 §2）：淘汰已保不住当前提问时，请求必然被上游拒绝，
-        # 且往往被上游报成 model_not_found 一类误导性错误。判据取**输入侧**用量
-        # （total 去掉 reserve）—— 窗口约束的是送进去的上下文；reserve 只是输出预留。
-        input_tokens = usage.total - usage.segments.get("reserve", 0)
-        if config.window and input_tokens > config.window:
-            self._fail(
-                session_id,
-                turn_seq,
-                ErrorCode.CONTEXT_OVERFLOW.value,
-                f"上下文已超出模型窗口（估算 {input_tokens} tokens > {config.window}）："
-                "请在「系统设置 → 上下文策略」下调历史保留轮数或挂载文件截断上限。",
-            )
-            return
+        messages = self._prepare_context(session_id, turn_seq, model_id)
+        if messages is None:
+            return  # 超窗：_prepare_context 内已上报 context_overflow
 
         self.emit(TurnStatus(turn_seq=turn_seq, state="calling"))
         token = CancelToken()
@@ -211,6 +182,42 @@ class AgentLoop(IAgentLoop):
         if interrupted:
             self.store.append(session_id, "user", "interrupt", {"initiator": "user"})
         self.emit(TurnStatus(turn_seq=turn_seq, state="interrupted" if interrupted else "done"))
+
+    def _prepare_context(self, session_id: str, turn_seq: int, model_id: str) -> list[dict] | None:
+        """装载设置、自适应预算并组装回合上下文；超窗时上报并返回 None（rev22 抽取）。"""
+        settings = self.config_store.load("settings")
+        window = self._ctx_window(model_id)
+        config = ConfigSnapshot(
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            memory=read_cascade(self.root, session_id),
+            history_turns=settings.context.history_turns,
+            # rev20：预留与文件上限随窗口自适应放大（用户可配置，配置值是下限）
+            reserve=effective_reserve(settings.context.reserve, window),
+            file_truncate=effective_file_cap(settings.context.file_truncate, window),
+            window=window,
+            main_model=model_id,
+            tool_names=[],
+        )
+        budget = config.window - config.reserve if config.window else _UNBOUNDED
+        snapshot = self.store.resume(session_id)
+        messages, usage = self.assembler.build(snapshot, config, budget)
+        self.store.append_event(session_id, usage)
+        self.emit(usage)
+
+        # 超窗本地拦截（spec §7 / rev8 §2）：淘汰已保不住当前提问时，请求必然被上游拒绝，
+        # 且往往被上游报成 model_not_found 一类误导性错误。判据取**输入侧**用量
+        # （total 去掉 reserve）—— 窗口约束的是送进去的上下文；reserve 只是输出预留。
+        input_tokens = usage.total - usage.segments.get("reserve", 0)
+        if config.window and input_tokens > config.window:
+            self._fail(
+                session_id,
+                turn_seq,
+                ErrorCode.CONTEXT_OVERFLOW.value,
+                f"上下文已超出模型窗口（估算 {input_tokens} tokens > {config.window}）："
+                "请在「系统设置 → 上下文策略」下调历史保留轮数或挂载文件截断上限。",
+            )
+            return None
+        return messages
 
     def _finish(
         self,
