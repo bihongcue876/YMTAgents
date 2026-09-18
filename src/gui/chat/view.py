@@ -15,6 +15,7 @@ class ChatView(QWidget):
     send_message = Signal(str)
     cancel_turn = Signal()
     switch_model = Signal(str)
+    switch_persona = Signal(str)
     rename_session = Signal(str)
     new_session = Signal()
     add_model = Signal()  # 空状态 CTA：跳模型配置页（rev9 §6）
@@ -38,12 +39,14 @@ class ChatView(QWidget):
 
         self.header.rename.connect(self.rename_session.emit)
         self.header.switch_model.connect(self.switch_model.emit)
+        self.header.switch_persona.connect(self.switch_persona.emit)
         self.header.new_session.connect(self.new_session.emit)
         self.input.send_message.connect(self._on_send)
         self.input.cancel.connect(self.cancel_turn.emit)
         self.empty.add_model.connect(self.add_model.emit)
         self.empty.start_chat.connect(self.input.focus)
         self._current_model: str | None = None
+        self._current_persona: str | None = None
         self._refresh_empty()
 
     def _refresh_empty(self) -> None:
@@ -60,6 +63,11 @@ class ChatView(QWidget):
         self.header.set_models(providers, current)
         # 空状态文案随「有无供应商」切换：无 → 添加模型；有 → 开始对话
         self.empty.set_has_provider(bool(providers))
+
+    def set_personas(self, personas, current: str | None) -> None:
+        """角色下拉（rev23）：current = 当前会话所用角色（None → 全局默认）。"""
+        self._current_persona = current
+        self.header.set_personas(personas, current)
 
     def set_title(self, title: str) -> None:
         self.header.set_title(title)

@@ -49,6 +49,7 @@ class Sidebar(QWidget):
     unarchive_session = Signal(str)
     delete_session = Signal(str)
     open_models = Signal()
+    open_personas = Signal()
     open_settings = Signal()
     toggle_requested = Signal()  # 折叠/展开请求（宽度由 MainWindow 的 QSplitter 落实）
 
@@ -72,6 +73,13 @@ class Sidebar(QWidget):
         self._models_btn.setCursor(Qt.PointingHandCursor)
         self._models_btn.clicked.connect(self.open_models.emit)
 
+        self._personas_btn = QPushButton("🎭 角色")
+        self._personas_btn.setObjectName("railButton")
+        self._personas_btn.setToolTip("角色配置（Persona）")
+        self._personas_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
+        self._personas_btn.setCursor(Qt.PointingHandCursor)
+        self._personas_btn.clicked.connect(self.open_personas.emit)
+
         self._settings_btn = QPushButton("🛠 设置")
         self._settings_btn.setObjectName("railButton")
         self._settings_btn.setToolTip("系统设置")
@@ -85,6 +93,7 @@ class Sidebar(QWidget):
         rail.addWidget(self._toggle)
         rail.addStretch(1)
         rail.addWidget(self._models_btn)
+        rail.addWidget(self._personas_btn)
         rail.addWidget(self._settings_btn)
 
         # -- 会话面板（可折叠） ----------------------------------------------

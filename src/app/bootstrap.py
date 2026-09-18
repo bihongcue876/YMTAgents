@@ -16,6 +16,7 @@ from app import logging_setup, paths
 from app.controller import CoreController
 from app.core_thread import CoreWorker
 from core.agent.loop import AgentLoop
+from core.agent.persona import PersonaStore
 from core.agent.session import SessionStore
 from core.bus.bridge import BusBridge
 from core.bus.sink import EventSink
@@ -40,6 +41,7 @@ class AppContext:
     agent: AgentLoop
     controller: CoreController
     worker: CoreWorker
+    personas: PersonaStore
 
 
 def bootstrap(gateway_factory: Callable[[ConfigStore], ModelGateway] | None = None) -> AppContext:
@@ -58,9 +60,11 @@ def bootstrap(gateway_factory: Callable[[ConfigStore], ModelGateway] | None = No
     gateway = gateway_factory(config_store) if gateway_factory else ModelGateway(config_store)
     supervisor = ModuleSupervisor()
     registry = Registry()
-    agent = AgentLoop(session_store, gateway, bridge.emit_event, root, config_store)
+    personas = PersonaStore(root / "personas")
+    agent = AgentLoop(session_store, gateway, bridge.emit_event, root, config_store, personas=personas)
     controller = CoreController(
-        bridge, session_store, gateway, agent, supervisor, registry, config_store, root
+        bridge, session_store, gateway, agent, supervisor, registry, config_store, root,
+        personas=personas,
     )
     worker = CoreWorker(bridge, controller.handle)
     worker.start()
@@ -76,4 +80,5 @@ def bootstrap(gateway_factory: Callable[[ConfigStore], ModelGateway] | None = No
         agent=agent,
         controller=controller,
         worker=worker,
+        personas=personas,
     )

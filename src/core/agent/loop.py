@@ -28,6 +28,7 @@ from core.agent.context import DEFAULT_SYSTEM_PROMPT, ConfigSnapshot, ContextAss
 from core.agent.session import SessionStore
 from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
+from core.agent.persona import PersonaStore
 from core.memory.cascade import read_cascade
 from core.store.config_store import ConfigStore
 
@@ -89,6 +90,7 @@ class AgentLoop(IAgentLoop):
         root: Path,
         config_store: ConfigStore | None = None,
         assembler: ContextAssembler | None = None,
+        personas: "PersonaStore | None" = None,
     ) -> None:
         self.store = store
         self.gateway = gateway
@@ -96,6 +98,8 @@ class AgentLoop(IAgentLoop):
         self.root = Path(root)
         self.config_store = config_store or ConfigStore(self.root)
         self.assembler = assembler or ContextAssembler()
+        # rev23：角色内容解析（None 时回退默认提示词 —— 兼容既有测试的构造方式）
+        self.personas = personas
         self._active: dict[str, CancelToken] = {}
 
     def cancel(self, session_id: str) -> None:
@@ -147,7 +151,9 @@ class AgentLoop(IAgentLoop):
             )
             return
 
-        messages = self._prepare_context(session_id, turn_seq, model_id)
+        messages = self._prepare_context(
+            session_id, turn_seq, model_id, persona_id=meta.persona_id
+        )
         if messages is None:
             return  # 超窗：_prepare_context 内已上报 context_overflow
 
@@ -183,12 +189,18 @@ class AgentLoop(IAgentLoop):
             self.store.append(session_id, "user", "interrupt", {"initiator": "user"})
         self.emit(TurnStatus(turn_seq=turn_seq, state="interrupted" if interrupted else "done"))
 
-    def _prepare_context(self, session_id: str, turn_seq: int, model_id: str) -> list[dict] | None:
+    def _prepare_context(
+        self, session_id: str, turn_seq: int, model_id: str, persona_id: str | None
+    ) -> list[dict] | None:
         """装载设置、自适应预算并组装回合上下文；超窗时上报并返回 None（rev22 抽取）。"""
         settings = self.config_store.load("settings")
         window = self._ctx_window(model_id)
+        # rev23：system 首段 = 会话所用角色的 prompt.md；任何失败回退 YMT 预置（persona 侧保证）
+        system_prompt = (
+            self.personas.resolve_content(persona_id) if self.personas else DEFAULT_SYSTEM_PROMPT
+        ) or DEFAULT_SYSTEM_PROMPT
         config = ConfigSnapshot(
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             memory=read_cascade(self.root, session_id),
             history_turns=settings.context.history_turns,
             # rev20：预留与文件上限随窗口自适应放大（用户可配置，配置值是下限）

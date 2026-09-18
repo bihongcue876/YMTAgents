@@ -12,6 +12,10 @@ from shared.envelope import (
     DeleteSession,
     FetchModels,
     NewSession,
+    PersonaDelete,
+    PersonaSave,
+    PersonaSetDefault,
+    PersonaSwitch,
     ProviderDelete,
     ProviderUpsert,
     RenameSession,
@@ -29,6 +33,7 @@ from core.bus.bridge import BusBridge
 from gui import theme
 from gui.chat.view import ChatView
 from gui.pages.models import ModelsPage
+from gui.pages.personas import PersonasPage
 from gui.pages.settings import SettingsPage
 from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX, Sidebar
 
@@ -42,14 +47,19 @@ class MainWindow(QMainWindow):
 
         self._current_session_id: str | None = None
         self._session_titles: dict[str, str] = {}
-        # rev14：模型下拉 = 会话自身的选择，无则回落「上次使用」（slots.main）
+        # rev14/rev23：模型与角色下拉都显示**当前会话**的选择；
+        # 无会话/未选时回落全局默认（模型=slots.main，角色=manifest.current）
         self._session_models: dict[str, str | None] = {}
+        self._session_personas: dict[str, str | None] = {}
         self._providers_cache: list = []
         self._slots_cache: dict = {}
+        self._personas_cache: list = []
+        self._default_persona: str | None = None
 
         self.sidebar = Sidebar()
         self.chat = ChatView()
         self.models = ModelsPage()
+        self.personas_page = PersonasPage()
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
         self._font_size: str | None = None
@@ -59,6 +69,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(self.chat)
         self.stack.addWidget(self.models)
+        self.stack.addWidget(self.personas_page)
         self.stack.addWidget(self.settings)
 
         # 侧栏可拖拽调宽（rev13）：QSplitter 取代固定 264px；折叠逻辑见 _toggle_sidebar
@@ -97,12 +108,14 @@ class MainWindow(QMainWindow):
         return w, h
 
     def _sync_model_dropdown(self) -> None:
-        """模型下拉同步（rev14）：显示**当前会话**的选择；无会话/会话未选时回落「上次使用」。
-
-        此前下拉恒显 slots.main：恢复一个换过模型的会话，头条显示的却是全局值 —— 说谎。
-        """
+        """模型下拉同步（rev14/rev23）：显示**当前会话**的选择；无会话/未选时回落全局默认。"""
         current = self._session_models.get(self._current_session_id or "")
         self.chat.set_models(self._providers_cache, current or self._slots_cache.get("main"))
+
+    def _sync_persona_dropdown(self) -> None:
+        """角色下拉同步（rev23）：显示当前会话的角色；无会话/未选时回落全局默认角色。"""
+        current = self._session_personas.get(self._current_session_id or "")
+        self.chat.set_personas(self._personas_cache, current or self._default_persona)
 
     def _toggle_sidebar(self) -> None:
         """折叠：面板藏起、侧栏收成 rail 图标条；展开：回到上次拖拽宽度。"""
@@ -126,6 +139,7 @@ class MainWindow(QMainWindow):
         s.unarchive_session.connect(lambda sid: self.bus.submit(UnarchiveSession(session_id=sid)))
         s.delete_session.connect(lambda sid: self.bus.submit(DeleteSession(session_id=sid)))
         s.open_models.connect(lambda: self.stack.setCurrentWidget(self.models))
+        s.open_personas.connect(lambda: self.stack.setCurrentWidget(self.personas_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
 
         c = self.chat
@@ -133,6 +147,9 @@ class MainWindow(QMainWindow):
         c.send_message.connect(lambda text: self.bus.submit(SendMessage(text=text)))
         c.cancel_turn.connect(lambda: self.bus.submit(CancelTurn()))
         c.switch_model.connect(lambda mid: self.bus.submit(SwitchModel(slot="main", model_id=mid)))
+        c.switch_persona.connect(
+            lambda pid: self.bus.submit(PersonaSwitch(persona_id=pid))
+        )
         c.rename_session.connect(self._on_rename)
         # 空状态 CTA（rev9 §6）：无供应商时一键跳模型配置页
         c.add_model.connect(lambda: self.stack.setCurrentWidget(self.models))
@@ -150,6 +167,17 @@ class MainWindow(QMainWindow):
         # 模型配置页·槽位绑定区 → 全局槽位（models.json 的 slots，spec rev4）
         m.slot_requested.connect(
             lambda slot, mid: self.bus.submit(SetSlot(slot=slot, model_id=mid or None))
+        )
+
+        p = self.personas_page
+        p.save_requested.connect(
+            lambda pid, name, prompt: self.bus.submit(
+                PersonaSave(persona_id=pid, name=name, prompt=prompt)
+            )
+        )
+        p.delete_requested.connect(lambda pid: self.bus.submit(PersonaDelete(persona_id=pid)))
+        p.set_default_requested.connect(
+            lambda pid: self.bus.submit(PersonaSetDefault(persona_id=pid))
         )
 
         self.settings.settings_update.connect(
@@ -187,8 +215,10 @@ class MainWindow(QMainWindow):
         if t == "session.index":
             self._session_titles = {m.id: m.title for m in event.sessions}
             self._session_models = {m.id: m.main_model for m in event.sessions}
+            self._session_personas = {m.id: m.persona_id for m in event.sessions}
             self.sidebar.update_sessions(event.sessions)
             self._sync_model_dropdown()
+            self._sync_persona_dropdown()
             if self._current_session_id in self._session_titles:
                 self.chat.set_title(self._session_titles[self._current_session_id])
         elif t == "session.created":
@@ -197,11 +227,13 @@ class MainWindow(QMainWindow):
             self.chat.clear()
             self.stack.setCurrentWidget(self.chat)
             self._sync_model_dropdown()
+            self._sync_persona_dropdown()
         elif t == "session.events":
             self._current_session_id = event.session_id
             self.chat.load_session(self._session_titles.get(event.session_id, ""), event.events)
             self.stack.setCurrentWidget(self.chat)
             self._sync_model_dropdown()
+            self._sync_persona_dropdown()
         elif t == "msg.assistant.delta":
             self.chat.on_delta(event)
         elif t == "msg.assistant.final":
@@ -223,3 +255,10 @@ class MainWindow(QMainWindow):
             ui = event.data.get("ui", {})
             self._apply_appearance(ui.get("theme"), ui.get("font_size"))
             self.settings.load_settings(event.data)
+        elif t == "persona.list":
+            self._personas_cache = list(event.personas)
+            self._default_persona = next(
+                (p.id for p in event.personas if p.is_default), None
+            )
+            self.personas_page.update_personas(event)
+            self._sync_persona_dropdown()

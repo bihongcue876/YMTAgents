@@ -59,7 +59,8 @@ class ProviderSpec(BaseModel):
 class SessionMeta(BaseModel):
     id: str
     title: str
-    persona_name: str | None = None  # rev2：首期恒 None
+    persona_id: str | None = None  # rev23：会话所用角色（None = YMT 预置兜底）
+    persona_name: str | None = None  # 展示用名称，由 controller 在推送索引时解析
     created_at: datetime
     updated_at: datetime
     state: Literal["active", "archived"] = "active"
@@ -102,7 +103,7 @@ class SetSlot(Envelope):
 class NewSession(Envelope):
     type: Literal["session.new"] = "session.new"
     title: str | None = None
-    persona_id: str | None = None  # rev2：首期恒 None
+    persona_id: str | None = None  # rev23：None = 全局默认角色
 
 
 class ResumeSession(Envelope):
@@ -268,6 +269,51 @@ class SettingsState(Envelope):
 
 
 # ---------------------------------------------------------------------------
+# Persona（阶段 2 · spec rev23）：全局配置形同模型，会话各自选择
+# ---------------------------------------------------------------------------
+class PersonaInfo(BaseModel):
+    id: str
+    name: str
+    builtin: bool = False  # YMT 预置：可编辑不可删
+    prompt: str = ""  # prompt.md 全文（编辑器直接用）
+    is_default: bool = False  # 全局默认（新会话用它）
+    in_session: bool = False  # 当前会话正使用该角色
+
+
+class PersonaList(Envelope):
+    type: Literal["persona.list"] = "persona.list"
+    personas: list[PersonaInfo] = Field(default_factory=list)
+
+
+class PersonaSave(Envelope):
+    """新建（无 id）或更新（有 id）角色。"""
+
+    type: Literal["persona.save"] = "persona.save"
+    persona_id: str | None = None
+    name: str
+    prompt: str
+
+
+class PersonaDelete(Envelope):
+    type: Literal["persona.delete"] = "persona.delete"
+    persona_id: str
+
+
+class PersonaSetDefault(Envelope):
+    """设为全局默认角色（新会话用它）；等同模型的「上次使用」。"""
+
+    type: Literal["persona.set_default"] = "persona.set_default"
+    persona_id: str
+
+
+class PersonaSwitch(Envelope):
+    """当前会话切换角色（会话级，形同 model.switch；不同会话可各用各的）。"""
+
+    type: Literal["persona.switch"] = "persona.switch"
+    persona_id: str
+
+
+# ---------------------------------------------------------------------------
 # 联合类型 + 校验器
 # ---------------------------------------------------------------------------
 Request = Annotated[
@@ -287,6 +333,11 @@ Request = Annotated[
         TestConnection,
         FetchModels,
         SettingsUpdate,
+        PersonaList,
+        PersonaSave,
+        PersonaDelete,
+        PersonaSetDefault,
+        PersonaSwitch,
     ],
     Field(discriminator="type"),
 ]
@@ -306,6 +357,7 @@ Event = Annotated[
         HealthReport,
         ErrorReport,
         SettingsState,
+        PersonaList,
     ],
     Field(discriminator="type"),
 ]

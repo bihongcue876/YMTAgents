@@ -38,6 +38,12 @@ from shared.envelope import (
     SwitchModel,
     TestConnection,
     UnarchiveSession,
+    PersonaDelete,
+    PersonaInfo,
+    PersonaList,
+    PersonaSave,
+    PersonaSetDefault,
+    PersonaSwitch,
 )
 from shared.schema import (
     ContextSettings,
@@ -48,6 +54,7 @@ from shared.schema import (
 
 from core.agent.loop import AgentLoop
 from core.agent.session import SessionStore
+from core.agent.persona import PersonaStore, YMT_PERSONA_ID
 from core.bus.bridge import BusBridge
 from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
@@ -72,6 +79,7 @@ class CoreController:
         registry: Registry,
         config_store: ConfigStore,
         root: Path,
+        personas: PersonaStore | None = None,
     ) -> None:
         self.bridge = bridge
         self.store = store
@@ -81,6 +89,7 @@ class CoreController:
         self.registry = registry
         self.config_store = config_store
         self.root = Path(root)
+        self.personas = personas
         self.current_session_id: str | None = None
 
     # -- 发射辅助 ----------------------------------------------------------
@@ -125,7 +134,12 @@ class CoreController:
         self.emit(ProviderList(providers=self.gateway.list_providers(), slots=self.gateway.get_slots()))
 
     def _emit_index(self) -> None:
-        self.emit(SessionIndex(sessions=self.store.list(include_archived=True)))
+        sessions = self.store.list(include_archived=True)
+        if self.personas is not None:
+            names = {p.id: p.name for p in self.personas.list()}
+            for s in sessions:
+                s.persona_name = names.get(s.persona_id) if s.persona_id else None
+        self.emit(SessionIndex(sessions=sessions))
 
     def _emit_health(self) -> None:
         slots = self.gateway.get_slots()
@@ -143,6 +157,89 @@ class CoreController:
         self._emit_index()
         self._emit_settings()
         self._emit_health()
+        self._emit_personas()
+
+    # -- Persona（阶段 2 · spec rev23） --------------------------------------
+    def _emit_personas(self) -> None:
+        """推送角色库 + 全局默认 + 当前会话所用（用于角色页与头条下拉）。"""
+        if self.personas is None:
+            return
+        session_persona = None
+        if self.current_session_id:
+            try:
+                session_persona = self.store.get_meta(self.current_session_id).persona_id
+            except KeyError:
+                session_persona = None
+        infos = [
+            PersonaInfo(
+                id=p.id,
+                name=p.name,
+                builtin=p.builtin,
+                prompt=p.prompt,
+                is_default=(p.id == self.personas.current_default()),
+                in_session=(session_persona is not None and p.id == session_persona),
+            )
+            for p in self.personas.list()
+        ]
+        self.emit(PersonaList(personas=infos))
+
+    def _on_persona_save(self, request: PersonaSave) -> None:
+        """新建或更新角色；落盘失败必须上报（rev8 §5 口径）。"""
+        if not request.name.strip():
+            self._report("config", ErrorCode.INVALID_REQUEST.value, "角色名称不能为空。")
+            return
+        if self.personas is None:
+            return
+        pid = self._persist(
+            "保存角色",
+            lambda: self.personas.save(request.persona_id, request.name.strip(), request.prompt),
+            "角色保存失败：请检查数据目录是否可写。",
+        )
+        if pid:
+            self._emit_personas()
+
+    def _on_persona_delete(self, request: PersonaDelete) -> None:
+        if self.personas is None:
+            return
+        if request.persona_id == YMT_PERSONA_ID:
+            self._report("config", ErrorCode.INVALID_REQUEST.value, "YMT 预置角色不可删除。")
+            return
+        deleted = self._persist(
+            "删除角色",
+            lambda: self.personas.delete(request.persona_id),
+            "角色删除失败：请检查数据目录是否可写。",
+        )
+        if deleted:
+            self._emit_personas()
+
+    def _on_persona_set_default(self, request: PersonaSetDefault) -> None:
+        if self.personas is None:
+            return
+        ok = self._persist(
+            "设置默认角色",
+            lambda: self.personas.set_current_default(request.persona_id),
+            "设置默认角色失败。",
+        )
+        if ok:
+            self._emit_personas()
+
+    def _on_persona_switch(self, request: PersonaSwitch) -> None:
+        """当前会话切换角色（会话级；无会话则更新全局默认，供下一个对话使用）。"""
+        if self.personas is None:
+            return
+        if self.personas.get(request.persona_id) is None:
+            self._report("config", ErrorCode.INVALID_REQUEST.value, "角色不存在。")
+            return
+        if self.current_session_id:
+            self.store.set_persona(self.current_session_id, request.persona_id)
+            self._emit_index()  # 侧栏/索引里的 persona_name 随之刷新
+        else:
+            self._persist(
+                "设置默认角色",
+                lambda: self.personas.set_current_default(request.persona_id),
+                "设置默认角色失败。",
+            )
+        self._emit_personas()
 
     def _emit_settings(self) -> None:
         settings = self.config_store.load("settings")
@@ -181,6 +278,16 @@ class CoreController:
             self._on_fetch_models(request)
         elif t == "settings.update":
             self._on_settings(request)
+        elif t == "persona.list":
+            self._emit_personas()
+        elif t == "persona.save":
+            self._on_persona_save(request)
+        elif t == "persona.delete":
+            self._on_persona_delete(request)
+        elif t == "persona.set_default":
+            self._on_persona_set_default(request)
+        elif t == "persona.switch":
+            self._on_persona_switch(request)
         else:
             # 未知类型**不得静默**：此前只写一条 warning，调用方拿不到任何反馈（spec rev9 §1）。
             log.warning("未知请求类型：%s", t)
@@ -194,10 +301,12 @@ class CoreController:
     # -- 会话 --------------------------------------------------------------
     def _ensure_session(self) -> str:
         if self.current_session_id is None:
-            meta = self.store.create(None, None)
+            persona_id = self.personas.current_default() if self.personas else None
+            meta = self.store.create(None, persona_id)
             self.current_session_id = meta.id
             self.emit(SessionCreated(session_id=meta.id, title=meta.title, created_at=meta.created_at))
             self._emit_index()
+            self._emit_personas()
         return self.current_session_id
 
     def _on_send(self, request: SendMessage) -> None:
@@ -219,17 +328,19 @@ class CoreController:
                 f"会话级模型切换目前仅支持 main 槽位；{request.slot} 随轮次启用。",
             )
             return
-        # rev14 语义：没有「全局默认模型」，只有「上次使用的模型」——
-        # 任何一次选择都自动记为上次使用，新对话从它开始（对齐 Cherry Studio / LobeChat）。
-        # 无会话时也生效：允许「发消息前先选模型」。
-        if request.model_id != self.gateway.get_slots().get("main"):
-            self._persist(
-                "记录最近使用的模型",
-                lambda: self.gateway.set_slot("main", request.model_id),
-                "记录最近使用的模型失败。",
-            )
+        # rev23 语义（对齐 Coding agents 平台，修订 rev14）：对话内选择只属于**该对话**
+        # （单对话选择、单对话不一致），不再强制登记「上次使用」；
+        # 新对话的全局默认改由「无会话时的选择」或模型页的显式设置决定。
+        # 无会话时仍写全局默认：那是「为下一个对话选默认」的合法入口。
         if self.current_session_id:
             self.store.set_model(self.current_session_id, request.model_id, request.slot)
+            self._emit_index()  # 侧栏/下拉缓存随会话级选择刷新（rev23）
+        elif request.model_id != self.gateway.get_slots().get("main"):
+            self._persist(
+                "设置新对话的默认模型",
+                lambda: self.gateway.set_slot("main", request.model_id),
+                "设置默认模型失败。",
+            )
         self._emit_providers()
         self._emit_health()
 
@@ -250,10 +361,15 @@ class CoreController:
         self._emit_health()
 
     def _on_new(self, request: NewSession) -> None:
-        meta = self.store.create(request.title, request.persona_id)
+        # rev23：新会话默认用「全局默认角色」；请求显式指定则用指定的
+        persona_id = request.persona_id or (
+            self.personas.current_default() if self.personas else None
+        )
+        meta = self.store.create(request.title, persona_id)
         self.current_session_id = meta.id
         self.emit(SessionCreated(session_id=meta.id, title=meta.title, created_at=meta.created_at))
         self._emit_index()
+        self._emit_personas()  # 新会话的 in_session 标记变了
 
     def _on_resume(self, request: ResumeSession) -> None:
         try:
@@ -264,6 +380,7 @@ class CoreController:
         self.current_session_id = request.session_id
         self.emit(SessionEvents(session_id=request.session_id, events=snapshot.events))
         self._emit_health()
+        self._emit_personas()  # 当前会话变了 → in_session 标记刷新（rev23）
 
     def _on_archive(self, request: ArchiveSession) -> None:
         try:

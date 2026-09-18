@@ -86,6 +86,14 @@ class ISessionStore(ABC):
         """会话级模型切换，落 `model.switch` 事件（docs 03 §3.1）。"""
 
     @abstractmethod
+    def get_meta(self, session_id: str) -> SessionMeta:
+        """读取会话 meta（rev23：controller 需要 persona_id / persona_name 解析）。"""
+
+    @abstractmethod
+    def set_persona(self, session_id: str, persona_id: str | None) -> SessionMeta:
+        """会话级角色切换（spec rev23）：写 meta.persona_id 并落 `persona.switch` 事件。"""
+
+    @abstractmethod
     def delete(self, session_id: str) -> None: ...
 
     @abstractmethod
@@ -181,6 +189,7 @@ class SessionStore(ISessionStore):
         meta = SessionMeta(
             id=session_id,
             title=(title or "新对话"),
+            persona_id=persona_id,  # rev23：会话记住自己的角色（None = YMT 兜底）
             persona_name=None,
             created_at=now,
             updated_at=now,
@@ -192,6 +201,19 @@ class SessionStore(ISessionStore):
         self.append(session_id, "agent", "session.start", {"title": meta.title, "persona_id": persona_id})
         self._upsert_index(meta)
         return meta
+
+    def set_persona(self, session_id: str, persona_id: str | None) -> SessionMeta:
+        """会话级角色切换（spec rev23）：不同会话可各用各的角色。"""
+        meta = self._read_meta(session_id)
+        self.append(
+            session_id, "user", "persona.switch", {"from": meta.persona_id, "to": persona_id}
+        )
+        meta.persona_id = persona_id
+        self._touch(meta)
+        return meta
+
+    def get_meta(self, session_id: str) -> SessionMeta:
+        return self._read_meta(session_id)
 
     def get_meta(self, session_id: str) -> SessionMeta:
         return self._read_meta(session_id)
