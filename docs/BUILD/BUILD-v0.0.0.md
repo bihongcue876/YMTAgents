@@ -77,6 +77,7 @@
 - 2026-09-18：**rev19 渲染通道重做：壳 + 局部更新 · 惰性创建**（见 §22）。
 - 2026-09-18：**rev20 上下文预算自适应 · 每文件截断**（见 §23）。
 - 2026-09-18：**rev22 复杂度巡检：结构简化（零行为变化）**（见 §24）。
+- 2026-09-18：**rev23 阶段 2 第一片：Persona 全局配置 · 会话各自选择**（见 §25）。
 
 ## 7. rev4 轮次记录 — 槽位绑定接线补全（2026-09-11）
 
@@ -760,6 +761,30 @@ loadFinished → 应用排队帧
 ### 24.3 冒烟结果
 
 全量 **177 passed, 2 skipped，退出码 0**（零行为变化、零用例增减）；门禁全绿。
+
+## 25. rev23 轮次记录 — 阶段 2 第一片：Persona 全局配置 · 会话各自选择（2026-09-18）
+
+用户裁决：Persona = 全局配置形同模型；**多角色库**；**单对话选择、单对话不一致**（对齐
+Coding agents 平台）；YMT 默认角色由 AI 起草；工作区设计暂缓。规划先行、前后端联做。
+
+### 25.1 交付
+
+| # | 交付 | 落点 |
+|---|---|---|
+| 1 | `PersonaStore`：角色库（list/save/delete/get/resolve_content/默认角色）；YMT 预置 `prs_ymt` 缺席即创建、可编辑不可删；任何解析失败回退 YMT | `core/agent/persona.py`（新） |
+| 2 | 协议：`persona.list/save/delete/set_default/switch` 5 请求 + 1 事件；`SessionMeta.persona_id`；`NewSession.persona_id` 启用 | `shared/envelope.py` |
+| 3 | 会话侧：`ISessionStore.set_persona / get_meta`（契约门禁当场抓到 `get_meta` 漏声明并拦截） | `core/agent/session.py` |
+| 4 | 装配：system 首段 = 会话角色的 prompt.md，失败回退 YMT；rev16 客观化结论不变（身份叙事在可编辑的预置角色里） | `core/agent/loop.py` |
+| 5 | GUI：**角色配置页**（rail「🎭 角色」：卡片 + 设为默认/编辑/删除 + 编辑对话框）；对话头条**角色下拉**（与模型并列，★=默认） | `gui/pages/personas.py`（新）、`gui/chat/header.py`、`gui/chat/view.py`、`gui/sidebar.py`、`gui/main_window.py` |
+| 6 | **模型语义修订（rev14→rev23）**：会话内 `model.switch` 只写会话 meta，不再登记「上次使用」；对齐 Coding agents 平台 | `app/controller.py` |
+
+### 25.2 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **186 passed, 2 skipped，退出码 0**（177+2 → 186+2，净增 9，只增不减） |
+| 新增用例 | PersonaStore ×5（预置/往返/回退/删除/重开）、端到端 ×2（保存→切换→system 段生效→删除回退；会话内切换不漂移全局默认）、GUI 接线 ×1、下拉跟随修订 ×1 |
+| 门禁 | 依赖方向 / 契约（抓到 `ISessionStore.get_meta` 漏声明并修复）/ 主题与字号纪律 全部通过 |
 
 
 
