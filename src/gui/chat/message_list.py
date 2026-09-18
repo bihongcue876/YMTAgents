@@ -41,10 +41,11 @@ class MessageList(QWidget):
             self._render()
 
     # -- 渲染 --------------------------------------------------------------
-    def _render(self) -> None:
+    def _render(self, jump_bottom: bool = False) -> None:
         inner = md.messages_inner(self._messages, self._theme, self._font_size)
         # 随帧下发主题底色；WebEngine 侧走 innerHTML 局部更新（rev19：不重载、不闪、无 2MB 限）
-        self._renderer.set_stream(inner, theme_module.palette(self._theme).bg)
+        # jump_bottom：会话切换/清空后无条件回底（rev21）；流式帧仍只在「原本在底部」时跟底
+        self._renderer.set_stream(inner, theme_module.palette(self._theme).bg, jump_bottom)
 
     def _schedule(self) -> None:
         if not self._timer.isActive():
@@ -60,7 +61,7 @@ class MessageList(QWidget):
 
     def clear(self) -> None:
         self._messages.clear()
-        self._render()
+        self._render(jump_bottom=True)
 
     def add_user(self, text: str) -> None:
         self._messages.append({"role": "user", "content": text})
@@ -108,4 +109,4 @@ class MessageList(QWidget):
                 self._messages.append(
                     {"role": "error", "content": payload.get("message", ""), "detail": payload.get("detail")}
                 )
-        self._render()
+        self._render(jump_bottom=True)  # 会话回放：从最新处看起（rev21）

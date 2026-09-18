@@ -101,12 +101,14 @@ class RendererView(QWidget):
         return browser
 
     # -- 内容 --------------------------------------------------------------
-    def set_stream(self, inner: str, bg: str | None = None) -> None:
+    def set_stream(self, inner: str, bg: str | None = None, jump_bottom: bool = False) -> None:
         """整帧更新流内容（innerHTML 片段）。
 
         WebEngine 路径：首帧加载空壳 + 排队；壳就绪后（loadFinished）本帧与后续帧
         全部走 JS 局部更新。QTextBrowser 路径：直接整文档 setHtml（无重载/2MB 问题）。
         bg：主题背景色（壳底色，防加载瞬间露白）。
+        jump_bottom：无条件回到底部（rev21，会话切换/清空用）——
+        缺省只在「原本就在底部」时跟底，不拽走上翻阅读的用户。
         """
         self._inner = inner
         self._dirty = not self.isVisible()
@@ -116,15 +118,16 @@ class RendererView(QWidget):
             self._apply_background()
         if self.using_webengine:
             if self._loaded:
-                self._run_update(inner)
+                self._run_update(inner, jump_bottom)
             elif self._loading:
-                self._pending = inner  # 壳加载中：最新帧排队
+                self._pending = (inner, jump_bottom)  # 壳加载中：最新帧排队
             else:
                 self._loading = True
                 self._view.setHtml(stub_doc())  # 空壳恒小于 2MB 上限
-                self._pending = inner
+                self._pending = (inner, jump_bottom)
         else:
             self._view.setHtml(assemble(inner))
+            self._scroll_bottom()
             self._view.update()
 
     def set_markdown(
@@ -137,25 +140,35 @@ class RendererView(QWidget):
         self.set_stream(markdown_inner(text, theme, font_size))
 
     @staticmethod
-    def _update_script(inner: str) -> str:
-        """局部更新脚本：替换 #stream 内容；原本在底部才自动跟底（不拽走上翻的读者）。"""
+    def _update_script(inner: str, jump_bottom: bool = False) -> str:
+        """局部更新脚本：替换 #stream 内容；跳底 = 无条件（rev21）或在底部才跟。"""
         payload = json.dumps(inner, ensure_ascii=False)  # 合法 JS 字符串字面量（任意内容安全转义）
+        scroll = (
+            "window.scrollTo(0,document.body.scrollHeight);"
+            if jump_bottom
+            else "if(nb){window.scrollTo(0,document.body.scrollHeight);}"
+        )
         return (
             "var nb=(window.innerHeight+window.scrollY)"
             f">=document.body.scrollHeight-{NEAR_BOTTOM_PX};"
             f"document.getElementById('stream').innerHTML={payload};"
-            "if(nb){window.scrollTo(0,document.body.scrollHeight);}"
+            f"{scroll}"
         )
 
-    def _run_update(self, inner: str) -> None:
-        self._view.page().runJavaScript(self._update_script(inner))
+    def _run_update(self, inner: str, jump_bottom: bool = False) -> None:
+        self._view.page().runJavaScript(self._update_script(inner, jump_bottom))
+
+    def _scroll_bottom(self) -> None:
+        bar = self._view.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(bar.maximum())
 
     def _on_load_finished(self, ok: bool) -> None:
         self._loading = False
         self._loaded = True
         if self._pending is not None:
-            inner, self._pending = self._pending, None
-            self._run_update(inner)
+            (inner, jump), self._pending = self._pending, None
+            self._run_update(inner, jump)
 
     # -- 外观 --------------------------------------------------------------
     def _apply_background(self) -> None:
@@ -187,7 +200,7 @@ class RendererView(QWidget):
             else:
                 self._loading = True
                 self._view.setHtml(stub_doc())
-                self._pending = self._inner
+                self._pending = (self._inner, False)
         else:
             self._view.setHtml(assemble(self._inner))
             self._view.update()
