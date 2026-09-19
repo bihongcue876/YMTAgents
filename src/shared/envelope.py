@@ -466,6 +466,39 @@ class PersonaSwitch(Envelope):
     persona_id: str
 
 
+class PersonaExport(Envelope):
+    """把角色导出为单文件（rev32）；路径由 GUI 选择，**写盘在 core**（单写者）。"""
+
+    type: Literal["persona.export"] = "persona.export"
+    persona_id: str
+    path: str
+
+
+class PersonaImport(Envelope):
+    """从单文件新建角色（rev32）；不覆盖既有，重名自动加后缀。"""
+
+    type: Literal["persona.import"] = "persona.import"
+    path: str
+
+
+class PersonaExported(Envelope):
+    type: Literal["persona.export.result"] = "persona.export.result"
+    persona_id: str
+    ok: bool
+    path: str = ""
+    name: str = ""
+    error: str | None = None
+
+
+class PersonaImported(Envelope):
+    type: Literal["persona.import.result"] = "persona.import.result"
+    ok: bool
+    path: str = ""
+    persona_id: str | None = None
+    name: str = ""
+    error: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # 联合类型 + 校验器
 # ---------------------------------------------------------------------------
@@ -497,6 +530,8 @@ Request = Annotated[
         PersonaDelete,
         PersonaSetDefault,
         PersonaSwitch,
+        PersonaExport,
+        PersonaImport,
     ],
     Field(discriminator="type"),
 ]
@@ -520,6 +555,8 @@ Event = Annotated[
         ErrorReport,
         SettingsState,
         PersonaList,
+        PersonaExported,
+        PersonaImported,
     ],
     Field(discriminator="type"),
 ]
