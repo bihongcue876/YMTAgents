@@ -15,7 +15,7 @@ from typing import Callable, Protocol
 
 import openai
 
-from shared.envelope import ModelSpec, ProviderSpec, Usage
+from shared.envelope import ModelSpec, ProviderSpec, SessionParams, Usage
 from shared.net import is_secure_transport
 from shared.schema import ModelConfig, ModelsConfig, ProviderConfig, SettingsConfig
 
@@ -85,7 +85,21 @@ class IModelGateway(ABC):
         messages: list[dict],
         cancel_token: CancelTokenLike | None,
         on_delta: Callable[[str], None],
-    ) -> Usage: ...
+        on_reasoning: Callable[[str], None] | None = None,
+        params: SessionParams | None = None,
+    ) -> Usage:
+        """流式对话。`params` 为会话级模型参数（rev24）：仅下发用户显式启用的项。
+
+        `on_reasoning`（rev25）：思考过程增量回调（正文与思考分流）；模型不支持时为 None。
+        """
+
+    @abstractmethod
+    def reasoning_pending(self, model_id: str) -> bool:
+        """该模型的思考能力是否尚未确定（需要调用前探测，rev25）。"""
+
+    @abstractmethod
+    def probe_reasoning(self, model_id: str) -> str:
+        """一次性探测思考能力，返回 "yes"/"no"/"unknown"，结果写入 models.json 缓存。"""
 
 
 def _map_exception(exc: Exception) -> GatewayError:
@@ -117,6 +131,33 @@ def _map_exception(exc: Exception) -> GatewayError:
     return GatewayNetworkError("网络或连接错误")
 
 
+def _param_options(params: SessionParams | None) -> dict:
+    """会话级参数 → OpenAI 兼容关键字；`None` 一律不下发（沿用供应商默认，rev24）。"""
+    if params is None:
+        return {}
+    options: dict = {}
+    for name in ("temperature", "top_p", "top_k", "max_tokens"):
+        value = getattr(params, name, None)
+        if value is not None:
+            options[name] = value
+    return options
+
+
+def _reasoning_text(delta) -> str:
+    """从流式 delta 中取思考文本（rev25）。
+
+    各家的字段名不同：DeepSeek / vLLM / 硅基流动用 `reasoning_content`，
+    OpenRouter 等用 `reasoning`。取到非空即视为思考增量。
+    """
+    if delta is None:
+        return ""
+    for name in ("reasoning_content", "reasoning"):
+        value = getattr(delta, name, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 class ModelGateway(IModelGateway):
     def __init__(
         self,
@@ -134,6 +175,8 @@ class ModelGateway(IModelGateway):
         self.models: ModelsConfig = store.load("models")
         self.settings: SettingsConfig = store.load("settings")
         self.whitelist = Whitelist(self.settings.network.whitelist)
+        # rev27：本进程内已探测过的模型 —— 探测即使未得结论也不再每回合重试（用户裁决「不每次都测」）。
+        self._probe_attempted: set[str] = set()
 
     # -- 客户端 ------------------------------------------------------------
     @staticmethod
@@ -181,7 +224,13 @@ class ModelGateway(IModelGateway):
             name=pc.name,
             base_url=pc.base_url,
             models=[
-                ModelSpec(id=m.id, ctx_window=m.ctx_window, tags=list(m.tags))
+                ModelSpec(
+                    id=m.id,
+                    ctx_window=m.ctx_window,
+                    tags=list(m.tags),
+                    reasoning=m.reasoning,
+                    reasoning_detected=m.reasoning_detected,
+                )
                 for m in pc.models
             ],
             key_status=self.keyring.status(pc.id) if not pc.local else "missing",
@@ -200,6 +249,121 @@ class ModelGateway(IModelGateway):
 
     def list_providers(self) -> list[ProviderSpec]:
         return [self._to_spec(p) for p in self.models.providers]
+
+    # -- 思考能力（rev25） ---------------------------------------------------
+    def _find_model(self, model_id: str) -> ModelConfig | None:
+        for p in self.models.providers:
+            for m in p.models:
+                if m.id == model_id:
+                    return m
+        return None
+
+    def reasoning_pending(self, model_id: str) -> bool:
+        """偏好为 auto、尚未得结论、且本进程未探测过 → 需要一次调用前探测。
+
+        rev27：探测失败（unknown）也记入 `_probe_attempted`，避免每回合重复探测与重复预告。
+        """
+        m = self._find_model(model_id)
+        return bool(
+            m is not None
+            and m.reasoning == "auto"
+            and m.reasoning_detected == "unknown"
+            and model_id not in self._probe_attempted
+        )
+
+    def _reasoning_enabled(self, model_id: str) -> bool:
+        """是否显示/采集思考：人工覆盖优先，auto 用探测结果（yes 才启用）。"""
+        m = self._find_model(model_id)
+        if m is None:
+            return False
+        if m.reasoning == "on":
+            return True
+        if m.reasoning == "off":
+            return False
+        return m.reasoning_detected == "yes"
+
+    def _reasoning_options(self, model_id: str) -> dict:
+        """主动下发思考参数（仅当探测确认该端点接受 `reasoning_effort`，rev25）。"""
+        m = self._find_model(model_id)
+        if m is None or not m.reasoning_param_ok or not self._reasoning_enabled(model_id):
+            return {}
+        return {"reasoning_effort": "low"}
+
+    def _record_reasoning(self, model_id: str, detected: str, param_ok: bool) -> None:
+        m = self._find_model(model_id)
+        if m is None:
+            return
+        m.reasoning_detected = detected  # type: ignore[assignment]
+        m.reasoning_param_ok = param_ok
+        self.store.save("models", self.models)
+
+    def probe_reasoning(self, model_id: str) -> str:
+        """一次极小探测（成本 ≈ W 提示 + 64 输出 token）：先带 reasoning_effort，被拒则去掉重探。
+
+        归 "yes"/"no"/"unknown"；任何网络/配置异常一律 unknown（不误判、不影响对话）。
+        得结论则写入 models.json（rev25：不每次都测）；未得结论也记入内存 `_probe_attempted`，
+        本进程不再重复探测（rev27）。
+        """
+        m = self._find_model(model_id)
+        provider = self._find_provider_for_model(model_id)
+        if m is None or provider is None:
+            return "unknown"
+        self._probe_attempted.add(model_id)  # rev27：无论成败，本进程不再重复探测
+        try:
+            self._ensure_secure_transport(provider.base_url)
+            if not self.whitelist.is_allowed(provider.base_url):
+                return "unknown"
+            api_key = self._api_key_for(provider)
+            if not api_key:
+                return "unknown"
+        except GatewayError:
+            return "unknown"
+        client = self._client(provider.base_url, api_key)
+        with_param = self._probe_once(client, model_id, reasoning_effort="low")
+        if with_param == "rejected":
+            without = self._probe_once(client, model_id, reasoning_effort=None)
+            if without in ("yes", "no"):
+                self._record_reasoning(model_id, without, param_ok=False)
+            return without
+        if with_param in ("yes", "no"):
+            self._record_reasoning(model_id, with_param, param_ok=True)
+        return with_param
+
+    def _probe_once(self, client: object, model_id: str, reasoning_effort: str | None) -> str:
+        """单次探测：返回 "yes"/"no"/"rejected"（参数被拒）/"unknown"（其他失败）。"""
+        options = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+        try:
+            stream = client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": "1+1=?"}],
+                max_tokens=64,  # 探测成本上限（用户裁决：单次 50–100 token 内）
+                stream=True,
+                timeout=CONNECT_TIMEOUT_S,
+                **options,
+            )
+        except Exception as exc:  # noqa: BLE001
+            name = type(exc).__name__
+            return "rejected" if ("BadRequest" in name or "Unprocessable" in name) else "unknown"
+        saw_reasoning = False
+        try:
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                if delta is not None and _reasoning_text(delta):
+                    saw_reasoning = True
+                    break
+        except Exception:  # noqa: BLE001
+            return "unknown"
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001
+                    log.debug("关闭探测流失败", exc_info=True)
+        return "yes" if saw_reasoning else "no"
 
     def get_slots(self) -> dict[str, str | None]:
         return dict(self.models.slots)
@@ -222,10 +386,22 @@ class ModelGateway(IModelGateway):
         pc.name = spec.name
         pc.base_url = spec.base_url
         pc.local = spec.local
-        pc.models = [
-            ModelConfig(id=m.id, ctx_window=m.ctx_window, tags=list(m.tags))
-            for m in spec.models
-        ]
+        # rev25：思考字段按 id 合并 —— 探测缓存（detected / param_ok）是端点事实，
+        # 编辑模型表时不得被清空；用户偏好（reasoning）以本次提交为准。
+        old_models = {m.id: m for m in pc.models}
+        pc.models = []
+        for m in spec.models:
+            old = old_models.get(m.id)
+            pc.models.append(
+                ModelConfig(
+                    id=m.id,
+                    ctx_window=m.ctx_window,
+                    tags=list(m.tags),
+                    reasoning=m.reasoning,
+                    reasoning_detected=old.reasoning_detected if old else "unknown",
+                    reasoning_param_ok=old.reasoning_param_ok if old else False,
+                )
+            )
         if api_key and not pc.local:
             self.keyring.set_key(spec.id, api_key)
             pc.key_ref = f"keyring://{self.keyring.service}/{spec.id}"
@@ -323,6 +499,8 @@ class ModelGateway(IModelGateway):
         messages: list[dict],
         cancel_token: CancelTokenLike | None,
         on_delta: Callable[[str], None],
+        on_reasoning: Callable[[str], None] | None = None,
+        params: SessionParams | None = None,
     ) -> Usage:
         provider = self._find_provider_for_model(model_id)
         if provider is None:
@@ -338,7 +516,9 @@ class ModelGateway(IModelGateway):
             raise GatewayAuthError("凭据不可用", code="key_missing")
         client = self._client(provider.base_url, api_key)
 
-        usage = self._stream_with_retry(client, model_id, messages, cancel_token, on_delta)
+        usage = self._stream_with_retry(
+            client, model_id, messages, cancel_token, on_delta, on_reasoning, params
+        )
         self.meter.add(usage)
         return usage
 
@@ -349,13 +529,15 @@ class ModelGateway(IModelGateway):
         messages: list[dict],
         cancel_token: CancelTokenLike | None,
         on_delta: Callable[[str], None],
+        on_reasoning: Callable[[str], None] | None = None,
+        params: SessionParams | None = None,
     ) -> Usage:
         last_exc: GatewayError | None = None
         for attempt in range(2):  # 初次 + 至多 1 次重试
             holder = {"got_delta": False}
             try:
                 return self._stream_once(
-                    client, model_id, messages, cancel_token, on_delta, holder
+                    client, model_id, messages, cancel_token, on_delta, holder, on_reasoning, params
                 )
             except GatewayTimeout:
                 raise
@@ -379,6 +561,8 @@ class ModelGateway(IModelGateway):
         cancel_token: CancelTokenLike | None,
         on_delta: Callable[[str], None],
         holder: dict,
+        on_reasoning: Callable[[str], None] | None = None,
+        params: SessionParams | None = None,
     ) -> Usage:
         """单次流式调用。
 
@@ -386,16 +570,22 @@ class ModelGateway(IModelGateway):
         1. `timeout=` 交给 SDK —— 它约束「两次数据之间的等待」，故真·静默（一个 chunk 都不来）
            也会在阈值处中止；否则循环里的判定永远等不到下一次迭代，取消同样无法生效（spec rev8 §1）。
         2. 循环内判定 —— 兜底自定义客户端（如测试替身）忽略 `timeout` 的情形。
+
+        rev25：正文与思考分流（`reasoning_content`）；记录首 token / 流结束时刻，供平均 TPS。
         """
+        options = {**_param_options(params), **self._reasoning_options(model_id)}
         stream = client.chat.completions.create(
             model=model_id,
             messages=messages,
             stream=True,
             stream_options={"include_usage": True},
             timeout=self.silent_timeout,
+            **options,
         )
         prompt = completion = total = 0
-        last = time.monotonic()
+        started = time.monotonic()
+        first_token: float | None = None
+        last = started
         try:
             for chunk in stream:
                 now = time.monotonic()
@@ -409,8 +599,17 @@ class ModelGateway(IModelGateway):
                 choices = getattr(chunk, "choices", None)
                 if choices:
                     delta = getattr(choices[0], "delta", None)
+                    reasoning = _reasoning_text(delta)
                     content = getattr(delta, "content", None) if delta is not None else None
+                    if reasoning:
+                        if first_token is None:
+                            first_token = now
+                        holder["got_delta"] = True
+                        if on_reasoning is not None:
+                            on_reasoning(reasoning)
                     if content:
+                        if first_token is None:
+                            first_token = now
                         on_delta(content)
                         holder["got_delta"] = True
                 chunk_usage = getattr(chunk, "usage", None)
@@ -426,8 +625,12 @@ class ModelGateway(IModelGateway):
                     close()
                 except Exception:  # noqa: BLE001 - 关闭失败不影响既有结果
                     log.debug("关闭模型流失败", exc_info=True)
+        elapsed_ms = max(0, int((last - started) * 1000))
+        first_ms = max(0, int((first_token - started) * 1000)) if first_token is not None else 0
         return Usage(
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=total or (prompt + completion),
+            elapsed_ms=elapsed_ms,
+            first_token_ms=first_ms,
         )
