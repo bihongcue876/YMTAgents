@@ -17,6 +17,7 @@ from shared.redact import redact
 from shared.envelope import (
     ArchiveSession,
     CancelTurn,
+    ContextUsage,
     DeleteSession,
     ErrorReport,
     FetchModels,
@@ -30,8 +31,12 @@ from shared.envelope import (
     ResumeSession,
     SendMessage,
     SessionCreated,
+    SessionDetail,
+    SessionDetailResult,
     SessionEvents,
     SessionIndex,
+    SessionUpdate,
+    SummarizeSession,
     SetSlot,
     SettingsState,
     SettingsUpdate,
@@ -46,15 +51,15 @@ from shared.envelope import (
     PersonaSwitch,
 )
 from shared.schema import (
-    ContextSettings,
     LoggingSettings,
     NetworkSettings,
     UISettings,
 )
 
-from core.agent.loop import AgentLoop
+from core.agent.loop import AgentLoop, model_ctx_window
 from core.agent.session import SessionStore
 from core.agent.persona import PersonaStore, YMT_PERSONA_ID
+from core.agent.summarize import effective_threshold
 from core.bus.bridge import BusBridge
 from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
@@ -268,6 +273,12 @@ class CoreController:
             self._on_rename(request)
         elif t == "session.delete":
             self._on_delete(request)
+        elif t == "session.detail":
+            self._on_detail(request)
+        elif t == "session.update":
+            self._on_update(request)
+        elif t == "session.summarize":
+            self._on_summarize(request)
         elif t == "provider.upsert":
             self._on_upsert(request)
         elif t == "provider.delete":
@@ -312,6 +323,7 @@ class CoreController:
     def _on_send(self, request: SendMessage) -> None:
         session_id = self._ensure_session()
         self.agent.run_turn(session_id, request)
+        self._emit_detail(session_id)  # 回合结束后刷新右栏（含最近一次上下文用量）
 
     def _on_cancel(self, request: CancelTurn) -> None:
         if self.current_session_id:
@@ -343,6 +355,8 @@ class CoreController:
             )
         self._emit_providers()
         self._emit_health()
+        if self.current_session_id:
+            self._emit_detail(self.current_session_id)  # 换模型 → 生效窗口变化
 
     def _on_set_slot(self, request: SetSlot) -> None:
         """全局槽位绑定（spec rev4 §3）。
@@ -370,17 +384,19 @@ class CoreController:
         self.emit(SessionCreated(session_id=meta.id, title=meta.title, created_at=meta.created_at))
         self._emit_index()
         self._emit_personas()  # 新会话的 in_session 标记变了
+        self._emit_detail(meta.id)
 
     def _on_resume(self, request: ResumeSession) -> None:
         try:
             snapshot = self.store.resume(request.session_id)
         except KeyError:
-            self.emit(ErrorReport(scope="session", code="session_not_found", message="会话不存在"))
+            self.emit(ErrorReport(scope="session", code=ErrorCode.SESSION_NOT_FOUND.value, message="会话不存在"))
             return
         self.current_session_id = request.session_id
         self.emit(SessionEvents(session_id=request.session_id, events=snapshot.events))
         self._emit_health()
         self._emit_personas()  # 当前会话变了 → in_session 标记刷新（rev23）
+        self._emit_detail(request.session_id)
 
     def _on_archive(self, request: ArchiveSession) -> None:
         try:
@@ -408,6 +424,97 @@ class CoreController:
         if self.current_session_id == request.session_id:
             self.current_session_id = None
         self._emit_index()
+
+    # -- 会话详情 / 策略（stage 2 · rev24） ---------------------------------
+    def _effective_window(self, meta) -> int:
+        """本会话实际生效窗口：会话自设上限优先，否则用所选模型声明值（0=未知）。"""
+        model_id = meta.main_model or self.gateway.get_slots().get("main")
+        if not model_id:
+            return 0
+        return meta.max_context or model_ctx_window(self.gateway, model_id)
+
+    def _emit_detail(self, session_id: str) -> None:
+        try:
+            meta = self.store.get_meta(session_id)
+        except KeyError:
+            return
+        events = self.store.replay(session_id)
+        user_count = sum(1 for e in events if e.get("type") == "msg.user")
+        assistant_count = sum(1 for e in events if e.get("type") == "msg.assistant.final")
+        cumulative = 0
+        for event in events:
+            if event.get("type") != "msg.assistant.final":
+                continue
+            usage = (event.get("payload") or {}).get("usage") or {}
+            cumulative += int(usage.get("total_tokens") or 0)
+        last_usage: ContextUsage | None = None
+        for event in reversed(events):
+            if event.get("type") == "ctx.usage":
+                try:
+                    last_usage = ContextUsage.model_validate(event.get("payload", {}))
+                except ValidationError:
+                    last_usage = None
+                break
+        summary = self.store.read_summary(session_id)
+        threshold = effective_threshold(meta, self.config_store.load("summary"))
+        self.emit(
+            SessionDetailResult(
+                session_id=session_id,
+                meta=meta,
+                turn_count=user_count,
+                user_count=user_count,
+                assistant_count=assistant_count,
+                data_bytes=self.store.data_bytes(session_id),
+                effective_window=self._effective_window(meta),
+                last_usage=last_usage,
+                cumulative_tokens=cumulative,
+                summary_revision=(summary.revision if summary else 0),
+                summary_covered_seq=(summary.covered_seq if summary else -1),
+                summary_tokens=(summary.tokens_est if summary else 0),
+                summary_threshold=threshold,
+            )
+        )
+
+    def _on_detail(self, request: SessionDetail) -> None:
+        self._emit_detail(request.session_id)
+
+    def _on_update(self, request: SessionUpdate) -> None:
+        title = request.title.strip()
+        if not title:
+            self._report("session", ErrorCode.INVALID_REQUEST.value, "会话名称不能为空。")
+            return
+        if request.max_context is not None and request.max_context < 0:
+            self._report("session", ErrorCode.INVALID_REQUEST.value, "上下文上限不能为负数。")
+            return
+        if request.summary_threshold is not None and not 50 <= request.summary_threshold <= 99:
+            self._report(
+                "session", ErrorCode.INVALID_REQUEST.value, "压缩阈值需在 50–99 之间。"
+            )
+            return
+        try:
+            self.store.update(
+                request.session_id,
+                title=title,
+                note=request.note.strip(),
+                max_context=request.max_context,
+                params=request.params,
+                summary_threshold=request.summary_threshold,
+            )
+        except KeyError:
+            self._report("session", ErrorCode.SESSION_NOT_FOUND.value, "会话不存在。")
+            return
+        self._emit_index()
+        self._emit_detail(request.session_id)
+
+    def _on_summarize(self, request: SummarizeSession) -> None:
+        """压缩较早历史（rev26）：结果由 loop 以 `session.summary.result` 回报。"""
+        try:
+            self.store.get_meta(request.session_id)
+        except KeyError:
+            self._report("session", ErrorCode.SESSION_NOT_FOUND.value, "会话不存在。")
+            return
+        self.agent.summarize(request.session_id)
+        self._emit_detail(request.session_id)  # 摘要状态/用量刷新右栏
 
     # -- 供应商 ------------------------------------------------------------
     def _on_upsert(self, request: ProviderUpsert) -> None:
@@ -455,11 +562,7 @@ class CoreController:
         settings = self.config_store.load("settings")
         data = request.data
         try:
-            if request.section == "context":
-                settings.context = ContextSettings.model_validate(
-                    {**settings.context.model_dump(), **data}
-                )
-            elif request.section == "network":
+            if request.section == "network":
                 settings.network = NetworkSettings.model_validate(
                     {**settings.network.model_dump(), **data}
                 )
