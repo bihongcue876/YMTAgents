@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from shared.envelope import (
     ArchiveSession,
+    BranchSession,
     CancelTurn,
     DeleteSession,
     FetchModels,
@@ -34,6 +35,8 @@ from shared.envelope import (
     SessionParams,
     SessionUpdate,
     SummarizeSession,
+    RevertSession,
+    SwitchBranch,
     SetSlot,
     SettingsUpdate,
     SwitchModel,
@@ -62,6 +65,7 @@ class MainWindow(QMainWindow):
 
         self._current_session_id: str | None = None
         self._current_events: list[dict] = []  # rev24：问题列表来源
+        self._active_branch: str = "br0"  # rev31：当前活动分支（摘要文件按分支定位）
         self._session_titles: dict[str, str] = {}
         # rev14/rev23：模型与角色下拉都显示**当前会话**的选择；
         # 无会话/未选时回落全局默认（模型=slots.main，角色=manifest.current）
@@ -219,6 +223,9 @@ class MainWindow(QMainWindow):
         self.detail.question_selected.connect(self.chat.messages.scroll_to_user)
         self.detail.summarize_requested.connect(self._on_summarize)
         self.detail.open_summary_requested.connect(self._open_summary)
+        self.detail.revert_requested.connect(self._on_revert)
+        self.detail.branch_requested.connect(self._on_branch)
+        self.detail.branch_switch_requested.connect(self._on_switch_branch)
 
     # -- 会话详情（rev24） --------------------------------------------------
     def _toggle_detail(self) -> None:
@@ -267,11 +274,50 @@ class MainWindow(QMainWindow):
         """用系统默认程序打开本会话的 summary.md（不写盘，仅查看/编辑用）。"""
         if not self._current_session_id:
             return
-        path = Path(self._data_root) / "sessions" / self._current_session_id / "summary.md"
+        session_dir = Path(self._data_root) / "sessions" / self._current_session_id
+        path = session_dir / "branches" / self._active_branch / "summary.md"
+        if not path.exists() and self._active_branch == "br0":
+            path = session_dir / "summary.md"  # rev26 旧布局（br0）
         if not path.exists():  # rev27：文件不存在时给可读提示，避免系统静默失败
             QMessageBox.information(self, "尚未压缩", "本会话还没有摘要文件，请先点「压缩历史」。")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _user_seq(self, ordinal: int) -> int | None:
+        """第 ordinal 个用户提问（0 起）对应的事件 seq（rev31：分支/回退要用 seq）。"""
+        seen = 0
+        for event in self._current_events:
+            if event.get("type") != "msg.user":
+                continue
+            if seen == ordinal:
+                try:
+                    return int(event.get("seq", -1))
+                except (TypeError, ValueError):
+                    return None
+            seen += 1
+        return None
+
+    def _on_revert(self, ordinal: int) -> None:
+        if not self._current_session_id:
+            return
+        seq = self._user_seq(ordinal)
+        if seq is None:
+            return
+        self.bus.submit(RevertSession(session_id=self._current_session_id, to_seq=seq))
+
+    def _on_branch(self, ordinal: int) -> None:
+        if not self._current_session_id:
+            return
+        seq = self._user_seq(ordinal)
+        if seq is None:
+            return
+        self.bus.submit(BranchSession(session_id=self._current_session_id, from_seq=seq))
+
+    def _on_switch_branch(self, branch_id: str) -> None:
+        if self._current_session_id:
+            self.bus.submit(
+                SwitchBranch(session_id=self._current_session_id, branch_id=branch_id)
+            )
 
     def _questions(self) -> list[str]:
         """当前会话的用户提问（rev30：完整内容，仅把换行折成空格），供右栏问题列表跳转。"""
@@ -372,8 +418,13 @@ class MainWindow(QMainWindow):
             # 成功由随后的 session.detail.result 刷新状态；失败在此提示且不改动原状
             if not event.ok and event.error:
                 self.detail.set_summary_error(event.error)
+        elif t == "session.branches":
+            self._active_branch = event.active
+            self.detail.set_branches(event)
         elif t == "session.detail.result":
             self._current_events = self._current_events or []
+            if event.active_branch:
+                self._active_branch = event.active_branch
             self.detail.set_detail(event, self._questions())
         elif t == "ctx.usage":
             # rev24：关闭 stage-1 遗留缺口 —— 用量事件被消费；面板可见时刷新详情

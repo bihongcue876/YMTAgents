@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from shared.envelope import ContextUsage, SessionDetailResult
+from shared.envelope import ContextUsage, SessionBranches, SessionDetailResult
 
 
 def format_tokens(count: int) -> str:
@@ -52,6 +53,17 @@ def format_bytes(count: int) -> str:
     return f"{count} B"
 
 
+def _branch_label(branch) -> str:
+    """分支列表项文案（rev31）。"""
+    label = "主干 br0" if branch.id == "br0" else branch.id
+    label += f" · {branch.turns} 轮"
+    if branch.fork_seq >= 0:
+        label += f" · 分叉于 #{branch.fork_seq}"
+    if branch.active:
+        label += "（当前）"
+    return label
+
+
 def _muted(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("mutedNote")
@@ -65,6 +77,9 @@ class SessionPanel(QWidget):
     question_selected = Signal(int)  # 第 n 个用户提问（0 起）
     summarize_requested = Signal()  # 压缩较早历史（rev26）
     open_summary_requested = Signal()  # 打开 summary.md（rev26）
+    revert_requested = Signal(int)  # 退回到此前：该提问的原始序号（rev31）
+    branch_requested = Signal(int)  # 从此处分支：该提问的原始序号（rev31）
+    branch_switch_requested = Signal(str)  # 切换活动分支（rev31）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -96,6 +111,8 @@ class SessionPanel(QWidget):
         self._save = QPushButton("保存本会话设置")
         self._save.clicked.connect(self._on_save)
         body.addWidget(self._save)
+        body.addWidget(QLabel("分支"))
+        body.addLayout(self._build_branches())
         body.addLayout(self._build_questions())
         body.addStretch(1)
 
@@ -246,10 +263,22 @@ class SessionPanel(QWidget):
         form.addRow("输出上限", self._param_row("max_tokens", self._max_tokens_on, self._max_tokens))
         return form
 
-    def _build_questions(self) -> QVBoxLayout:
-        """问题列表（rev30）：轮次编号 + 当前高亮 + 完整内容 + 可搜索 / 可折叠。
+    def _build_branches(self) -> QVBoxLayout:
+        """分支树（rev31）：点击切换活动分支；不复制历史，只引用 seq。"""
+        self._branch_state = _muted("共 1/5 分支")
+        self._branch_list = QListWidget()
+        self._branch_list.setToolTip("点击切换到该分支；各分支共享同一份 events.jsonl，不复制历史")
+        self._branch_list.itemClicked.connect(self._on_branch_item)
+        box = QVBoxLayout()
+        box.addWidget(self._branch_state)
+        box.addWidget(self._branch_list)
+        return box
 
-        列表项用 `Qt.UserRole` 存**原始序号**，搜索过滤后仍能正确跳转（不依赖行号）。
+    def _build_questions(self) -> QVBoxLayout:
+        """问题列表（rev30/31）：轮次编号 + 当前高亮 + 完整内容 + 可搜索 / 可折叠。
+
+        列表项用 `Qt.UserRole` 存**原始序号**，搜索过滤后仍能正确跳转（不依赖行号）；
+        右键提供「退回到此前 / 从此处分支」（rev31 HTTP 语义都在主窗口侧翻译为 seq）。
         """
         self._question_count = _muted("共 0 条")
         self._question_toggle = QPushButton("收起")
@@ -270,9 +299,11 @@ class SessionPanel(QWidget):
         self._question_search.textChanged.connect(lambda _text: self._render_questions())
 
         self._questions = QListWidget()
-        self._questions.setToolTip("点击跳转到该提问；右键可退回到此前 / 从此处分支（分支功能随下一步提供）")
+        self._questions.setToolTip("点击跳转到该提问；右键可退回到此前 / 从此处分支")
         self._questions.setWordWrap(True)
         self._questions.itemClicked.connect(self._on_question)
+        self._questions.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._questions.customContextMenuRequested.connect(self._on_question_menu)
 
         self._question_body = QWidget()
         inner = QVBoxLayout(self._question_body)
@@ -378,6 +409,23 @@ class SessionPanel(QWidget):
         """压缩失败提示（rev26）：只改状态行，不动摘要文件。"""
         self._summary_state.setText(f"压缩未完成：{message}")
 
+    def set_branches(self, event: SessionBranches) -> None:
+        """填充分支树（rev31）：列表 + 上限状态；点击项切换活动分支。"""
+        self._branch_list.clear()
+        for branch in event.branches:
+            item = QListWidgetItem(_branch_label(branch))
+            item.setData(Qt.UserRole, branch.id)
+            tip = "点击切换到该分支"
+            if branch.head_seq >= 0:
+                tip += f"\n活动前缀末事件 #{branch.head_seq}"
+            item.setToolTip(tip)
+            if branch.active:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self._branch_list.addItem(item)
+        self._branch_state.setText(f"共 {len(event.branches)}/{event.max_branches} 分支")
+
     def _set_usage(
         self, usage: ContextUsage | None, window: int, cumulative: int
     ) -> None:
@@ -413,6 +461,8 @@ class SessionPanel(QWidget):
         self._name.clear()
         self._note.clear()
         self._summary_state.setText("尚未压缩")
+        self._branch_list.clear()
+        self._branch_state.setText("共 1/5 分支")
         self._question_texts = []
         self._question_search.clear()
         self._render_questions()
@@ -423,6 +473,28 @@ class SessionPanel(QWidget):
         ordinal = item.data(Qt.UserRole)
         if ordinal is not None:
             self.question_selected.emit(int(ordinal))
+
+    def _on_question_menu(self, pos) -> None:
+        """问题项右键菜单（rev31）：退回到此前 / 从此处分支。"""
+        item = self._questions.itemAt(pos)
+        if item is None:
+            return
+        ordinal = item.data(Qt.UserRole)
+        if ordinal is None:
+            return
+        menu = QMenu(self._questions)
+        act_revert = menu.addAction("退回到此前")
+        act_branch = menu.addAction("从此处分支")
+        chosen = menu.exec(self._questions.mapToGlobal(pos))
+        if chosen == act_revert:
+            self.revert_requested.emit(int(ordinal))
+        elif chosen == act_branch:
+            self.branch_requested.emit(int(ordinal))
+
+    def _on_branch_item(self, item) -> None:
+        branch_id = item.data(Qt.UserRole)
+        if branch_id is not None:
+            self.branch_switch_requested.emit(str(branch_id))
 
     def _on_save(self) -> None:
         if not self._session_id:
