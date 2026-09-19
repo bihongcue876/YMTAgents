@@ -349,6 +349,26 @@ def test_main_window_applies_font_size(tmp_path, monkeypatch, qapp):
         ctx.worker.stop()
 
 
+def test_empty_state_short_lines_do_not_wrap(qapp):
+    """rev29：空状态两行短句各占一行（此前居中 alignment 让标签只得窄宽，短句被折成两行）。"""
+    from gui.chat.empty_state import EmptyState
+    from gui.widgets import text_fit
+
+    widget = EmptyState()
+    widget.set_has_provider(True)  # 取短句 HINT_READY
+    widget.resize(900, 500)
+    widget.show()
+    qapp.processEvents()
+    widget.refresh_metrics("normal")
+    qapp.processEvents()
+    try:
+        single = text_fit.line_height(widget._tagline, "ui", "normal")
+        assert widget._tagline.minimumHeight() == single  # 一行
+        assert widget._hint.minimumHeight() == single
+    finally:
+        widget.close()
+
+
 def test_empty_state_title_width_follows_font_level(tmp_path, monkeypatch, qapp):
     """回归锚点：空状态标题「言明通 / YMTAgents」曾被裁掉（需 252px，实得 240px）。
 
