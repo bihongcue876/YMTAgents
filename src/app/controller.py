@@ -54,6 +54,10 @@ from shared.envelope import (
     PersonaSave,
     PersonaSetDefault,
     PersonaSwitch,
+    PersonaExport,
+    PersonaExported,
+    PersonaImport,
+    PersonaImported,
 )
 from shared.schema import (
     LoggingSettings,
@@ -193,6 +197,50 @@ class CoreController:
         ]
         self.emit(PersonaList(personas=infos))
 
+    def _on_persona_export(self, request: PersonaExport) -> None:
+        """导出角色到用户选定路径（rev32）；写盘在 core，失败给可读回报。"""
+        if self.personas is None:
+            return
+        try:
+            name = self.personas.export_persona(request.persona_id, request.path)
+        except KeyError:
+            self.emit(
+                PersonaExported(
+                    persona_id=request.persona_id, ok=False, path=request.path, error="角色不存在。"
+                )
+            )
+            return
+        except OSError:
+            self.emit(
+                PersonaExported(
+                    persona_id=request.persona_id,
+                    ok=False,
+                    path=request.path,
+                    error="导出失败：请检查目标路径是否可写。",
+                )
+            )
+            return
+        self.emit(
+            PersonaExported(persona_id=request.persona_id, ok=True, path=request.path, name=name)
+        )
+
+    def _on_persona_import(self, request: PersonaImport) -> None:
+        """从文件新建角色（rev32）；按不可信输入校验，失败不落盘。"""
+        if self.personas is None:
+            return
+        try:
+            pid, name = self.personas.import_persona(request.path)
+        except ValueError as exc:
+            message = {
+                "unreadable": "无法读取导入文件。",
+                "file_too_large": "导入文件过大（上限 2 MB）。",
+                "invalid_persona_file": "导入文件不是有效的角色文件。",
+            }.get(str(exc), "导入失败：文件无效。")
+            self.emit(PersonaImported(ok=False, path=request.path, error=message))
+            return
+        self.emit(PersonaImported(ok=True, path=request.path, persona_id=pid, name=name))
+        self._emit_personas()
+
     def _on_persona_save(self, request: PersonaSave) -> None:
         """新建或更新角色；落盘失败必须上报（rev8 §5 口径）。"""
         if not request.name.strip():
@@ -310,6 +358,10 @@ class CoreController:
             self._on_persona_set_default(request)
         elif t == "persona.switch":
             self._on_persona_switch(request)
+        elif t == "persona.export":
+            self._on_persona_export(request)
+        elif t == "persona.import":
+            self._on_persona_import(request)
         else:
             # 未知类型**不得静默**：此前只写一条 warning，调用方拿不到任何反馈（spec rev9 §1）。
             log.warning("未知请求类型：%s", t)
