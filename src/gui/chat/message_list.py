@@ -75,7 +75,6 @@ class MessageList(QWidget):
                 "reasoning": "",
                 "usage": None,
                 "interrupted": False,
-                "streaming": True,
             }
         )
         self._render()
@@ -102,7 +101,6 @@ class MessageList(QWidget):
         self._messages[-1]["reasoning"] = reasoning
         self._messages[-1]["usage"] = usage_text
         self._messages[-1]["interrupted"] = interrupted
-        self._messages[-1]["streaming"] = False
         self._render()
 
     def add_error(self, message: str, detail: str | None = None) -> None:
@@ -158,7 +156,6 @@ class MessageList(QWidget):
                         "reasoning": payload.get("reasoning", ""),
                         "usage": self.format_usage(payload.get("usage")),
                         "interrupted": bool(payload.get("interrupted")),
-                        "streaming": False,
                     }
                 )
             elif t == "error":

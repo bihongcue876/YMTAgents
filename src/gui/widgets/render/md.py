@@ -112,18 +112,16 @@ def _block_assistant(
     interrupted: bool,
     index: int = 0,
     reasoning: str = "",
-    streaming: bool = False,
 ) -> str:
     """助手消息：思考块（可折叠）+ 正文 + 用量。
 
-    rev25：思考文本用原生 `<details>`（CSP 禁脚本，`<details>` 无需 JS 即可折叠）；
-    流式期间带 `open` 便于旁观，回合结束后不带 `open`（自动折叠，用户可手动展开）。
+    rev25：思考文本用原生 `<details>`（CSP 禁脚本，`<details>` 无需 JS 即可折叠）。
+    rev27：**默认折叠**（不带 `open`），无论流式与否都不自动展开；用户可手动展开。
     """
     parts = [f'<div class="msg assistant" id="m{index}">']
     if reasoning:
-        opened = " open" if streaming else ""
         parts.append(
-            f'<details class="think"{opened}><summary>思考过程</summary>'
+            '<details class="think"><summary>思考过程</summary>'
             f'<div class="think-body">{_html.escape(reasoning)}</div></details>'
         )
     parts.append(_MD.render(text or ""))
@@ -160,7 +158,6 @@ def _messages_body(messages: list[dict]) -> str:
                     bool(m.get("interrupted")),
                     i,
                     m.get("reasoning", ""),
-                    bool(m.get("streaming")),
                 )
             )
         elif role == "error":
