@@ -37,6 +37,11 @@ from shared.envelope import (
     SessionIndex,
     SessionUpdate,
     SummarizeSession,
+    BranchSession,
+    RevertSession,
+    SwitchBranch,
+    SessionBranches,
+    BranchInfo,
     SetSlot,
     SettingsState,
     SettingsUpdate,
@@ -57,7 +62,7 @@ from shared.schema import (
 )
 
 from core.agent.loop import AgentLoop, model_ctx_window
-from core.agent.session import SessionStore
+from core.agent.session import MAX_BRANCHES, SessionStore
 from core.agent.persona import PersonaStore, YMT_PERSONA_ID
 from core.agent.summarize import effective_threshold
 from core.bus.bridge import BusBridge
@@ -279,6 +284,12 @@ class CoreController:
             self._on_update(request)
         elif t == "session.summarize":
             self._on_summarize(request)
+        elif t == "session.branch":
+            self._on_branch(request)
+        elif t == "session.revert":
+            self._on_revert(request)
+        elif t == "session.switch_branch":
+            self._on_switch_branch(request)
         elif t == "provider.upsert":
             self._on_upsert(request)
         elif t == "provider.delete":
@@ -384,6 +395,7 @@ class CoreController:
         self.emit(SessionCreated(session_id=meta.id, title=meta.title, created_at=meta.created_at))
         self._emit_index()
         self._emit_personas()  # 新会话的 in_session 标记变了
+        self._emit_branches(meta.id)
         self._emit_detail(meta.id)
 
     def _on_resume(self, request: ResumeSession) -> None:
@@ -394,6 +406,7 @@ class CoreController:
             return
         self.current_session_id = request.session_id
         self.emit(SessionEvents(session_id=request.session_id, events=snapshot.events))
+        self._emit_branches(request.session_id)
         self._emit_health()
         self._emit_personas()  # 当前会话变了 → in_session 标记刷新（rev23）
         self._emit_detail(request.session_id)
@@ -457,6 +470,7 @@ class CoreController:
                 break
         summary = self.store.read_summary(session_id)
         threshold = effective_threshold(meta, self.config_store.load("summary"))
+        graph = self.store.list_branches(session_id)
         self.emit(
             SessionDetailResult(
                 session_id=session_id,
@@ -472,6 +486,9 @@ class CoreController:
                 summary_covered_seq=(summary.covered_seq if summary else -1),
                 summary_tokens=(summary.tokens_est if summary else 0),
                 summary_threshold=threshold,
+                branch_count=len(graph.branches),
+                active_branch=graph.active,
+                max_branches=MAX_BRANCHES,
             )
         )
 
@@ -515,6 +532,64 @@ class CoreController:
             return
         self.agent.summarize(request.session_id)
         self._emit_detail(request.session_id)  # 摘要状态/用量刷新右栏
+
+    # -- 分支树 / 回退（rev31） ---------------------------------------------
+    def _emit_branches(self, session_id: str) -> None:
+        branches = self.store.branch_info(session_id)
+        active = next((b.id for b in branches if b.active), "br0")
+        self.emit(
+            SessionBranches(
+                session_id=session_id,
+                branches=branches,
+                active=active,
+                max_branches=MAX_BRANCHES,
+            )
+        )
+
+    def _refresh_branch_view(self, session_id: str) -> None:
+        """分支/回退改变了活动转录：重推事件流、分支树与详情。"""
+        try:
+            snapshot = self.store.resume(session_id)
+        except KeyError:
+            return
+        self.emit(SessionEvents(session_id=session_id, events=snapshot.events))
+        self._emit_branches(session_id)
+        self._emit_detail(session_id)
+
+    def _on_branch(self, request: BranchSession) -> None:
+        try:
+            self.store.create_branch(request.session_id, request.from_seq)
+        except KeyError:
+            self._report(
+                "session", ErrorCode.INVALID_REQUEST.value, "该消息不在当前分支中，无法从此处分支。"
+            )
+            return
+        except ValueError:
+            self._report(
+                "session",
+                ErrorCode.INVALID_REQUEST.value,
+                f"分支数已达上限（{MAX_BRANCHES}），请先切换到已有分支再操作。",
+            )
+            return
+        self._refresh_branch_view(request.session_id)
+
+    def _on_revert(self, request: RevertSession) -> None:
+        try:
+            self.store.revert_to(request.session_id, request.to_seq)
+        except KeyError:
+            self._report(
+                "session", ErrorCode.INVALID_REQUEST.value, "该消息不在当前分支中，无法回退。"
+            )
+            return
+        self._refresh_branch_view(request.session_id)
+
+    def _on_switch_branch(self, request: SwitchBranch) -> None:
+        try:
+            self.store.switch_branch(request.session_id, request.branch_id)
+        except KeyError:
+            self._report("session", ErrorCode.INVALID_REQUEST.value, "分支不存在。")
+            return
+        self._refresh_branch_view(request.session_id)
 
     # -- 供应商 ------------------------------------------------------------
     def _on_upsert(self, request: ProviderUpsert) -> None:
