@@ -2,7 +2,7 @@
 
 纯函数：同一输入必得同一输出，可独立测试。
 组装顺序：persona prompt → 记忆级联 → 挂载文件 → 环境陈述 → 历史。
-淘汰规则：files 截断（不剔除）→ history 丢最旧保最近 N。
+淘汰规则：files 截断（不剔除）→ history 仅按 **token 预算**丢最旧（rev24：不再固定轮数）。
 两条不变量（spec rev8）：
 - `file_truncate` 以 **token** 为口径，比较与截断同单位；
 - 淘汰**永不触及当前回合的用户消息**及其之后内容；若因此仍超窗，
@@ -41,8 +41,9 @@ def estimate_tokens(text: str) -> int:
 class ConfigSnapshot:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     memory: str = ""
+    # rev26：历史摘要（较早对话的概括，替代被覆盖的 history 段）。空串 = 未压缩。
+    summary: str = ""
     files: list[tuple[str, str]] = field(default_factory=list)
-    history_turns: int = 20
     reserve: int = 4096
     file_truncate: int = 8192
     window: int = 0
@@ -73,15 +74,6 @@ def _history_messages(events: list[dict]) -> list[dict]:
         elif t == "msg.assistant.final":
             msgs.append({"role": "assistant", "content": payload.get("content", "")})
     return msgs
-
-
-def _limit_turns(messages: list[dict], max_turns: int) -> list[dict]:
-    if max_turns <= 0:
-        return messages
-    user_idx = [i for i, m in enumerate(messages) if m["role"] == "user"]
-    if len(user_idx) <= max_turns:
-        return messages
-    return messages[user_idx[-max_turns] :]
 
 
 def _last_user_index(messages: list[dict]) -> int:
@@ -134,6 +126,8 @@ class ContextAssembler(IContextAssembler):
 
         env = _env_statement(config)
         system_text = "\n\n".join(p for p in (config.system_prompt, config.memory) if p)
+        # rev26：摘要紧随系统段之后、先于文件与历史；history 段只含 `covered_seq` 之后的事件。
+        summary_text = config.summary
 
         # rev20：file_truncate 语义 = **每文件**上限（此前全部文件共享一个总额，
         # 挂多个文件时每个只能分到零头 —— 对超级 Agent 的文件工作流完全不够用）。
@@ -145,11 +139,17 @@ class ContextAssembler(IContextAssembler):
             for name, content in config.files
         ]
         files_block = "\n\n".join(f"[文件：{name}]\n{content}" for name, content in per_file)
-        headroom = token_budget - estimate_tokens(system_text) - estimate_tokens(env)
+        headroom = (
+            token_budget
+            - estimate_tokens(system_text)
+            - estimate_tokens(summary_text)
+            - estimate_tokens(env)
+        )
         if estimate_tokens(files_block) > headroom:
             files_block = _truncate_to_tokens(files_block, max(headroom, 0))
 
-        history = _limit_turns(_history_messages(session_snapshot.events), config.history_turns)
+        # rev24：不做「保留最近 N 轮」的硬截断 —— 本质是对话应用，历史只受 token 预算约束。
+        history = _history_messages(session_snapshot.events)
 
         def hist_tokens() -> int:
             return sum(estimate_tokens(m["content"]) for m in history)
@@ -158,6 +158,7 @@ class ContextAssembler(IContextAssembler):
             """**输入**侧用量（不含 reserve）。"""
             return (
                 estimate_tokens(system_text)
+                + estimate_tokens(summary_text)
                 + estimate_tokens(env)
                 + estimate_tokens(files_block)
                 + hist_tokens()
@@ -174,13 +175,14 @@ class ContextAssembler(IContextAssembler):
                 break
             history.pop(0)
 
-        content = "\n\n".join(p for p in (system_text, files_block, env) if p)
+        content = "\n\n".join(p for p in (system_text, summary_text, files_block, env) if p)
         messages: list[dict] = [{"role": "system", "content": content}]
         messages.extend(history)
 
         usage = ContextUsage(
             segments={
                 "system": estimate_tokens(system_text),
+                "summary": estimate_tokens(summary_text),
                 "env": estimate_tokens(env),
                 "files": estimate_tokens(files_block),
                 "retrieve": 0,

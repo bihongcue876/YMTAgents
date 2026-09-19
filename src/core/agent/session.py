@@ -12,8 +12,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from shared.envelope import SessionMeta
+from shared.envelope import SessionMeta, SessionParams
 from shared.ids import SESS, new_id
+from shared.schema import SessionSummary
 
 from core.bus.sink import EventSink
 from core.store.atomic import atomic_write_json
@@ -36,7 +37,15 @@ def wire_to_line(event) -> tuple[str, str, dict] | None:
     if t == "msg.user":
         return ("user", "msg.user", {"text": d["text"], "attachments": d["attachments"]})
     if t == "msg.assistant.delta":
-        return ("agent", "msg.assistant.delta", {"content": d["content"], "turn_seq": d["turn_seq"]})
+        return (
+            "agent",
+            "msg.assistant.delta",
+            {
+                "content": d["content"],
+                "turn_seq": d["turn_seq"],
+                "reasoning": d.get("reasoning", False),
+            },
+        )
     if t == "msg.assistant.final":
         return (
             "agent",
@@ -47,6 +56,7 @@ def wire_to_line(event) -> tuple[str, str, dict] | None:
                 "usage": d["usage"],
                 "interrupted": d["interrupted"],
                 "truncated": d["truncated"],
+                "reasoning": d.get("reasoning", ""),
             },
         )
     if t == "ctx.usage":
@@ -92,6 +102,43 @@ class ISessionStore(ABC):
     @abstractmethod
     def set_persona(self, session_id: str, persona_id: str | None) -> SessionMeta:
         """会话级角色切换（spec rev23）：写 meta.persona_id 并落 `persona.switch` 事件。"""
+
+    @abstractmethod
+    def update(
+        self,
+        session_id: str,
+        *,
+        title: str,
+        note: str,
+        max_context: int | None,
+        params: SessionParams,
+        summary_threshold: int | None = None,
+    ) -> SessionMeta:
+        """整态更新会话可编辑字段（rev24）：标题/作用/上下文上限/模型参数。"""
+
+    @abstractmethod
+    def read_summary(self, session_id: str) -> SessionSummary | None:
+        """读取摘要**状态**（rev26）；无摘要返回 None（正文另见 `read_summary_text`）。"""
+
+    @abstractmethod
+    def read_summary_text(self, session_id: str) -> str:
+        """读取摘要正文 `summary.md`；不存在返回空串。"""
+
+    @abstractmethod
+    def write_summary(
+        self,
+        session_id: str,
+        *,
+        covered_seq: int,
+        model: str | None,
+        tokens_est: int,
+        text: str,
+    ) -> SessionSummary:
+        """写入/更新摘要（rev26）：正文 + 状态，revision 自增。"""
+
+    @abstractmethod
+    def data_bytes(self, session_id: str) -> int:
+        """会话目录占用字节数（rev24 详情面板）。"""
 
     @abstractmethod
     def delete(self, session_id: str) -> None: ...
@@ -215,8 +262,101 @@ class SessionStore(ISessionStore):
     def get_meta(self, session_id: str) -> SessionMeta:
         return self._read_meta(session_id)
 
-    def get_meta(self, session_id: str) -> SessionMeta:
-        return self._read_meta(session_id)
+    def update(
+        self,
+        session_id: str,
+        *,
+        title: str,
+        note: str,
+        max_context: int | None,
+        params: SessionParams,
+        summary_threshold: int | None = None,
+    ) -> SessionMeta:
+        """整态更新（rev24）：面板提交完整期望状态，未变的字段原样回写。"""
+        meta = self._read_meta(session_id)
+        meta.title = title or meta.title
+        meta.note = note or None
+        meta.max_context = max_context
+        meta.params = params
+        meta.summary_threshold = summary_threshold
+        self._touch(meta)
+        self.append(
+            session_id,
+            "user",
+            "meta.update",
+            {
+                "title": meta.title,
+                "note": meta.note,
+                "max_context": meta.max_context,
+                "params": params.model_dump(mode="json"),
+                "summary_threshold": meta.summary_threshold,
+            },
+        )
+        return meta
+
+    # -- 摘要（rev26）：正文与状态分文件；events.jsonl 只增不改 -------------------
+    def _summary_md_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "summary.md"
+
+    def _summary_json_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "summary.json"
+
+    def read_summary(self, session_id: str) -> SessionSummary | None:
+        import json
+
+        path = self._summary_json_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            return SessionSummary.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            return None
+
+    def read_summary_text(self, session_id: str) -> str:
+        path = self._summary_md_path(session_id)
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def write_summary(
+        self,
+        session_id: str,
+        *,
+        covered_seq: int,
+        model: str | None,
+        tokens_est: int,
+        text: str,
+    ) -> SessionSummary:
+        now = _utcnow()
+        previous = self.read_summary(session_id)
+        summary = SessionSummary(
+            revision=(previous.revision + 1) if previous else 1,
+            covered_seq=covered_seq,
+            model=model,
+            tokens_est=tokens_est,
+            created_at=(previous.created_at if previous else now),
+            updated_at=now,
+        )
+        self._summary_md_path(session_id).write_text(text, encoding="utf-8")
+        atomic_write_json(self._summary_json_path(session_id), summary.model_dump(mode="json"))
+        return summary
+
+    def data_bytes(self, session_id: str) -> int:
+        directory = self.session_dir(session_id)
+        if not directory.exists():
+            return 0
+        total = 0
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                total += path.stat().st_size
+            except OSError:  # 并发删除/权限等：跳过该文件，不影响统计
+                continue
+        return total
 
     def resume(self, session_id: str) -> SessionSnapshot:
         meta = self._read_meta(session_id)
