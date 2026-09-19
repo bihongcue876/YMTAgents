@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -19,6 +20,13 @@ class ModelConfig(BaseModel):
     id: str
     ctx_window: int = 0  # 0 = 未知
     tags: list[str] = Field(default_factory=list)
+    # rev25：思考（reasoning）。`reasoning` 是用户偏好（auto=按检测自动；on/off=人工覆盖，
+    # 用于纠正探测误判）；`reasoning_detected` 是自动探测结果缓存（仅 auto 时生效）。
+    reasoning: Literal["auto", "on", "off"] = "auto"
+    reasoning_detected: Literal["unknown", "yes", "no"] = "unknown"
+    # 该端点是否接受 `reasoning_effort` 参数（探测得知）。False 时即便模型会思考，
+    # 也只能被动接收其回流，不能主动下发参数（否则某些模型会 400，rev25）。
+    reasoning_param_ok: bool = False
 
 
 class ProviderConfig(BaseModel):
@@ -46,12 +54,6 @@ class ModelsConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # settings.json
 # ---------------------------------------------------------------------------
-class ContextSettings(BaseModel):
-    history_turns: int = 20  # 历史保留轮数 N
-    reserve: int = 4096  # 输出预留
-    file_truncate: int = 8192  # 挂载文件截断上限（token 近似）
-
-
 class NetworkSettings(BaseModel):
     whitelist: list[str] = Field(default_factory=list)  # 域名精确或 *.后缀
 
@@ -69,10 +71,44 @@ class UISettings(BaseModel):
 
 class SettingsConfig(BaseModel):
     schema_version: Literal[1] = 1
-    context: ContextSettings = Field(default_factory=ContextSettings)
     network: NetworkSettings = Field(default_factory=NetworkSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     ui: UISettings = Field(default_factory=UISettings)
+
+
+# ---------------------------------------------------------------------------
+# summary.json（rev26：历史摘要化的**出厂默认**，阈值为用户可改的数值）
+# ---------------------------------------------------------------------------
+class SummaryConfig(BaseModel):
+    """压缩（历史摘要化）的全局出厂默认；按会话只覆盖 `threshold`。
+
+    - `threshold`：占用百分比，**由用户指定**；占用达到该值才**允许**自动压缩，
+      低于它绝不压（用户裁决 2026-09-19）。
+    - `auto`：自动压缩开关，默认关（压缩不轻易做）。
+    - `keep_ratio`：尾部保留 = 生效窗口 // keep_ratio（默认 1/8），保证近期对话不进摘要。
+    - `model_slot`：摘要调用所用槽位；None = 用会话当前模型。
+    """
+
+    schema_version: Literal[1] = 1
+    threshold: int = 90
+    auto: bool = False
+    keep_ratio: int = 8
+    model_slot: Literal["main", "thinking", "fast", "embedding"] | None = None
+
+
+# ---------------------------------------------------------------------------
+# sessions/<id>/summary.json（rev26：摘要**状态**；正文在同目录 summary.md）
+# ---------------------------------------------------------------------------
+class SessionSummary(BaseModel):
+    """一次历史摘要化的落盘状态（append-only 事实源 `events.jsonl` 不动）。"""
+
+    schema_version: Literal[1] = 1
+    revision: int = 0
+    covered_seq: int = -1  # 已被摘要覆盖到的最后一个事件 seq；-1 = 尚未压缩
+    model: str | None = None  # 生成该摘要的模型
+    tokens_est: int = 0  # 摘要正文的估算 token（装配时占用的量）
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +168,7 @@ class PluginsConfig(BaseModel):
 CONFIG_FILES = {
     "models": ("models.json", ModelsConfig),
     "settings": ("settings.json", SettingsConfig),
+    "summary": ("summary.json", SummaryConfig),  # rev26：压缩出厂默认
     "modules": ("modules.json", ModulesConfig),
     "plugins": ("plugins.json", PluginsConfig),
 }

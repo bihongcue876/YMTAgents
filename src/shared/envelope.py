@@ -37,12 +37,19 @@ class Usage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # rev25：生成阶段计时（平均 TPS 的唯一数据源，随事件落盘、回放一致）。
+    # elapsed_ms = 请求发出到流结束；first_token_ms = 请求发出到首个 token（含预填充）。
+    elapsed_ms: int = 0
+    first_token_ms: int = 0
 
 
 class ModelSpec(BaseModel):
     id: str
     ctx_window: int = 0  # 0 = 未知
     tags: list[str] = Field(default_factory=list)
+    # rev25：思考能力 —— 用户偏好 + 自动探测结果（见 shared.schema.ModelConfig）。
+    reasoning: Literal["auto", "on", "off"] = "auto"
+    reasoning_detected: Literal["unknown", "yes", "no"] = "unknown"
 
 
 class ProviderSpec(BaseModel):
@@ -56,6 +63,19 @@ class ProviderSpec(BaseModel):
     local: bool = False  # 本地模型服务：免密钥（spec rev10 §1）
 
 
+class SessionParams(BaseModel):
+    """会话级模型参数（rev24）。字段为 `None` = 不下发、沿用供应商默认。
+
+    界面上每个参数配一个启用开关：关 = None，开 = 有值。只发送用户显式启用的参数，
+    避免把应用默认值悄悄覆盖到供应商侧（不同供应商默认不同）。
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens: int | None = None
+
+
 class SessionMeta(BaseModel):
     id: str
     title: str
@@ -65,6 +85,12 @@ class SessionMeta(BaseModel):
     updated_at: datetime
     state: Literal["active", "archived"] = "active"
     main_model: str | None = None
+    # rev24：会话级上下文与模型参数（随会话走，不落全局配置）
+    max_context: int | None = None  # 输入侧上下文上限（token）；None = 用模型窗口
+    note: str | None = None  # 作用/备注，纯展示
+    params: SessionParams = Field(default_factory=SessionParams)
+    # rev26：本会话的压缩阈值（占用百分比，用户指定）；None = 用 config/summary.json 默认
+    summary_threshold: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +158,40 @@ class DeleteSession(Envelope):
     session_id: str
 
 
+class SessionDetail(Envelope):
+    """请求某会话的详情（rev24）：计数、体积、最近一次上下文用量。"""
+
+    type: Literal["session.detail"] = "session.detail"
+    session_id: str
+
+
+class SessionUpdate(Envelope):
+    """整态更新会话可编辑字段（rev24）：面板提交的是**完整**期望状态。
+
+    `title` 必填非空；`max_context=None` 表示「自动 = 用模型窗口」。
+    """
+
+    type: Literal["session.update"] = "session.update"
+    session_id: str
+    title: str
+    note: str = ""
+    max_context: int | None = None
+    params: SessionParams = Field(default_factory=SessionParams)
+    summary_threshold: int | None = None  # rev26：None = 用全局默认
+
+
+class SummarizeSession(Envelope):
+    """压缩当前会话的较早历史（rev26）。
+
+    只概括「较早、且未被上次摘要覆盖」的部分；近段按 token 预算保留（`keep_ratio`）。
+    这是一次独立的模型调用，调用前会预告成本。
+    """
+
+    type: Literal["session.summarize"] = "session.summarize"
+    session_id: str
+    force: bool = False  # 预留：True 时忽略阈值（当前按钮触发即视为显式）
+
+
 class ProviderUpsert(Envelope):
     type: Literal["provider.upsert"] = "provider.upsert"
     provider: ProviderSpec
@@ -164,7 +224,7 @@ class FetchModels(Envelope):
 
 class SettingsUpdate(Envelope):
     type: Literal["settings.update"] = "settings.update"
-    section: Literal["context", "network", "logging", "ui"] = "context"
+    section: Literal["network", "logging", "ui"] = "ui"
     data: dict = Field(default_factory=dict)
 
 
@@ -175,6 +235,7 @@ class AssistantDelta(Envelope):
     type: Literal["msg.assistant.delta"] = "msg.assistant.delta"
     content: str
     turn_seq: int = 0
+    reasoning: bool = False  # rev25：本段增量属于思考过程（非正文）
 
 
 class AssistantFinal(Envelope):
@@ -184,19 +245,23 @@ class AssistantFinal(Envelope):
     usage: Usage = Field(default_factory=Usage)
     interrupted: bool = False
     truncated: bool = False
+    reasoning: str = ""  # rev25：完整思考过程（回放重建折叠块，不依赖 delta 事件）
 
 
 class TurnStatus(Envelope):
     type: Literal["turn.status"] = "turn.status"
     turn_seq: int = 0
-    state: Literal["assembling", "calling", "done", "failed", "interrupted"] = "assembling"
+    state: Literal[
+        "assembling", "probing", "summarizing", "calling", "done", "failed", "interrupted"
+    ] = "assembling"
     error: str | None = None
+    note: str | None = None  # rev25：瞬态用户提示（如探测思考能力的成本预告）
 
 
 class ContextUsage(Envelope):
     type: Literal["ctx.usage"] = "ctx.usage"
     segments: dict[
-        Literal["system", "env", "files", "retrieve", "history", "reserve"], int
+        Literal["system", "summary", "env", "files", "retrieve", "history", "reserve"], int
     ] = Field(default_factory=dict)
     total: int = 0
     window: int = 0
@@ -219,6 +284,41 @@ class SessionEvents(Envelope):
     type: Literal["session.events"] = "session.events"
     session_id: str
     events: list[dict] = Field(default_factory=list)
+
+
+class SessionDetailResult(Envelope):
+    """`session.detail` 的结果（rev24），也是面板刷新后的回推。"""
+
+    type: Literal["session.detail.result"] = "session.detail.result"
+    session_id: str
+    meta: SessionMeta
+    turn_count: int = 0
+    user_count: int = 0
+    assistant_count: int = 0
+    data_bytes: int = 0
+    effective_window: int = 0  # 实际生效窗口（会话 max_context 优先，否则模型窗口）
+    last_usage: ContextUsage | None = None
+    cumulative_tokens: int = 0  # 本会话各次调用 total 之和（用户裁决：区分单次 / 累计）
+    # rev26：历史摘要化状态（无摘要时 summary_revision=0、summary_covered_seq=-1）
+    summary_revision: int = 0
+    summary_covered_seq: int = -1
+    summary_tokens: int = 0
+    summary_threshold: int = 0  # 本会话实际生效阈值（会话覆盖优先，否则全局默认）
+
+
+class SessionSummaryResult(Envelope):
+    """`session.summarize` 的结果（rev26）。失败时 ok=False 且 error 为可读文案。"""
+
+    type: Literal["session.summary.result"] = "session.summary.result"
+    session_id: str
+    ok: bool = True
+    revision: int = 0
+    covered_seq: int = -1
+    tokens_before: int = 0  # 被覆盖历史部分的估算 token
+    tokens_after: int = 0  # 摘要正文的估算 token（替代被覆盖部分）
+    summary_tokens: int = 0  # 摘要正文估算 token
+    model: str | None = None
+    error: str | None = None
 
 
 class ProviderList(Envelope):
@@ -328,6 +428,9 @@ Request = Annotated[
         UnarchiveSession,
         RenameSession,
         DeleteSession,
+        SessionDetail,
+        SessionUpdate,
+        SummarizeSession,
         ProviderUpsert,
         ProviderDelete,
         TestConnection,
@@ -351,6 +454,8 @@ Event = Annotated[
         SessionCreated,
         SessionIndex,
         SessionEvents,
+        SessionDetailResult,
+        SessionSummaryResult,
         ProviderList,
         TestResult,
         ProviderModels,
