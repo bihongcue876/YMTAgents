@@ -633,3 +633,46 @@ def test_session_panel_summary_controls(qapp):
 
     panel.set_summary_error("上游拒绝")
     assert "压缩未完成" in panel._summary_state.text()
+
+
+def test_session_panel_question_list_features(qapp):
+    """问题列表（rev30）：轮次编号、当前高亮、完整内容、搜索过滤与折叠。"""
+    from datetime import datetime, timezone
+
+    from PySide6.QtCore import Qt
+
+    from gui.chat.session_panel import SessionPanel
+    from shared.envelope import SessionDetailResult, SessionMeta
+
+    panel = SessionPanel()
+    panel.show()
+    now = datetime.now(timezone.utc)
+    meta = SessionMeta(id="s", title="T", created_at=now, updated_at=now)
+    long_question = "这是一个很长的提问" * 20
+    questions = ["第一个问题", long_question, "关于上下文的提问"]
+    panel.set_detail(
+        SessionDetailResult(session_id="s", meta=meta, summary_threshold=90),
+        questions,
+    )
+
+    assert panel._questions.count() == 3
+    assert panel._questions.item(0).text().startswith("第 1 轮　第一个问题")
+    assert long_question in panel._questions.item(1).text()  # 完整内容：不截断
+    assert not panel._questions.item(0).font().bold()
+    assert panel._questions.item(2).font().bold()  # 末条 = 当前所在位置
+    assert "当前所在位置" in panel._questions.item(2).toolTip()
+    assert "共 3 条" in panel._question_count.text()
+
+    selected: list[int] = []
+    panel.question_selected.connect(selected.append)
+    panel._question_search.setText("上下文")  # 过滤后仍按原始序号跳转
+    assert panel._questions.count() == 1
+    assert "筛出 1 条" in panel._question_count.text()
+    item = panel._questions.item(0)
+    assert item.data(Qt.UserRole) == 2
+    panel._questions.itemClicked.emit(item)
+    assert selected == [2]
+
+    panel._question_toggle.setChecked(False)  # 折叠
+    assert not panel._question_body.isVisible()
+    assert panel._question_toggle.text() == "展开"
