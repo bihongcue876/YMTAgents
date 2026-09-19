@@ -1001,4 +1001,36 @@ token（单次 **50–100 token** 内）、**不每次都测**；**允许人工�
 与问题列表右键菜单（退回到此前 / 从此处分支）。
 
 
+## 33. rev31 轮次记录 — 切片 2：对话分支树与回退（2026-09-19）
+
+### 33.1 交付
+
+| # | 交付 | 位置 |
+|---|---|---|
+| 1 | 落盘模型 `SessionGraph` / `BranchRecord`（branch 只引用 seq + 游标） | `shared/schema.py` |
+| 2 | 请求 `session.branch` / `session.revert` / `session.switch_branch`；事件 `session.branches`；详情增分支字段 | `shared/envelope.py` |
+| 3 | `graph.json` 读写、老会话惰性合成 br0、`replay` 按活动分支过滤、append 推进游标 | `core/agent/session.py` |
+| 4 | 分支上限 `MAX_BRANCHES=5`；未知分支/越界 seq 归 `invalid_request` | `core/agent/session.py` / `app/controller.py` |
+| 5 | 摘要改为**按分支**存放，分叉时快照父摘要（仅当 `covered_seq <= fork_seq`） | `core/agent/session.py` |
+| 6 | 分派三请求 + `_emit_branches` / `_refresh_branch_view` | `app/controller.py` |
+| 7 | 右栏「分支」段（切换、当前标记、`共 n/5`）；问题列表右键「退回到此前 / 从此处分支」 | `gui/chat/session_panel.py` |
+| 8 | 提问序号 → 事件 seq 翻译（`_user_seq`）；分支摘要定位 | `gui/main_window.py` |
+
+### 33.2 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **218 passed, 2 skipped，退出码 0**（213+2 → 218+2，净增 5，只增不减） |
+| 新增用例 | 分公司有/回退游标/切回主干不污染、分支上限与未知分支、按分支摘要隔离与分叉快照、分派集成、面板分支段与信号 |
+| 门禁 | 依赖方向 / 契约 / 主题与字号纪律 全部通过 |
+| 备注 | 首次全量曾遇 `test_persona_end_to_end` 的 Windows 文件锁瞬时 `PermissionError`（隔离与重跑均过），非逻辑缺陷 |
+
+### 33.3 与既有决策的关系
+
+- `events.jsonl` 仍 append-only 单写者；分支只增引用，不复制、不删除事件（用户对 fork 耗时的顾虑由此化解）。
+- rev26 摘要文件升级为按分支路径；br0 保留旧布局读取回退，不迁移、不改写历史。
+- 装配无感：`resume` 已返回活动分支转录，`AgentLoop` 不需树感知。
+- 未做：`SummaryConfig.auto` 自动触发仍待裁决（同 rev27 挂起项）。
+
+
 
