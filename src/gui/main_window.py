@@ -23,6 +23,10 @@ from shared.envelope import (
     FetchModels,
     NewSession,
     PersonaDelete,
+    PersonaExport,
+    PersonaExported,
+    PersonaImported,
+    PersonaImport,
     PersonaSave,
     PersonaSetDefault,
     PersonaSwitch,
@@ -213,6 +217,10 @@ class MainWindow(QMainWindow):
         p.set_default_requested.connect(
             lambda pid: self.bus.submit(PersonaSetDefault(persona_id=pid))
         )
+        p.export_requested.connect(
+            lambda pid, path: self.bus.submit(PersonaExport(persona_id=pid, path=path))
+        )
+        p.import_requested.connect(lambda path: self.bus.submit(PersonaImport(path=path)))
 
         self.settings.settings_update.connect(
             lambda section, data: self.bus.submit(SettingsUpdate(section=section, data=data))
@@ -414,6 +422,16 @@ class MainWindow(QMainWindow):
             )
             self.personas_page.update_personas(event)
             self._sync_persona_dropdown()
+        elif t == "persona.export.result":
+            if event.ok:
+                QMessageBox.information(self, "导出完成", f"角色「{event.name}」已导出：\n{event.path}")
+            else:
+                QMessageBox.warning(self, "导出失败", event.error or "导出失败。")
+        elif t == "persona.import.result":
+            if event.ok:
+                QMessageBox.information(self, "导入完成", f"已导入角色「{event.name}」。")
+            else:
+                QMessageBox.warning(self, "导入失败", event.error or "导入失败。")
         elif t == "session.summary.result":
             # 成功由随后的 session.detail.result 刷新状态；失败在此提示且不改动原状
             if not event.ok and event.error:

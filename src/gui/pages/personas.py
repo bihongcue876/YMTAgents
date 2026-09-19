@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -71,6 +74,8 @@ class PersonasPage(QWidget):
     save_requested = Signal(object, str, str)  # persona_id | None, name, prompt
     delete_requested = Signal(str)
     set_default_requested = Signal(str)
+    export_requested = Signal(str, str)  # persona_id, path（写盘在 core）
+    import_requested = Signal(str)  # path（写盘在 core）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -78,12 +83,19 @@ class PersonasPage(QWidget):
         self._title.setObjectName("pageTitle")
         add = QPushButton("新建角色")
         add.clicked.connect(self._on_add)
+        imp = QPushButton("导入角色")
+        imp.clicked.connect(self._on_import)
         self._list = QVBoxLayout()
         self._list.setAlignment(Qt.AlignTop)
 
+        actions = QHBoxLayout()
+        actions.addWidget(add)
+        actions.addWidget(imp)
+        actions.addStretch(1)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self._title)
-        layout.addWidget(add)
+        layout.addLayout(actions)
         layout.addLayout(self._list)
         layout.addStretch(1)
         self._personas: list = []
@@ -128,6 +140,9 @@ class PersonasPage(QWidget):
         edit = QPushButton("编辑")
         edit.clicked.connect(lambda _=False, pid=p.id: self._on_edit(pid))
         actions.addWidget(edit)
+        export = QPushButton("导出")
+        export.clicked.connect(lambda _=False, pid=p.id, nm=p.name: self._on_export(pid, nm))
+        actions.addWidget(export)
         delete = QPushButton("删除")
         delete.setEnabled(not p.builtin)
         delete.clicked.connect(lambda _=False, pid=p.id: self.delete_requested.emit(pid))
@@ -151,6 +166,21 @@ class PersonasPage(QWidget):
             name, prompt = dialog.values()
             if name:
                 self.save_requested.emit(None, name, prompt)
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入角色", "", "角色文件 (*.json);;所有文件 (*)"
+        )
+        if path:
+            self.import_requested.emit(path)
+
+    def _on_export(self, persona_id: str, name: str) -> None:
+        safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip() or "persona"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出角色", f"{safe}.ymtpersona.json", "角色文件 (*.json);;所有文件 (*)"
+        )
+        if path:
+            self.export_requested.emit(persona_id, path)
 
     def _on_edit(self, persona_id: str) -> None:
         info = next((p for p in self._personas if p.id == persona_id), None)
