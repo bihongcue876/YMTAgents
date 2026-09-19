@@ -64,24 +64,24 @@ def test_messages_to_html():
 
 
 def test_assistant_reasoning_renders_collapsible_block():
-    """rev25：思考用原生 <details>（CSP 禁脚本）；流式展开、完成后自动折叠。"""
+    """rev25：思考用原生 <details>（CSP 禁脚本）。rev27：**默认折叠**，流式期间也不展开。"""
     from gui.widgets.render.md import messages_inner
 
     streaming = messages_inner(
-        [{"role": "assistant", "content": "答", "reasoning": "<想> & 想", "streaming": True}],
+        [{"role": "assistant", "content": "答", "reasoning": "<想> & 想"}],
         "light",
         "normal",
     )
-    assert 'class="think" open' in streaming
+    assert '<details class="think">' in streaming  # 无 open → 默认折叠
     assert "思考过程" in streaming
     assert "&lt;想&gt; &amp; 想" in streaming  # 思考按纯文本转义，不解析 markdown
 
     done = messages_inner(
-        [{"role": "assistant", "content": "答", "reasoning": "想完了", "streaming": False}],
+        [{"role": "assistant", "content": "答", "reasoning": "想完了"}],
         "light",
         "normal",
     )
-    assert '<details class="think">' in done  # 无 open → 自动折叠
+    assert '<details class="think">' in done
 
 
 def test_stream_fragment_and_stub_structure():
