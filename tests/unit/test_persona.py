@@ -64,3 +64,79 @@ def test_preset_survives_reopen(tmp_path):
     s2 = PersonaStore(root)
     assert {p.id for p in s2.list()} >= {YMT_PERSONA_ID, s2.list()[-1].id}
     assert s2.get(YMT_PERSONA_ID).prompt == YMT_PROMPT
+
+
+def test_export_import_roundtrip(tmp_path):
+    """导出为单文件（含 kind，无密钥），导入到另一库新建角色且不改动既有。"""
+    src = PersonaStore(tmp_path / "a")
+    pid = src.save(None, "评审员", "你是严格的评审员。")
+    target = tmp_path / "评审员.ymtpersona.json"
+
+    assert src.export_persona(pid, target) == "评审员"
+    import json
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["kind"] == "ymt.persona"
+    assert payload["prompt"] == "你是严格的评审员。"
+    assert "key" not in json.dumps(payload)  # 绝不含密钥
+
+    dst = PersonaStore(tmp_path / "b")
+    new_id, new_name = dst.import_persona(target)
+    assert new_id != pid
+    assert new_name == "评审员"
+    info = dst.get(new_id)
+    assert info is not None and info.prompt == "你是严格的评审员。"
+    assert dst.current_default() == YMT_PERSONA_ID  # 导入不改变全局默认
+    assert all(p.name != "评审员" for p in src.list() if p.id != pid)
+
+
+def test_import_name_collision_adds_suffix(tmp_path):
+    dst = PersonaStore(tmp_path / "b")
+    f = tmp_path / "p.json"
+    f.write_text(
+        '{"schema_version": 1, "kind": "ymt.persona", "name": "同名", "prompt": "x"}',
+        encoding="utf-8",
+    )
+    _, first = dst.import_persona(f)
+    _, second = dst.import_persona(f)
+    assert first == "同名"
+    assert second == "同名（导入）"
+
+
+def test_import_rejects_bad_files_without_writing(tmp_path):
+    store = PersonaStore(tmp_path / "p")
+    before = len(store.list())
+
+    with pytest.raises(ValueError) as e1:
+        store.import_persona(tmp_path / "missing.json")
+    assert str(e1.value) == "unreadable"
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError) as e2:
+        store.import_persona(bad)
+    assert str(e2.value) == "invalid_persona_file"
+
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text('{"kind": "other", "name": "x", "prompt": "y"}', encoding="utf-8")
+    with pytest.raises(ValueError) as e3:
+        store.import_persona(wrong)
+    assert str(e3.value) == "invalid_persona_file"
+
+    big = tmp_path / "big.json"
+    big.write_text(
+        '{"schema_version": 1, "kind": "ymt.persona", "name": "b", "prompt": "'
+        + "x" * (3 * 1024 * 1024)
+        + '"}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as e4:
+        store.import_persona(big)
+    assert str(e4.value) == "file_too_large"
+
+    assert len(store.list()) == before  # 失败一律不落盘
+
+
+def test_export_missing_persona_raises_keyerror(store, tmp_path):
+    with pytest.raises(KeyError):
+        store.export_persona("prs_不存在", tmp_path / "x.json")

@@ -13,6 +13,8 @@ from shared.envelope import (
     ModelSpec,
     NewSession,
     PersonaDelete,
+    PersonaExport,
+    PersonaImport,
     PersonaSave,
     PersonaSwitch,
     ProviderSpec,
@@ -224,6 +226,39 @@ def test_persona_delete_builtin_rejected(tmp_path, monkeypatch, qapp):
         errors = [e for e in events if e.type == "error"]
         assert errors and errors[0].code == "invalid_request"
         assert ctx.controller.personas.get(YMT_PERSONA_ID) is not None
+    finally:
+        ctx.worker.stop()
+
+
+def test_persona_export_import_dispatch(tmp_path, monkeypatch, qapp):
+    """导出→导入走 controller 分派：导出落文件、导入新建并回报可读结果。"""
+    gateway = MockGateway()
+    ctx = _boot(tmp_path, monkeypatch, gateway)
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    target = tmp_path / "导出的角色.json"
+    try:
+        ctx.controller.handle(PersonaSave(name="评审员", prompt="你是严格的评审员。"))
+        pid = next(p.id for p in ctx.controller.personas.list() if p.name == "评审员")
+
+        ctx.controller.handle(PersonaExport(persona_id=pid, path=str(target)))
+        exported = [e for e in events if e.type == "persona.export.result"][-1]
+        assert exported.ok and exported.name == "评审员"
+        assert target.exists()
+
+        before = len(ctx.controller.personas.list())
+        ctx.controller.handle(PersonaImport(path=str(target)))
+        imported = [e for e in events if e.type == "persona.import.result"][-1]
+        assert imported.ok and imported.name == "评审员（导入）"
+        assert len(ctx.controller.personas.list()) == before + 1
+
+        # 坏文件：可读失败、不落盘、不改库
+        bad = tmp_path / "bad.json"
+        bad.write_text("{oops", encoding="utf-8")
+        ctx.controller.handle(PersonaImport(path=str(bad)))
+        failed = [e for e in events if e.type == "persona.import.result"][-1]
+        assert failed.ok is False and failed.error
+        assert len(ctx.controller.personas.list()) == before + 1
     finally:
         ctx.worker.stop()
 
