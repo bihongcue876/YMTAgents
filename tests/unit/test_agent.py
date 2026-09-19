@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from shared.envelope import AssistantFinal, ModelSpec, ProviderSpec, SendMessage, Usage
 from core.agent.context import (
     DEFAULT_SYSTEM_PROMPT,
@@ -681,6 +683,91 @@ def test_summarize_failure_message_is_redacted(tmp_path):
     assert results and not results[-1].ok
     assert "sk-deadbeefcafe1234" not in (results[-1].error or "")
     assert MASK in (results[-1].error or "")
+
+
+def test_branch_revert_and_switch(tmp_path):
+    """rev31：分支只引用 seq（不复制事件），回退只移游标，主干不被其它分支污染。"""
+    store = make_store(tmp_path)
+    sid = store.create("分支", None).id
+    for i in range(3):
+        store.append_event(sid, SendMessage(text=f"q{i}"))
+        store.append_event(sid, AssistantFinal(content=f"a{i}"))
+    users = [e for e in store.replay(sid) if e.get("type") == "msg.user"]
+    q1 = users[1]["seq"]
+
+    graph = store.create_branch(sid, q1)
+    assert [b.id for b in graph.branches] == ["br0", "br1"]
+    assert graph.active == "br1"
+    assert [
+        e["payload"]["text"] for e in store.replay(sid) if e.get("type") == "msg.user"
+    ] == ["q0", "q1"]
+
+    store.append_event(sid, SendMessage(text="q-new"))
+    store.append_event(sid, AssistantFinal(content="a-new"))
+    assert [
+        e["payload"]["text"] for e in store.replay(sid) if e.get("type") == "msg.user"
+    ] == ["q0", "q1", "q-new"]
+
+    # 切回主干：其它分支追加的事件不污染主干
+    store.switch_branch(sid, "br0")
+    assert [
+        e["payload"]["text"] for e in store.replay(sid) if e.get("type") == "msg.user"
+    ] == ["q0", "q1", "q2"]
+
+    # 回退：游标移到该轮之前，尾部 seq 保留（len > cursor）
+    store.revert_to(sid, q1)
+    assert [
+        e["payload"]["text"] for e in store.replay(sid) if e.get("type") == "msg.user"
+    ] == ["q0"]
+    assert store.turn_count(sid) == 1
+    br0 = store.list_branches(sid).branches[0]
+    assert br0.cursor == 4 and len(br0.events) > 4
+
+    # 切回 br1 仍完整
+    store.switch_branch(sid, "br1")
+    assert [
+        e["payload"]["text"] for e in store.replay(sid) if e.get("type") == "msg.user"
+    ] == ["q0", "q1", "q-new"]
+
+    infos = {b.id: b for b in store.branch_info(sid)}
+    assert infos["br1"].active and infos["br1"].turns == 3
+    assert infos["br0"].parent is None and infos["br1"].parent == "br0"
+
+
+def test_branch_limit_and_unknown(tmp_path):
+    """rev31：分支上限 5；未知分支/未知 seq 一律 KeyError。"""
+    store = make_store(tmp_path)
+    sid = store.create("上限", None).id
+    store.append_event(sid, SendMessage(text="q0"))
+    base = [e for e in store.replay(sid) if e.get("type") == "msg.user"][0]["seq"]
+    for _ in range(4):  # br1..br4
+        store.create_branch(sid, base)
+    assert len(store.list_branches(sid).branches) == 5
+    with pytest.raises(ValueError):
+        store.create_branch(sid, base)
+    with pytest.raises(KeyError):
+        store.switch_branch(sid, "brX")
+    with pytest.raises(KeyError):
+        store.revert_to(sid, 999_999)
+
+
+def test_per_branch_summary_isolated_and_copied(tmp_path):
+    """rev31：摘要按分支隔离；分叉时父摘要快照给子分支，互不覆盖。"""
+    store = make_store(tmp_path)
+    sid = store.create("摘要", None).id
+    store.append_event(sid, SendMessage(text="q0"))
+    q0 = [e for e in store.replay(sid) if e.get("type") == "msg.user"][0]["seq"]
+    store.write_summary(sid, covered_seq=q0, model="m", tokens_est=5, text="## 目标\nA")
+    assert store.read_summary_text(sid).startswith("## 目标")
+
+    store.append_event(sid, SendMessage(text="q1"))
+    q1 = [e for e in store.replay(sid) if e.get("type") == "msg.user"][1]["seq"]
+    store.create_branch(sid, q1)  # 父摘要 covered_seq=q0 <= q1 → 继承
+    assert store.read_summary_text(sid).startswith("## 目标")
+
+    store.write_summary(sid, covered_seq=q1, model="m", tokens_est=6, text="## 目标\nB")
+    store.switch_branch(sid, "br0")
+    assert store.read_summary_text(sid).startswith("## 目标\nA")
 
 
 def test_effective_threshold_user_value_clamped():

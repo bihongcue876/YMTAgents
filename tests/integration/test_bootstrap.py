@@ -8,6 +8,7 @@ from app import bootstrap as bootstrap_mod
 from app import paths
 from shared.envelope import (
     AssistantFinal,
+    BranchSession,
     FetchModels,
     ModelSpec,
     NewSession,
@@ -17,10 +18,12 @@ from shared.envelope import (
     ProviderSpec,
     ProviderUpsert,
     ResumeSession,
+    RevertSession,
     SendMessage,
     SetSlot,
     SettingsUpdate,
     SummarizeSession,
+    SwitchBranch,
     SwitchModel,
     TestConnection,
 )
@@ -493,5 +496,45 @@ def test_summarize_dispatch_writes_summary_and_refreshes_detail(tmp_path, monkey
         assert detail.summary_revision == 1
         assert detail.summary_covered_seq >= 0
         assert detail.summary_threshold == 90  # 未覆盖 → 全局默认
+    finally:
+        ctx.worker.stop()
+
+
+def test_branch_revert_switch_dispatch(tmp_path, monkeypatch, qapp):
+    """rev31：session.branch / switch_branch / revert 分派 → 回推分支树与活动转录。"""
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(NewSession(title="分支"))
+        sid = ctx.controller.current_session_id
+        for i in range(3):
+            ctx.session_store.append_event(sid, SendMessage(text=f"问题{i}"))
+            ctx.session_store.append_event(sid, AssistantFinal(content=f"答{i}"))
+        ctx.controller.handle(ResumeSession(session_id=sid))
+        events.clear()
+        users = [e for e in ctx.session_store.replay(sid) if e.get("type") == "msg.user"]
+        q1 = users[1]["seq"]
+
+        ctx.controller.handle(BranchSession(session_id=sid, from_seq=q1))
+        branches = [e for e in events if e.type == "session.branches"]
+        assert branches and branches[-1].active == "br1"
+        assert [b.id for b in branches[-1].branches] == ["br0", "br1"]
+        assert any(e.type == "session.events" for e in events)
+
+        events.clear()
+        ctx.controller.handle(SwitchBranch(session_id=sid, branch_id="br0"))
+        assert [e for e in events if e.type == "session.branches"][-1].active == "br0"
+
+        events.clear()
+        ctx.controller.handle(RevertSession(session_id=sid, to_seq=q1))
+        assert ctx.session_store.turn_count(sid) == 1  # 回退到第 2 问之前
+        detail = [e for e in events if e.type == "session.detail.result"]
+        assert detail and detail[-1].branch_count == 2
+        assert detail[-1].active_branch == "br0"
+
+        events.clear()
+        ctx.controller.handle(SwitchBranch(session_id=sid, branch_id="brX"))
+        assert any(e.type == "error" for e in events)  # 未知分支 → 无效请求
     finally:
         ctx.worker.stop()

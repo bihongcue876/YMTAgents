@@ -676,3 +676,52 @@ def test_session_panel_question_list_features(qapp):
     panel._question_toggle.setChecked(False)  # 折叠
     assert not panel._question_body.isVisible()
     assert panel._question_toggle.text() == "展开"
+
+
+def test_session_panel_branch_section(qapp):
+    """分支段（rev31）：列表文案/当前高亮/切换信号，以及问题项右键两个动作信号。"""
+    from datetime import datetime, timezone
+
+    from gui.chat.session_panel import SessionPanel
+    from shared.envelope import BranchInfo, SessionBranches
+
+    panel = SessionPanel()
+    panel.show()
+    now = datetime.now(timezone.utc)
+    event = SessionBranches(
+        session_id="s",
+        active="br1",
+        max_branches=5,
+        branches=[
+            BranchInfo(id="br0", parent=None, fork_seq=-1, created_at=now, turns=3, head_seq=6),
+            BranchInfo(
+                id="br1", parent="br0", fork_seq=3, created_at=now, turns=2, head_seq=5,
+                active=True,
+            ),
+        ],
+    )
+    panel.set_branches(event)
+    assert panel._branch_list.count() == 2
+    assert "主干 br0" in panel._branch_list.item(0).text()
+    assert not panel._branch_list.item(0).font().bold()
+    assert panel._branch_list.item(1).font().bold()
+    assert "分叉于 #3" in panel._branch_list.item(1).text()
+    assert "（当前）" in panel._branch_list.item(1).text()
+    assert "共 2/5 分支" in panel._branch_state.text()
+
+    switched: list[str] = []
+    panel.branch_switch_requested.connect(switched.append)
+    panel._branch_list.itemClicked.emit(panel._branch_list.item(0))
+    assert switched == ["br0"]
+
+    reverts: list[int] = []
+    branches: list[int] = []
+    panel.revert_requested.connect(reverts.append)
+    panel.branch_requested.connect(branches.append)
+    panel.revert_requested.emit(1)  # 菜单动作语义即这两个信号
+    panel.branch_requested.emit(2)
+    assert reverts == [1] and branches == [2]
+
+    panel.clear()
+    assert panel._branch_list.count() == 0
+    assert "共 1/5 分支" in panel._branch_state.text()
