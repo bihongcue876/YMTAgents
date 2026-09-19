@@ -192,6 +192,33 @@ class SummarizeSession(Envelope):
     force: bool = False  # 预留：True 时忽略阈值（当前按钮触发即视为显式）
 
 
+class BranchSession(Envelope):
+    """从某条消息处**分支**（rev31）：新分支引用到 `from_seq`（含）为止的前缀。"""
+
+    type: Literal["session.branch"] = "session.branch"
+    session_id: str
+    from_seq: int
+
+
+class RevertSession(Envelope):
+    """**退回到此前**（rev31）：把活动分支游标移到 `to_seq` 所在一轮之前。
+
+    尾部事件 seq 保留在分支中（可切回，或再「从此处分支」）；events.jsonl 只增不改。
+    """
+
+    type: Literal["session.revert"] = "session.revert"
+    session_id: str
+    to_seq: int
+
+
+class SwitchBranch(Envelope):
+    """切换活动分支（rev31）：`session.events` 与后续装配均以活动分支的游标为准。"""
+
+    type: Literal["session.switch_branch"] = "session.switch_branch"
+    session_id: str
+    branch_id: str
+
+
 class ProviderUpsert(Envelope):
     type: Literal["provider.upsert"] = "provider.upsert"
     provider: ProviderSpec
@@ -304,6 +331,10 @@ class SessionDetailResult(Envelope):
     summary_covered_seq: int = -1
     summary_tokens: int = 0
     summary_threshold: int = 0  # 本会话实际生效阈值（会话覆盖优先，否则全局默认）
+    # rev31：分支树状态（活动分支作用域）。
+    branch_count: int = 0
+    active_branch: str = ""
+    max_branches: int = 5
 
 
 class SessionSummaryResult(Envelope):
@@ -319,6 +350,28 @@ class SessionSummaryResult(Envelope):
     summary_tokens: int = 0  # 摘要正文估算 token
     model: str | None = None
     error: str | None = None
+
+
+class BranchInfo(BaseModel):
+    """分支概览（rev31）：供右栏「分支」段展示与切换。"""
+
+    id: str
+    parent: str | None = None
+    fork_seq: int = -1
+    created_at: datetime | None = None
+    turns: int = 0  # 活动前缀内的用户轮数
+    head_seq: int = -1  # 活动前缀最后一个事件 seq；-1 = 空
+    active: bool = False
+
+
+class SessionBranches(Envelope):
+    """分支树回推（rev31）：`session.branch` / `revert` / `switch_branch` 后刷新。"""
+
+    type: Literal["session.branches"] = "session.branches"
+    session_id: str
+    branches: list[BranchInfo] = Field(default_factory=list)
+    active: str = "br0"
+    max_branches: int = 5
 
 
 class ProviderList(Envelope):
@@ -431,6 +484,9 @@ Request = Annotated[
         SessionDetail,
         SessionUpdate,
         SummarizeSession,
+        BranchSession,
+        RevertSession,
+        SwitchBranch,
         ProviderUpsert,
         ProviderDelete,
         TestConnection,
@@ -456,6 +512,7 @@ Event = Annotated[
         SessionEvents,
         SessionDetailResult,
         SessionSummaryResult,
+        SessionBranches,
         ProviderList,
         TestResult,
         ProviderModels,

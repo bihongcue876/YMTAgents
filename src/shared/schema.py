@@ -112,6 +112,33 @@ class SessionSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# sessions/<id>/graph.json（rev31：分支树；引用 events.jsonl 的 seq，绝不复制事件）
+# ---------------------------------------------------------------------------
+class BranchRecord(BaseModel):
+    """一条分支：只记自己引用的事件 seq 与游标；事件本体始终在 events.jsonl，只增不改。
+
+    - `events`：本分支按序引用的事件 seq（可含被回退的尾部，以便切换回来时仍在）。
+    - `cursor`：活动前缀长度（`events[:cursor]` 才是当前对话）；回退只改游标，不删 seq。
+    - `fork_seq`：分支起点 seq（br0 为 -1）；`parent`：父分支 id（br0 为 None）。
+    """
+
+    id: str
+    parent: str | None = None
+    fork_seq: int = -1
+    created_at: datetime | None = None
+    events: list[int] = Field(default_factory=list)
+    cursor: int = 0
+
+
+class SessionGraph(BaseModel):
+    """会话的分支树（rev31）。br0 为主干；`active` 指向当前分支。"""
+
+    schema_version: Literal[1] = 1
+    active: str = "br0"
+    branches: list[BranchRecord] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # modules.json（期望态；运行态不入盘，docs 03 §3.3）
 # ---------------------------------------------------------------------------
 class DpimConfig(BaseModel):
