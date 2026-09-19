@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
 
 from gui.chat.empty_state import EmptyState
 from gui.chat.header import ChatHeader
@@ -19,6 +19,7 @@ class ChatView(QWidget):
     rename_session = Signal(str)
     new_session = Signal()
     add_model = Signal()  # 空状态 CTA：跳模型配置页（rev9 §6）
+    toggle_detail = Signal()  # rev24：会话详情右栏
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -26,6 +27,12 @@ class ChatView(QWidget):
         self.messages = MessageList()
         self.empty = EmptyState()
         self.input = InputBar()
+
+        # rev25：瞬态提示条（如「正在探测思考能力」）——不进入消息流、不落盘
+        self._notice = QLabel()
+        self._notice.setObjectName("mutedNote")
+        self._notice.setWordWrap(True)
+        self._notice.setVisible(False)
 
         # 空状态与消息流互斥显示（rev2 §1.3）
         self._stack = QStackedWidget()
@@ -35,12 +42,14 @@ class ChatView(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.header)
         layout.addWidget(self._stack, 1)
+        layout.addWidget(self._notice)
         layout.addWidget(self.input)
 
         self.header.rename.connect(self.rename_session.emit)
         self.header.switch_model.connect(self.switch_model.emit)
         self.header.switch_persona.connect(self.switch_persona.emit)
         self.header.new_session.connect(self.new_session.emit)
+        self.header.toggle_detail.connect(self.toggle_detail.emit)
         self.input.send_message.connect(self._on_send)
         self.input.cancel.connect(self.cancel_turn.emit)
         self.empty.add_model.connect(self.add_model.emit)
@@ -72,6 +81,9 @@ class ChatView(QWidget):
     def set_title(self, title: str) -> None:
         self.header.set_title(title)
 
+    def set_detail_active(self, active: bool) -> None:
+        self.header.set_detail_active(active)
+
     def set_theme(self, name: str | None, font_size: str | None = None) -> None:
         """外观切换：消息流需整帧重渲染，其余控件由全局 QSS 换肤/重排。"""
         self.messages.set_theme(name, font_size)
@@ -92,19 +104,28 @@ class ChatView(QWidget):
         self.messages.append_delta(event.content)
         self._refresh_empty()
 
+    def on_reasoning(self, event) -> None:
+        """思考增量（rev25）：进入当前助手消息的折叠块。"""
+        self.messages.append_reasoning(event.content)
+        self._refresh_empty()
+
     def on_final(self, event) -> None:
-        usage = event.usage
+        usage_text = MessageList.format_usage(event.usage.model_dump())
         model = self._current_model or ""
-        usage_text = f"{usage.total_tokens} tokens · {model}".strip(" ·")
-        self.messages.finalize(event.content, usage_text, event.interrupted)
+        if usage_text and model:
+            usage_text = f"{usage_text} · {model}"
+        self.messages.finalize(event.content, usage_text, event.interrupted, event.reasoning)
         self.input.set_generating(False)
         self._refresh_empty()
 
     def on_status(self, event) -> None:
-        if event.state in ("assembling", "calling"):
+        if event.state in ("assembling", "probing", "summarizing", "calling"):
             self.input.set_generating(True)
         else:
             self.input.set_generating(False)
+        note = event.note if event.state in ("probing", "summarizing") else None
+        self._notice.setText(note or "")
+        self._notice.setVisible(bool(note))
 
     def on_error(self, event) -> None:
         self.messages.add_error(event.message, event.detail)

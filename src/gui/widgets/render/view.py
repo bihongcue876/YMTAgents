@@ -165,6 +165,18 @@ class RendererView(QWidget):
     def _run_update(self, inner: str, jump_bottom: bool = False) -> None:
         self._view.page().runJavaScript(self._update_script(inner, jump_bottom))
 
+    def scroll_to(self, index: int) -> None:
+        """滚动到第 index 条消息（rev24：右侧问题列表跳转；`id="m{index}"` 锚点）。"""
+        if self._view is None:
+            return
+        if self.using_webengine:
+            if self._loaded:
+                self._view.page().runJavaScript(
+                    f"var e=document.getElementById('m{index}');if(e){{e.scrollIntoView({{block:'start'}});}}"
+                )
+        else:
+            self._view.scrollToAnchor(f"m{index}")
+
     def _scroll_bottom(self) -> None:
         bar = self._view.verticalScrollBar()
         if bar is not None:

@@ -1,4 +1,4 @@
-"""输入区：1–6 行自适应；Enter 发送 / Shift+Enter 换行；生成中可打字不可重发。"""
+"""输入区：2–10 行自适应；Ctrl+Enter 发送 / Enter 换行；生成中可打字不可重发（rev24–25）。"""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTextEdit, QWidget
 
-_MIN_LINES = 1
-_MAX_LINES = 6
+# rev25（用户裁决）：默认 2 行；随输入增高至多 10 行；发送清空后自动回到 2 行。
+_MIN_LINES = 2
+_MAX_LINES = 10
 _LINE_PX = 22
 
 
@@ -15,8 +16,9 @@ class _InputEdit(QTextEdit):
     submitted = Signal()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
-            event.modifiers() & Qt.ShiftModifier
+        # rev24（用户裁决）：Enter 换行、Ctrl+Enter 发送；发送按钮另设。
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (
+            event.modifiers() & Qt.ControlModifier
         ):
             self.submitted.emit()
             return
@@ -30,7 +32,7 @@ class InputBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._edit = _InputEdit()
-        self._edit.setPlaceholderText("输入消息，Enter 发送，Shift+Enter 换行")
+        self._edit.setPlaceholderText("输入消息，Ctrl+Enter 发送，Enter 换行")
         self._edit.submitted.connect(self._on_send)
         self._edit.textChanged.connect(self._adjust_height)
         self._generating = False

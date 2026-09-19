@@ -15,6 +15,7 @@ class ChatHeader(QWidget):
     switch_model = Signal(str)
     switch_persona = Signal(str)
     new_session = Signal()
+    toggle_detail = Signal()  # rev24：会话详情右栏开关
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -33,12 +34,22 @@ class ChatHeader(QWidget):
         self._new = QPushButton("新建会话")
         self._new.clicked.connect(self.new_session.emit)
 
+        self._detail = QPushButton("详情")
+        self._detail.setCheckable(True)
+        self._detail.setToolTip("显示 / 隐藏本会话详情与上下文策略面板")
+        self._detail.clicked.connect(self.toggle_detail.emit)
+
         layout = QHBoxLayout(self)
         layout.addWidget(self._title, 1)
         layout.addWidget(self._persona)
         layout.addWidget(self._model)
         layout.addWidget(self._new)
+        layout.addWidget(self._detail)
         self._loading = False
+
+    def set_detail_active(self, active: bool) -> None:
+        """与右栏实际可见性同步（右栏也可能被自身关闭按钮收起）。"""
+        self._detail.setChecked(active)
 
     def set_title(self, title: str) -> None:
         if not self._title.hasFocus():

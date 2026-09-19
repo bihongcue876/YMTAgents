@@ -48,6 +48,7 @@ class Sidebar(QWidget):
     archive_session = Signal(str)
     unarchive_session = Signal(str)
     delete_session = Signal(str)
+    detail_session = Signal(str)  # rev24：右键「详情」→ 唤起右侧面板
     open_models = Signal()
     open_personas = Signal()
     open_settings = Signal()
@@ -176,10 +177,13 @@ class Sidebar(QWidget):
             return
         session_id = item.data(Qt.UserRole)
         menu = QMenu(self)
+        detail = menu.addAction("详情")
         archive = menu.addAction("归档")
         delete = menu.addAction("删除")
         chosen = menu.exec(self._active.mapToGlobal(pos))
-        if chosen == archive:
+        if chosen == detail:
+            self.detail_session.emit(session_id)
+        elif chosen == archive:
             self.archive_session.emit(session_id)
         elif chosen == delete and self._confirm_delete():
             self.delete_session.emit(session_id)
@@ -190,10 +194,13 @@ class Sidebar(QWidget):
             return
         session_id = item.data(Qt.UserRole)
         menu = QMenu(self)
+        detail = menu.addAction("详情")
         restore = menu.addAction("恢复")
         delete = menu.addAction("删除")
         chosen = menu.exec(self._archived.mapToGlobal(pos))
-        if chosen == restore:
+        if chosen == detail:
+            self.detail_session.emit(session_id)
+        elif chosen == restore:
             self.unarchive_session.emit(session_id)
         elif chosen == delete and self._confirm_delete():
             self.delete_session.emit(session_id)

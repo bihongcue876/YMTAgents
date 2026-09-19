@@ -68,7 +68,16 @@ class MessageList(QWidget):
         self._render()
 
     def begin_assistant(self) -> None:
-        self._messages.append({"role": "assistant", "content": "", "usage": None, "interrupted": False})
+        self._messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "",
+                "usage": None,
+                "interrupted": False,
+                "streaming": True,
+            }
+        )
         self._render()
 
     def append_delta(self, text: str) -> None:
@@ -77,17 +86,62 @@ class MessageList(QWidget):
         self._messages[-1]["content"] += text
         self._schedule()
 
-    def finalize(self, content: str, usage_text: str | None, interrupted: bool) -> None:
+    def append_reasoning(self, text: str) -> None:
+        """思考增量（rev25）：写入当前助手消息的 reasoning 段。"""
+        if not self._last_is_assistant():
+            self.begin_assistant()
+        self._messages[-1]["reasoning"] += text
+        self._schedule()
+
+    def finalize(
+        self, content: str, usage_text: str | None, interrupted: bool, reasoning: str = ""
+    ) -> None:
         if not self._last_is_assistant():
             self.begin_assistant()
         self._messages[-1]["content"] = content
+        self._messages[-1]["reasoning"] = reasoning
         self._messages[-1]["usage"] = usage_text
         self._messages[-1]["interrupted"] = interrupted
+        self._messages[-1]["streaming"] = False
         self._render()
 
     def add_error(self, message: str, detail: str | None = None) -> None:
         self._messages.append({"role": "error", "content": message, "detail": detail})
         self._render()
+
+    @staticmethod
+    def format_usage(usage: dict | None) -> str | None:
+        """用量文案（rev24/25）：单次口径 + 平均 TPS + 总耗时。
+
+        TPS 取**生成阶段**（首 token → 末 token），排除排队与预填充，最贴近体感；
+        旧数据无计时则只显 tokens（不编造速度）。
+        """
+        if not usage:
+            return None
+        total = usage.get("total_tokens")
+        if total is None:
+            return None
+        text = f"本次 {total} tokens"
+        completion = usage.get("completion_tokens") or 0
+        elapsed_ms = usage.get("elapsed_ms") or 0
+        first_ms = usage.get("first_token_ms") or 0
+        span_ms = elapsed_ms - first_ms
+        if completion and span_ms > 0:
+            text += f" · {completion / (span_ms / 1000):.1f} tokens/s"
+        if elapsed_ms:
+            text += f" · {elapsed_ms / 1000:.1f}s"
+        return text
+
+    def scroll_to_user(self, ordinal: int) -> None:
+        """滚动到第 ordinal 个用户提问（rev24：右侧问题列表跳转）。"""
+        seen = -1
+        for i, m in enumerate(self._messages):
+            if m.get("role") != "user":
+                continue
+            seen += 1
+            if seen == ordinal:
+                self._renderer.scroll_to(i)
+                return
 
     def load_events(self, events: list[dict]) -> None:
         self._messages.clear()
@@ -101,8 +155,10 @@ class MessageList(QWidget):
                     {
                         "role": "assistant",
                         "content": payload.get("content", ""),
-                        "usage": None,
+                        "reasoning": payload.get("reasoning", ""),
+                        "usage": self.format_usage(payload.get("usage")),
                         "interrupted": bool(payload.get("interrupted")),
+                        "streaming": False,
                     }
                 )
             elif t == "error":

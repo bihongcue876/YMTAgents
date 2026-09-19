@@ -58,9 +58,13 @@ table { border-collapse: collapse; }
 th, td { border: 1px solid; padding: 4px 8px; }
 blockquote { border-left: 3px solid; margin: 0; padding-left: 10px; }
 .msg { margin: 10px 0; }
+.think { border-left: 3px solid rgba(128,128,128,0.5); padding: 4px 10px; margin: 4px 0 8px;
+        opacity: 0.85; }
+.think summary { cursor: pointer; opacity: 0.75; }
+.think .think-body { white-space: pre-wrap; margin-top: 6px; }
 .user { display: flex; justify-content: flex-end; }
 .user .bubble { border-radius: 12px; padding: 8px 12px;
-        max-width: 78%; white-space: pre-wrap; overflow-wrap: anywhere; }
+        max-width: 90%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .assistant { display: block; }
 .usage { margin-top: 4px; }
 .tag { margin-left: 6px; }
@@ -95,12 +99,35 @@ def _page(
     return assemble(_inner(theme, body, css, font_size))
 
 
-def _bubble_user(text: str) -> str:
-    return f'<div class="msg user"><div class="bubble">{_html.escape(text or "")}</div></div>'
+def _bubble_user(text: str, index: int = 0) -> str:
+    return (
+        f'<div class="msg user" id="m{index}">'
+        f'<div class="bubble">{_html.escape(text or "")}</div></div>'
+    )
 
 
-def _block_assistant(text: str, usage: str | None, interrupted: bool) -> str:
-    parts = [f'<div class="msg assistant">{_MD.render(text or "")}</div>']
+def _block_assistant(
+    text: str,
+    usage: str | None,
+    interrupted: bool,
+    index: int = 0,
+    reasoning: str = "",
+    streaming: bool = False,
+) -> str:
+    """助手消息：思考块（可折叠）+ 正文 + 用量。
+
+    rev25：思考文本用原生 `<details>`（CSP 禁脚本，`<details>` 无需 JS 即可折叠）；
+    流式期间带 `open` 便于旁观，回合结束后不带 `open`（自动折叠，用户可手动展开）。
+    """
+    parts = [f'<div class="msg assistant" id="m{index}">']
+    if reasoning:
+        opened = " open" if streaming else ""
+        parts.append(
+            f'<details class="think"{opened}><summary>思考过程</summary>'
+            f'<div class="think-body">{_html.escape(reasoning)}</div></details>'
+        )
+    parts.append(_MD.render(text or ""))
+    parts.append("</div>")
     meta: list[str] = []
     if usage:
         meta.append(f'<span class="usage">{_html.escape(usage)}</span>')
@@ -111,25 +138,33 @@ def _block_assistant(text: str, usage: str | None, interrupted: bool) -> str:
     return "".join(parts)
 
 
-def _block_error(message: str, detail: str | None) -> str:
+def _block_error(message: str, detail: str | None, index: int = 0) -> str:
     text = _html.escape(message or "错误")
     if detail:
         text += f'<br><small>{_html.escape(detail)}</small>'
-    return f'<div class="msg error">{text}</div>'
+    return f'<div class="msg error" id="m{index}">{text}</div>'
 
 
 def _messages_body(messages: list[dict]) -> str:
+    # rev24：每个消息带 `id="m{i}"` 锚点 —— 右侧问题列表点击后 scrollIntoView 跳转。
     parts: list[str] = []
-    for m in messages:
+    for i, m in enumerate(messages):
         role = m.get("role")
         if role == "user":
-            parts.append(_bubble_user(m.get("content", "")))
+            parts.append(_bubble_user(m.get("content", ""), i))
         elif role == "assistant":
             parts.append(
-                _block_assistant(m.get("content", ""), m.get("usage"), bool(m.get("interrupted")))
+                _block_assistant(
+                    m.get("content", ""),
+                    m.get("usage"),
+                    bool(m.get("interrupted")),
+                    i,
+                    m.get("reasoning", ""),
+                    bool(m.get("streaming")),
+                )
             )
         elif role == "error":
-            parts.append(_block_error(m.get("content", ""), m.get("detail")))
+            parts.append(_block_error(m.get("content", ""), m.get("detail"), i))
     return "\n".join(parts)
 
 

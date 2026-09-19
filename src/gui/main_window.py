@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QSplitter, QStackedWidget, QWidget
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+    QStackedWidget,
+    QWidget,
+)
 
 from shared.envelope import (
     ArchiveSession,
@@ -21,6 +30,10 @@ from shared.envelope import (
     RenameSession,
     ResumeSession,
     SendMessage,
+    SessionDetail,
+    SessionParams,
+    SessionUpdate,
+    SummarizeSession,
     SetSlot,
     SettingsUpdate,
     SwitchModel,
@@ -31,6 +44,7 @@ from shared.envelope import (
 from core.bus.bridge import BusBridge
 
 from gui import theme
+from gui.chat.session_panel import SessionPanel
 from gui.chat.view import ChatView
 from gui.pages.models import ModelsPage
 from gui.pages.personas import PersonasPage
@@ -42,10 +56,12 @@ class MainWindow(QMainWindow):
     def __init__(self, bus: BusBridge, data_root: str = "") -> None:
         super().__init__()
         self.bus = bus
+        self._data_root = data_root
         self.setWindowTitle("言明通 / YMTAgents")
         self.resize(*self._default_size())
 
         self._current_session_id: str | None = None
+        self._current_events: list[dict] = []  # rev24：问题列表来源
         self._session_titles: dict[str, str] = {}
         # rev14/rev23：模型与角色下拉都显示**当前会话**的选择；
         # 无会话/未选时回落全局默认（模型=slots.main，角色=manifest.current）
@@ -72,11 +88,23 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.personas_page)
         self.stack.addWidget(self.settings)
 
+        # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
+        self.detail = SessionPanel()
+        self.detail.setVisible(False)
+        self._detail_w = 320
+        self.chat_split = QSplitter(Qt.Horizontal)
+        self.chat_split.setChildrenCollapsible(False)
+        self.chat_split.addWidget(self.stack)
+        self.chat_split.addWidget(self.detail)
+        self.chat_split.setStretchFactor(0, 1)
+        self.chat_split.setStretchFactor(1, 0)
+        self.chat_split.setSizes([836, 0])
+
         # 侧栏可拖拽调宽（rev13）：QSplitter 取代固定 264px；折叠逻辑见 _toggle_sidebar
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(self.sidebar)
-        self.splitter.addWidget(self.stack)
+        self.splitter.addWidget(self.chat_split)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([312, 836])
@@ -138,6 +166,7 @@ class MainWindow(QMainWindow):
         s.archive_session.connect(lambda sid: self.bus.submit(ArchiveSession(session_id=sid)))
         s.unarchive_session.connect(lambda sid: self.bus.submit(UnarchiveSession(session_id=sid)))
         s.delete_session.connect(lambda sid: self.bus.submit(DeleteSession(session_id=sid)))
+        s.detail_session.connect(self._open_detail)
         s.open_models.connect(lambda: self.stack.setCurrentWidget(self.models))
         s.open_personas.connect(lambda: self.stack.setCurrentWidget(self.personas_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
@@ -151,6 +180,7 @@ class MainWindow(QMainWindow):
             lambda pid: self.bus.submit(PersonaSwitch(persona_id=pid))
         )
         c.rename_session.connect(self._on_rename)
+        c.toggle_detail.connect(self._toggle_detail)
         # 空状态 CTA（rev9 §6）：无供应商时一键跳模型配置页
         c.add_model.connect(lambda: self.stack.setCurrentWidget(self.models))
 
@@ -183,6 +213,74 @@ class MainWindow(QMainWindow):
         self.settings.settings_update.connect(
             lambda section, data: self.bus.submit(SettingsUpdate(section=section, data=data))
         )
+
+        self.detail.close_requested.connect(self._toggle_detail)
+        self.detail.save_requested.connect(self._on_session_save)
+        self.detail.question_selected.connect(self.chat.messages.scroll_to_user)
+        self.detail.summarize_requested.connect(self._on_summarize)
+        self.detail.open_summary_requested.connect(self._open_summary)
+
+    # -- 会话详情（rev24） --------------------------------------------------
+    def _toggle_detail(self) -> None:
+        visible = not self.detail.isVisible()
+        self.detail.setVisible(visible)
+        total = max(self.chat_split.width() - self.chat_split.handleWidth(), 100)
+        if visible:
+            width = min(max(self._detail_w, 280), 520)
+            self.chat_split.setSizes([total - width, width])
+            if self._current_session_id:
+                self.bus.submit(SessionDetail(session_id=self._current_session_id))
+        else:
+            self._detail_w = max(self.detail.width(), 280)
+            self.chat_split.setSizes([total, 0])
+        self.chat.set_detail_active(visible)
+
+    def _open_detail(self, session_id: str) -> None:
+        """侧栏右键「详情」：必要时先切到该会话，再展开面板。"""
+        if session_id != self._current_session_id:
+            self.bus.submit(ResumeSession(session_id=session_id))
+        if not self.detail.isVisible():
+            self._toggle_detail()
+        else:
+            self.bus.submit(SessionDetail(session_id=session_id))
+
+    def _on_session_save(self, data: dict) -> None:
+        if not self._current_session_id:
+            return
+        self.bus.submit(
+            SessionUpdate(
+                session_id=self._current_session_id,
+                title=data.get("title", ""),
+                note=data.get("note", ""),
+                max_context=data.get("max_context"),
+                params=SessionParams(**data.get("params", {})),
+                summary_threshold=data.get("summary_threshold"),
+            )
+        )
+
+    def _on_summarize(self) -> None:
+        if self._current_session_id:
+            self.bus.submit(SummarizeSession(session_id=self._current_session_id))
+
+    def _open_summary(self) -> None:
+        """用系统默认程序打开本会话的 summary.md（不写盘，仅查看/编辑用）。"""
+        if not self._current_session_id:
+            return
+        path = Path(self._data_root) / "sessions" / self._current_session_id / "summary.md"
+        if not path.exists():  # rev27：文件不存在时给可读提示，避免系统静默失败
+            QMessageBox.information(self, "尚未压缩", "本会话还没有摘要文件，请先点「压缩历史」。")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _questions(self) -> list[str]:
+        """当前会话的用户提问（截断显示），供右栏问题列表跳转。"""
+        result: list[str] = []
+        for event in self._current_events:
+            if event.get("type") != "msg.user":
+                continue
+            text = (event.get("payload") or {}).get("text", "").strip() or "（空）"
+            result.append(text if len(text) <= 60 else text[:60] + "…")
+        return result
 
     def _on_rename(self, title: str) -> None:
         if self._current_session_id:
@@ -223,6 +321,8 @@ class MainWindow(QMainWindow):
                 self.chat.set_title(self._session_titles[self._current_session_id])
         elif t == "session.created":
             self._current_session_id = event.session_id
+            self._current_events = []
+            self.detail.clear()
             self.chat.set_title(event.title)
             self.chat.clear()
             self.stack.setCurrentWidget(self.chat)
@@ -230,12 +330,16 @@ class MainWindow(QMainWindow):
             self._sync_persona_dropdown()
         elif t == "session.events":
             self._current_session_id = event.session_id
+            self._current_events = list(event.events)
             self.chat.load_session(self._session_titles.get(event.session_id, ""), event.events)
             self.stack.setCurrentWidget(self.chat)
             self._sync_model_dropdown()
             self._sync_persona_dropdown()
         elif t == "msg.assistant.delta":
-            self.chat.on_delta(event)
+            if event.reasoning:
+                self.chat.on_reasoning(event)
+            else:
+                self.chat.on_delta(event)
         elif t == "msg.assistant.final":
             self.chat.on_final(event)
         elif t == "turn.status":
@@ -262,3 +366,14 @@ class MainWindow(QMainWindow):
             )
             self.personas_page.update_personas(event)
             self._sync_persona_dropdown()
+        elif t == "session.summary.result":
+            # 成功由随后的 session.detail.result 刷新状态；失败在此提示且不改动原状
+            if not event.ok and event.error:
+                self.detail.set_summary_error(event.error)
+        elif t == "session.detail.result":
+            self._current_events = self._current_events or []
+            self.detail.set_detail(event, self._questions())
+        elif t == "ctx.usage":
+            # rev24：关闭 stage-1 遗留缺口 —— 用量事件被消费；面板可见时刷新详情
+            if self.detail.isVisible() and self._current_session_id:
+                self.bus.submit(SessionDetail(session_id=self._current_session_id))

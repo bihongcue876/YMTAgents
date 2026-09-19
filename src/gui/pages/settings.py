@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QPushButton,
     QSizePolicy,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -41,8 +40,14 @@ class SettingsPage(QWidget):
         layout.addWidget(self._title)
         layout.addWidget(QLabel("外观"))
         layout.addLayout(self._build_appearance())
-        layout.addWidget(QLabel("上下文策略"))
-        layout.addLayout(self._build_context())
+        # rev24：全局上下文策略取消 → 改为「每会话」设置，此处只留指引
+        self._context_note = QLabel(
+            "上下文策略已改为按对话独立设置：在对话右侧「详情」面板中调整本会话的"
+            "最大上下文与模型参数（默认跟随模型窗口，不设上限）。"
+        )
+        self._context_note.setObjectName("mutedNote")
+        self._context_note.setWordWrap(True)
+        layout.addWidget(self._context_note)
         layout.addWidget(QLabel("网络白名单"))
         layout.addLayout(self._build_whitelist())
         layout.addWidget(QLabel("数据"))
@@ -69,36 +74,6 @@ class SettingsPage(QWidget):
         form.addRow("主题", self._theme)
         form.addRow("字号", self._font_size)
         return form
-
-    def _build_context(self) -> QVBoxLayout:
-        """历史轮数 / 输出预留 / 文件截断 + 自适应说明 + 应用按钮。"""
-        self._history = QSpinBox()
-        self._history.setRange(1, 200)
-        self._history.setValue(20)
-        self._reserve = QSpinBox()
-        self._reserve.setRange(0, 1_000_000)
-        self._reserve.setValue(4096)
-        self._truncate = QSpinBox()
-        self._truncate.setRange(0, 10_000_000)
-        self._truncate.setValue(8192)
-        form = QFormLayout()
-        form.addRow("历史保留轮数", self._history)
-        form.addRow("输出预留（reserve）", self._reserve)
-        form.addRow("挂载文件截断（每文件）", self._truncate)
-        context_apply = QPushButton("应用上下文策略")
-        context_apply.clicked.connect(self._apply_context)
-        # rev20：有效值随窗口自适应，配置值是**下限** —— 否则界面上的小数字会误导
-        self._context_hint = QLabel(
-            "输出预留与文件截断随模型窗口自适应放大（约窗口 1/8 与 1/4，"
-            "封顶 32K/64K tokens）；此处填写为下限，调大可进一步放宽。"
-        )
-        self._context_hint.setObjectName("mutedNote")
-        self._context_hint.setWordWrap(True)
-        box = QVBoxLayout()
-        box.addLayout(form)
-        box.addWidget(self._context_hint)
-        box.addWidget(context_apply)
-        return box
 
     def _build_whitelist(self) -> QVBoxLayout:
         """白名单列表 + 添加/删除行。"""
@@ -163,17 +138,6 @@ class SettingsPage(QWidget):
         """页标题（title token）的纵向适配：主题字号不参与 sizeHint。"""
         self._title.setMinimumHeight(text_fit.line_height(self._title, "title", font_size))
 
-    # -- 上下文 ------------------------------------------------------------
-    def _apply_context(self) -> None:
-        self.settings_update.emit(
-            "context",
-            {
-                "history_turns": self._history.value(),
-                "reserve": self._reserve.value(),
-                "file_truncate": self._truncate.value(),
-            },
-        )
-
     # -- 外观 --------------------------------------------------------------
     def _on_theme_changed(self, index: int) -> None:
         if self._loading:
@@ -197,10 +161,6 @@ class SettingsPage(QWidget):
         self._theme.setCurrentIndex(theme_index if theme_index >= 0 else 0)
         font_index = self._font_size.findData(ui.get("font_size", theme.DEFAULT_FONT_SIZE))
         self._font_size.setCurrentIndex(font_index if font_index >= 0 else 0)
-        context = data.get("context", {})
-        self._history.setValue(int(context.get("history_turns", 20)))
-        self._reserve.setValue(int(context.get("reserve", 4096)))
-        self._truncate.setValue(int(context.get("file_truncate", 8192)))
         self._level.setCurrentText(data.get("logging", {}).get("level", "INFO"))
         self._whitelist.clear()
         for rule in data.get("network", {}).get("whitelist", []):

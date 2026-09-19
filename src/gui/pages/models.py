@@ -110,18 +110,19 @@ class ProviderDialog(QDialog):
                 is_preset = provider.base_url in PRESETS.values()
                 self._kind.setCurrentIndex(0 if is_preset else 1)
 
-        self._models = QTableWidget(0, 2)
-        self._models.setHorizontalHeaderLabels(["模型 ID", "上下文窗口"])
+        self._models = QTableWidget(0, 3)
+        self._models.setHorizontalHeaderLabels(["模型 ID", "上下文窗口", "思考"])
         # 列宽必须跟内容走：默认每列 100px 会把模型 ID 与表头都省略成「deepseek-v4-fl…」
         # （实测「模型 ID」内容需 211px、「上下文窗口」表头需 107px）。
         header = self._models.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self._models.setMinimumWidth(420)
         self._models.setMinimumHeight(220)  # rev18：表格太扁看着憋屈，给足高度
         if provider:
             for model in provider.models:
-                self._add_row(model.id, model.ctx_window)
+                self._add_row(model.id, model.ctx_window, model.reasoning)
         add_row = QPushButton("添加模型")
         add_row.clicked.connect(lambda: self._add_row("", 0))
         del_row = QPushButton("删除选中模型")
@@ -224,11 +225,19 @@ class ProviderDialog(QDialog):
         finally:
             self._auto_switching = False
 
-    def _add_row(self, model_id: str, ctx_window: int) -> None:
+    def _add_row(self, model_id: str, ctx_window: int, reasoning: str = "auto") -> None:
         row = self._models.rowCount()
         self._models.insertRow(row)
         self._models.setItem(row, 0, QTableWidgetItem(model_id))
         self._models.setItem(row, 1, QTableWidgetItem(str(ctx_window)))
+        # rev25：思考 = 自动（首次调用探测）/ 强制开 / 强制关；人工覆盖用于纠正探测误判
+        combo = QComboBox()
+        combo.addItem("自动检测", "auto")
+        combo.addItem("强制开启", "on")
+        combo.addItem("强制关闭", "off")
+        index = combo.findData(reasoning)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        self._models.setCellWidget(row, 2, combo)
 
     def _remove_selected(self) -> None:
         for index in sorted({i.row() for i in self._models.selectedIndexes()}, reverse=True):
@@ -246,7 +255,9 @@ class ProviderDialog(QDialog):
                 ctx = int(ctx_item.text()) if ctx_item else 0
             except ValueError:
                 ctx = 0
-            models.append(ModelSpec(id=model_id, ctx_window=ctx))
+            combo = self._models.cellWidget(row, 2)
+            reasoning = combo.currentData() if isinstance(combo, QComboBox) else "auto"
+            models.append(ModelSpec(id=model_id, ctx_window=ctx, reasoning=reasoning or "auto"))
         return ProviderSpec(
             id=self._provider_id,
             name=self._name.text().strip() or "未命名",
@@ -495,9 +506,26 @@ class ModelsPage(QWidget):
             self._test_labels[(provider.id, model.id)] = label
             row.addWidget(test)
             row.addWidget(label)
+            # rev25：思考能力状态（探测/覆盖）——出错时用户可在「编辑」里人工指定
+            thinking = QLabel(self._reasoning_text(model))
+            thinking.setObjectName("mutedNote")
+            row.addWidget(thinking)
             row.addStretch(1)
             layout.addLayout(row)
         return card
+
+    @staticmethod
+    def _reasoning_text(model) -> str:
+        """思考状态文案（rev25）：覆盖优先，其次探测结果，最后「未检测」。"""
+        if model.reasoning == "on":
+            return "思考：强制开启"
+        if model.reasoning == "off":
+            return "思考：强制关闭"
+        if model.reasoning_detected == "yes":
+            return "思考：支持（自动）"
+        if model.reasoning_detected == "no":
+            return "思考：不支持（自动）"
+        return "思考：未检测（首次使用时探测）"
 
     def on_test_result(self, event) -> None:
         label = self._test_labels.get((event.provider_id, event.model_id))
