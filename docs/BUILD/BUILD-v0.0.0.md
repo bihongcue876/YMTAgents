@@ -1033,4 +1033,32 @@ token（单次 **50–100 token** 内）、**不每次都测**；**允许人工�
 - 未做：`SummaryConfig.auto` 自动触发仍待裁决（同 rev27 挂起项）。
 
 
+## 34. rev32 轮次记录 — 角色导入导出（2026-09-19）
+
+### 34.1 交付
+
+| 项 | 内容 |
+|---|---|
+| 契约 | `persona.export` / `persona.import` 请求；`persona.export.result` / `persona.import.result` 事件（含 ok/name/error） |
+| 格式 | 单一 `*.ymtpersona.json`：`{schema_version, kind:"ymt.persona", name, prompt}`；**不含任何密钥/配置** |
+| 核心 | `PersonaStore.export_persona` / `import_persona`：纯标准库，单写者；导入生成新 id、重名追加「（导入）」 |
+| 校验 | 不可信输入 fail-closed：2 MB 上限、kind/字段类型校验；失败不落任何文件 |
+| GUI | 角色页「导入角色」「导出」按钮；结果以对话框回执；导入后自动刷新列表 |
+| 分派 | controller `_on_persona_export` / `_on_persona_import`，错误归码可读文案 |
+
+### 34.2 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **223 passed, 2 skipped，退出码 0**（218+2 → 223+2，净增 5） |
+| 新增用例 | 导出导入往返（无密钥）、重名后缀、坏文件拒绝且不落盘、缺失角色报错、分派集成 |
+| 门禁 | 依赖方向 / 契约 / 主题与字号纪律 全部通过 |
+
+### 34.3 与既有决策的关系
+
+- 角色仍为「全局配置 + 会话选择」（rev23）；导入仅新增条目，不改变默认角色与会话引用。
+- 文件 I/O 只在 core（单写者），GUI 仅通过信封请求；不新增出口、不引入密钥。
+- 未做：persona 模型覆盖（A 项）用户暂缓；工具集/关联文件待工具与工作区阶段。
+
+
 
