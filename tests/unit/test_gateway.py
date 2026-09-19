@@ -42,26 +42,30 @@ class _Usage:
 
 
 class _Delta:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str = "", reasoning: str = "") -> None:
         self.content = content
+        if reasoning:
+            self.reasoning_content = reasoning
 
 
 class _Choice:
-    def __init__(self, content: str) -> None:
-        self.delta = _Delta(content)
+    def __init__(self, content: str = "", reasoning: str = "") -> None:
+        self.delta = _Delta(content, reasoning)
 
 
 class _Chunk:
-    def __init__(self, content: str | None = None, usage=None) -> None:
-        self.choices = [_Choice(content)] if content is not None else []
+    def __init__(self, content: str | None = None, usage=None, reasoning: str = "") -> None:
+        self.choices = [] if (content is None and not reasoning) else [_Choice(content or "", reasoning)]
         self.usage = usage
 
 
 class _Completions:
     def __init__(self, chunks) -> None:
         self._chunks = chunks
+        self.last_kwargs: dict = {}
 
     def create(self, **kwargs):
+        self.last_kwargs = kwargs
         if kwargs.get("stream"):
             return iter(self._chunks)
         return object()
@@ -599,4 +603,147 @@ def test_remote_provider_still_requires_key(tmp_path):
     gateway = make_gateway(tmp_path, [], key=None)
     assert gateway.list_remote_models("prv_1")[2] == "key_missing"
     assert gateway.test_connection("prv_1", "m1")[2] == "key_missing"
+
+
+# -- 思考能力探测与采集（spec rev25） ----------------------------------------
+
+
+class BadRequestError(Exception):
+    """类名含 BadRequest → `_probe_once` 归为「参数被拒」（400/422 同义）。"""
+
+
+class _RejectParamClient:
+    """带 `reasoning_effort` 即报错；去掉参数后正常回流思考。"""
+
+    def __init__(self, chunks) -> None:
+        self.kwargs: dict = {}
+        outer = self
+
+        class _Completions:
+            def create(self, **kw):
+                outer.kwargs.update(kw)
+                if kw.get("reasoning_effort"):
+                    raise BadRequestError("reasoning_effort unsupported")
+                return iter(chunks)
+
+        self.chat = types.SimpleNamespace(completions=_Completions())
+
+
+def _gateway_on_existing_store(tmp_path, client) -> ModelGateway:
+    backend = FakeKeyring()
+    backend.set_password("ymt", "prv_1", "sk-test")
+    return ModelGateway(
+        ConfigStore(tmp_path), keyring=KeyringStore(backend=backend), client_factory=lambda _b, _k: client
+    )
+
+
+def test_stream_chat_captures_reasoning_and_generation_timing(tmp_path):
+    """思考与正文分流；Usage 记录首 token / 末 token 时刻（生成阶段 TPS 来源）。"""
+    chunks = [
+        _Chunk(reasoning="先想"),
+        _Chunk(reasoning="再想"),
+        _Chunk("答案"),
+        _Chunk(usage=_Usage(10, 3)),
+    ]
+    gateway = make_gateway(tmp_path, chunks)
+    content: list[str] = []
+    thoughts: list[str] = []
+    usage = gateway.stream_chat(
+        "s", 0, "m1", [{"role": "user", "content": "hi"}], None, content.append,
+        on_reasoning=thoughts.append,
+    )
+    assert "".join(thoughts) == "先想再想"
+    assert "".join(content) == "答案"
+    assert usage.total_tokens == 13
+    assert usage.elapsed_ms >= usage.first_token_ms >= 0
+
+
+def test_probe_reasoning_records_yes_and_enables_param(tmp_path):
+    gateway = make_gateway(tmp_path, [_Chunk(reasoning="hmm"), _Chunk(usage=_Usage(5, 1))])
+    assert gateway.reasoning_pending("m1") is True
+
+    assert gateway.probe_reasoning("m1") == "yes"
+    assert gateway.reasoning_pending("m1") is False  # 不重复探测
+    saved = ConfigStore(tmp_path).load("models").providers[0].models[0]
+    assert saved.reasoning_detected == "yes"
+    assert saved.reasoning_param_ok is True
+
+    client = _CapturingClient(lambda: iter([_Chunk("答"), _Chunk(usage=_Usage(5, 1))]))
+    gw2 = _gateway_on_existing_store(tmp_path, client)
+    gw2.stream_chat("s", 0, "m1", [{"role": "user", "content": "hi"}], None, lambda _s: None)
+    assert client.kwargs.get("reasoning_effort") == "low"
+
+
+def test_probe_reasoning_records_no(tmp_path):
+    gateway = make_gateway(tmp_path, [_Chunk("ok"), _Chunk(usage=_Usage(5, 1))])
+    assert gateway.probe_reasoning("m1") == "no"
+    saved = ConfigStore(tmp_path).load("models").providers[0].models[0]
+    assert saved.reasoning_detected == "no"
+    assert saved.reasoning_param_ok is True
+
+
+def test_probe_reasoning_falls_back_when_param_rejected(tmp_path):
+    """端点拒绝 `reasoning_effort` 时改被动采集：detected=yes 但不再下发参数。"""
+    client = _RejectParamClient([_Chunk(reasoning="hmm"), _Chunk(usage=_Usage(5, 1))])
+    gateway = make_gateway_with_client(tmp_path, client)
+    assert gateway.probe_reasoning("m1") == "yes"
+    saved = ConfigStore(tmp_path).load("models").providers[0].models[0]
+    assert saved.reasoning_detected == "yes"
+    assert saved.reasoning_param_ok is False
+
+    client.kwargs.clear()
+    gateway.stream_chat("s", 0, "m1", [{"role": "user", "content": "hi"}], None, lambda _s: None)
+    assert "reasoning_effort" not in client.kwargs
+
+
+class _BoomClient:
+    """探测时直接抛非 400/422 异常 → 归 unknown。"""
+
+    def __init__(self) -> None:
+        outer = self
+
+        class _Completions:
+            def create(self, **kw):
+                raise RuntimeError("connection reset")
+
+        self.chat = types.SimpleNamespace(completions=_Completions())
+
+
+def test_probe_reasoning_unknown_does_not_block(tmp_path):
+    """节点不可达/失败一律 unknown，且不写缓存（端点事实不臆断）。"""
+    gateway = make_gateway_with_client(tmp_path, _BoomClient())
+    assert gateway.probe_reasoning("m1") == "unknown"
+    assert ConfigStore(tmp_path).load("models").providers[0].models[0].reasoning_detected == "unknown"
+
+
+def test_probe_unknown_not_retried_in_process(tmp_path):
+    """rev27：探测未得结论，本进程也不再每回合重探（用户裁决「不每次都测」）。"""
+    gateway = make_gateway_with_client(tmp_path, _BoomClient())
+    assert gateway.reasoning_pending("m1") is True
+    assert gateway.probe_reasoning("m1") == "unknown"
+    assert gateway.reasoning_pending("m1") is False  # 同进程不再重试
+
+    # 新进程（新网关实例）仍会再试一次 —— 未得结论不落盘。
+    fresh = make_gateway_with_client(tmp_path, _BoomClient())
+    assert fresh.reasoning_pending("m1") is True
+
+
+def test_upsert_provider_preserves_reasoning_detection(tmp_path):
+    """编辑模型表不得清空探测缓存（端点事实），偏好以本次提交为准。"""
+    gateway = make_gateway(tmp_path, [_Chunk(reasoning="hmm"), _Chunk(usage=_Usage(5, 1))])
+    gateway.probe_reasoning("m1")
+
+    gateway.upsert_provider(
+        ProviderSpec(
+            id="prv_1",
+            name="P",
+            base_url="https://api.test.com",
+            models=[ModelSpec(id="m1", ctx_window=2000, reasoning="off")],
+        ),
+        "sk-test",
+    )
+    reloaded = ConfigStore(tmp_path).load("models").providers[0].models[0]
+    assert reloaded.reasoning_detected == "yes"
+    assert reloaded.reasoning_param_ok is True
+    assert reloaded.reasoning == "off"
 

@@ -28,11 +28,24 @@ def test_default_prompt_is_objective():
 
 
 class FakeGateway:
-    def __init__(self, chunks=("你", "好"), slots=None, cancel_after=None, ctx_window=1000):
+    def __init__(
+        self,
+        chunks=("你", "好"),
+        slots=None,
+        cancel_after=None,
+        ctx_window=1000,
+        reasoning_chunks=None,
+        reasoning_pending=False,
+    ):
         self._chunks = list(chunks)
+        self._reasoning_chunks = list(reasoning_chunks or [])
         self._slots = slots if slots is not None else {"main": "m1"}
         self._cancel_after = cancel_after
         self._ctx_window = ctx_window
+        self._reasoning_pending = reasoning_pending
+        self.probed: list[str] = []
+        self.last_params = None
+        self.last_messages: list[dict] | None = None
 
     def get_slots(self):
         return dict(self._slots)
@@ -47,7 +60,29 @@ class FakeGateway:
             )
         ]
 
-    def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta):
+    def reasoning_pending(self, model_id):
+        return self._reasoning_pending
+
+    def probe_reasoning(self, model_id):
+        self.probed.append(model_id)
+        return "yes"
+
+    def stream_chat(
+        self,
+        session_id,
+        turn_seq,
+        model_id,
+        messages,
+        cancel_token,
+        on_delta,
+        on_reasoning=None,
+        params=None,
+    ):
+        self.last_params = params
+        self.last_messages = [dict(m) for m in messages]
+        for chunk in self._reasoning_chunks:
+            if on_reasoning is not None:
+                on_reasoning(chunk)
         for i, chunk in enumerate(self._chunks):
             on_delta(chunk)
             if self._cancel_after is not None and i == self._cancel_after and cancel_token:
@@ -110,16 +145,28 @@ def test_context_deterministic(tmp_path):
     assert a_usage.segments["reserve"] == 100
 
 
-def test_context_drops_oldest(tmp_path):
+def test_context_eviction_is_token_budget_not_turn_count(tmp_path):
+    """回归锚点（rev24）：历史只受 **token 预算**约束，不设「保留最近 N 轮」。
+
+    用户裁决：这是对话应用，对话不能被轻易丢弃；只有真正超出窗口时才从最旧处淘汰，
+    且当前提问必须留下。
+    """
     store = make_store(tmp_path)
     meta = store.create(None, None)
     for i in range(5):
         store.append_event(meta.id, SendMessage(text=f"问题{i}"))
     snap = store.resume(meta.id)
-    config = ConfigSnapshot(system_prompt="", memory="", history_turns=2, reserve=0, window=0)
-    messages, usage = ContextAssembler().build(snap, config, 10**9)
-    user_msgs = [m for m in messages if m["role"] == "user"]
-    assert [m["content"] for m in user_msgs] == ["问题3", "问题4"]
+    config = ConfigSnapshot(system_prompt="", memory="", reserve=0, window=0)
+
+    messages, _usage = ContextAssembler().build(snap, config, 10**9)
+    assert [m["content"] for m in messages if m["role"] == "user"] == [
+        f"问题{i}" for i in range(5)
+    ], "预算充足时不得按轮数丢弃历史"
+
+    messages2, _usage2 = ContextAssembler().build(snap, config, 3)
+    users2 = [m["content"] for m in messages2 if m["role"] == "user"]
+    assert users2[-1] == "问题4", "当前提问永不被淘汰"
+    assert len(users2) < 5, "预算极紧时从最旧处淘汰"
 
 
 def test_loop_turn_and_interrupt(tmp_path):
@@ -171,7 +218,6 @@ def test_context_never_drops_the_current_question(tmp_path):
         files=[("big.txt", "啊" * 20000)],
         file_truncate=0,  # 0 = 每文件不截断；由总额护栏兜底
         reserve=0,
-        history_turns=20,
     )
     messages, _usage = ContextAssembler().build(store.resume(meta.id), config, 100)
     assert [m["content"] for m in messages if m["role"] == "user"] == ["问题2"]
@@ -225,7 +271,7 @@ def test_context_keeps_question_even_with_negative_budget(tmp_path):
     store = make_store(tmp_path)
     meta = store.create(None, None)
     _fill_turns(store, meta, 2)
-    config = ConfigSnapshot(system_prompt="", memory="", reserve=4096, history_turns=20)
+    config = ConfigSnapshot(system_prompt="", memory="", reserve=4096)
     messages, _usage = ContextAssembler().build(store.resume(meta.id), config, -1000)
     assert [m["content"] for m in messages if m["role"] == "user"] == ["问题1"]
 
@@ -240,7 +286,7 @@ def test_context_eviction_does_not_double_count_reserve(tmp_path):
     store = make_store(tmp_path)
     meta = store.create(None, None)
     _fill_turns(store, meta, 3)
-    config = ConfigSnapshot(system_prompt="S", memory="", reserve=100, history_turns=20)
+    config = ConfigSnapshot(system_prompt="S", memory="", reserve=100)
     messages, usage = ContextAssembler().build(store.resume(meta.id), config, 150)
     users = [m["content"] for m in messages if m["role"] == "user"]
     assert users == ["问题0", "问题1", "问题2"]
@@ -327,3 +373,332 @@ def test_effective_file_cap_scales_with_window():
     assert effective_file_cap(8192, 1_000_000) == 65_536  # 封顶
     assert effective_file_cap(8192, 8_000) == 8_192  # 小窗口：配置值即上限（只增不减）
     assert effective_file_cap(8192, 0) == 8192  # 窗口未知用配置值
+
+
+# -- 会话详情与逐会话策略（spec rev24） -----------------------------------------
+
+
+def test_session_update_roundtrip_and_data_bytes(tmp_path):
+    """逐会话策略：update 覆盖名称/作用/上限/参数，data_bytes 反映落盘体积。"""
+    from shared.envelope import SessionParams
+
+    store = make_store(tmp_path)
+    meta = store.create("原名", None)
+    base = store.data_bytes(meta.id)
+    assert base > 0, "session.start 已落盘"
+
+    store.append_event(meta.id, SendMessage(text="你好"))
+    assert store.data_bytes(meta.id) > base, "追加事件后体积增长"
+
+    updated = store.update(
+        meta.id,
+        title="改名",
+        note="作用说明",
+        max_context=64_000,
+        params=SessionParams(temperature=0.5, top_k=40),
+    )
+    assert updated.title == "改名"
+    assert updated.note == "作用说明"
+    assert updated.max_context == 64_000
+    assert updated.params.temperature == 0.5
+    assert updated.params.top_k == 40
+    assert updated.params.top_p is None
+
+    reloaded = store.get_meta(meta.id)
+    assert reloaded.max_context == 64_000
+    assert reloaded.params.temperature == 0.5
+
+    # 空标题表示保持不变
+    kept = store.update(
+        meta.id, title="", note="", max_context=None, params=SessionParams()
+    )
+    assert kept.title == "改名"
+    assert kept.note is None
+    assert kept.max_context is None
+
+
+def test_param_options_only_sends_enabled(tmp_path):
+    from shared.envelope import SessionParams
+    from core.gateway.provider import _param_options
+
+    assert _param_options(None) == {}
+    assert _param_options(SessionParams()) == {}
+    opts = _param_options(SessionParams(temperature=0.2, top_k=20))
+    assert opts == {"temperature": 0.2, "top_k": 20}
+    assert "top_p" not in opts and "max_tokens" not in opts
+
+
+def test_loop_passes_session_params_to_gateway(tmp_path):
+    from shared.envelope import SessionParams
+
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    store.update(
+        meta.id,
+        title="",
+        note="",
+        max_context=100_000,
+        params=SessionParams(temperature=0.3),
+    )
+    gw = FakeGateway()
+    loop = AgentLoop(store, gw, lambda e: None, tmp_path)
+    loop.run_turn(meta.id, SendMessage(text="hi"))
+    assert gw.last_params is not None
+    assert gw.last_params.temperature == 0.3
+
+
+def test_session_max_context_overrides_model_window(tmp_path):
+    """本会话上限优先于模型窗口：小上限 + 大窗口模型 → 触发 context_overflow。"""
+    from shared.envelope import SessionParams
+
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    store.update(
+        meta.id, title="", note="", max_context=60, params=SessionParams()
+    )
+    emitted: list = []
+    # 模型窗口很大（100 万），但本会话上限只有 60 → 仍应本地收口
+    loop = AgentLoop(store, FakeGateway(ctx_window=1_000_000), emitted.append, tmp_path)
+    loop.run_turn(meta.id, SendMessage(text="很长的问题" * 100))
+    errors = [e for e in emitted if e.type == "error"]
+    assert errors and errors[0].code == "context_overflow"
+
+
+# -- 思考能力探测与折叠（spec rev25） -------------------------------------------
+
+
+def test_loop_probes_once_before_calling(tmp_path):
+    """未知模型：调用前先发一条 probing 预告（不落盘），再调用网关探测。"""
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    gw = FakeGateway(reasoning_pending=True)
+    emitted: list = []
+    loop = AgentLoop(store, gw, emitted.append, tmp_path)
+    loop.run_turn(meta.id, SendMessage(text="hi"))
+
+    probing = [e for e in emitted if e.type == "turn.status" and e.state == "probing"]
+    assert probing and probing[0].note and "探测" in probing[0].note
+    assert gw.probed == ["m1"]
+    # 预告是瞬态事件，不进事件流（不进上下文，也不加重放负担）
+    persisted = [e["type"] for e in store.replay(meta.id)]
+    assert "turn.status" not in persisted
+
+
+def test_loop_carries_reasoning_into_final(tmp_path):
+    """思考增量与正文分流上报；AssistantFinal 与落盘都带 reasoning。"""
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    gw = FakeGateway(chunks=("答案",), reasoning_chunks=("先想", "再想"))
+    emitted: list = []
+    loop = AgentLoop(store, gw, emitted.append, tmp_path)
+    loop.run_turn(meta.id, SendMessage(text="hi"))
+
+    thoughts = [
+        e for e in emitted if e.type == "msg.assistant.delta" and getattr(e, "reasoning", False)
+    ]
+    assert "".join(e.content for e in thoughts) == "先想再想"
+    final = [e for e in emitted if e.type == "msg.assistant.final"][-1]
+    assert final.reasoning == "先想再想"
+    assert final.content == "答案"
+
+    persisted = [e for e in store.replay(meta.id) if e["type"] == "msg.assistant.final"]
+    assert persisted[-1]["payload"]["reasoning"] == "先想再想"
+
+
+def test_final_usage_carries_timing_for_tps(tmp_path):
+    """TPS 口径来源：Usage 的首 token / 末 token 时刻随事件流落盘，回放一致。"""
+    from shared.envelope import Usage
+
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+
+    class TimingGateway(FakeGateway):
+        def stream_chat(
+            self,
+            session_id,
+            turn_seq,
+            model_id,
+            messages,
+            cancel_token,
+            on_delta,
+            on_reasoning=None,
+            params=None,
+        ):
+            on_delta("答")
+            return Usage(
+                prompt_tokens=10,
+                completion_tokens=20,
+                total_tokens=30,
+                first_token_ms=200,
+                elapsed_ms=1200,
+            )
+
+    loop = AgentLoop(store, TimingGateway(), lambda e: None, tmp_path)
+    loop.run_turn(meta.id, SendMessage(text="hi"))
+    final = [e for e in store.replay(meta.id) if e["type"] == "msg.assistant.final"][-1]
+    usage = final["payload"]["usage"]
+    assert usage["first_token_ms"] == 200
+    assert usage["elapsed_ms"] == 1200
+    assert usage["completion_tokens"] == 20
+
+
+# -- 历史摘要化 / 压缩（spec rev26） --------------------------------------------
+
+
+SUMMARY_REPLY = "## 会话目标\n（无）\n## 已达成的结论与决定\n（无）"
+
+
+class SummaryGateway(FakeGateway):
+    """可区分「摘要调用」与「普通回合」：前者 system 含摘要提示词。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(chunks=("回复" * 200,), **kwargs)
+        self.last_system = ""
+
+    def stream_chat(
+        self,
+        session_id,
+        turn_seq,
+        model_id,
+        messages,
+        cancel_token,
+        on_delta,
+        on_reasoning=None,
+        params=None,
+    ):
+        self.last_messages = [dict(m) for m in messages]
+        self.last_system = messages[0]["content"] if messages else ""
+        text = SUMMARY_REPLY if "压缩器" in self.last_system else "回复" * 200
+        on_delta(text)
+        return Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+
+
+def test_plan_summary_keeps_tail_by_token_budget():
+    """选择面按 token 预算保留近段（不是固定最近 N 轮）。"""
+    from core.agent.summarize import plan_summary
+
+    events = []
+    for i in range(6):
+        events.append({"seq": i * 2, "type": "msg.user", "payload": {"text": "问" * 300}})
+        events.append(
+            {"seq": i * 2 + 1, "type": "msg.assistant.final", "payload": {"content": "答" * 300}}
+        )
+    plan = plan_summary(events, "", covered_seq=-1, keep_budget=100)
+    assert plan is not None
+    assert 0 <= plan.covered_seq < 11, "更早的消息被概括"
+    assert plan.transcript, "转录非空"
+    # 最后一条事件（seq=11）作为近段保留，不进入摘要
+    assert plan.covered_seq < 11
+
+
+def test_summarize_writes_file_and_replaces_history(tmp_path):
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    gw = SummaryGateway(ctx_window=8000)
+    emitted: list = []
+    loop = AgentLoop(store, gw, emitted.append, tmp_path)
+    for i in range(6):
+        loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
+
+    loop.summarize(meta.id)
+
+    results = [e for e in emitted if e.type == "session.summary.result"]
+    assert results and results[-1].ok, results[-1].error if results else "no result"
+    summary = store.read_summary(meta.id)
+    assert summary is not None and summary.revision == 1 and summary.covered_seq >= 0
+    assert "## 会话目标" in store.read_summary_text(meta.id)
+
+    before = len([e for e in store.replay(meta.id) if e["type"] == "msg.user"])
+    loop.run_turn(meta.id, SendMessage(text="追加一问"))
+    # 摘要进入 system 段，历史段只保留 covered_seq 之后的消息
+    assert "## 会话目标" in gw.last_system
+    history_msgs = [m for m in gw.last_messages if m["role"] != "system"]
+    assert len(history_msgs) < before * 2
+
+
+def test_summarize_without_content_reports_error(tmp_path):
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    emitted: list = []
+    loop = AgentLoop(store, SummaryGateway(), emitted.append, tmp_path)
+    loop.summarize(meta.id)
+    results = [e for e in emitted if e.type == "session.summary.result"]
+    assert results and not results[-1].ok
+    assert "无可压缩" in (results[-1].error or "")
+    assert store.read_summary(meta.id) is None
+
+
+def test_summarize_gateway_failure_keeps_state(tmp_path):
+    from core.gateway.errors import GatewayError
+
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+
+    class BrokenGateway(SummaryGateway):
+        def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None):
+            if "压缩器" in (messages[0]["content"] if messages else ""):
+                raise GatewayError("上游拒绝", code="protocol_error")
+            return super().stream_chat(
+                session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning, params
+            )
+
+    gw = BrokenGateway(ctx_window=8000)
+    loop = AgentLoop(store, gw, lambda e: None, tmp_path)
+    for i in range(6):
+        loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
+    emitted: list = []
+    loop.emit = emitted.append
+    loop.summarize(meta.id)
+    results = [e for e in emitted if e.type == "session.summary.result"]
+    assert results and not results[-1].ok
+    assert store.read_summary(meta.id) is None, "失败不得写入摘要"
+
+
+def test_summarize_failure_message_is_redacted(tmp_path):
+    """rev27：`session.summary.result.error` 是回显通道，上游异常文本须过统一脱敏。"""
+    from core.gateway.errors import GatewayError
+    from shared.redact import MASK
+
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+
+    class KeyLeakGateway(SummaryGateway):
+        def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None):
+            if "压缩器" in (messages[0]["content"] if messages else ""):
+                raise GatewayError("认证失败 api_key=sk-deadbeefcafe1234", code="auth_error")
+            return super().stream_chat(
+                session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning, params
+            )
+
+    gw = KeyLeakGateway(ctx_window=8000)
+    loop = AgentLoop(store, gw, lambda e: None, tmp_path)
+    for i in range(6):
+        loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
+    emitted: list = []
+    loop.emit = emitted.append
+    loop.summarize(meta.id)
+    results = [e for e in emitted if e.type == "session.summary.result"]
+    assert results and not results[-1].ok
+    assert "sk-deadbeefcafe1234" not in (results[-1].error or "")
+    assert MASK in (results[-1].error or "")
+
+
+def test_effective_threshold_user_value_clamped():
+    from shared.envelope import SessionMeta
+    from shared.schema import SummaryConfig
+    from datetime import datetime, timezone
+
+    from core.agent.summarize import effective_threshold
+
+    now = datetime.now(timezone.utc)
+    config = SummaryConfig(threshold=90)
+    plain = SessionMeta(id="s", title="t", created_at=now, updated_at=now)
+    assert effective_threshold(plain, config) == 90  # 未覆盖 → 全局默认
+    overridden = SessionMeta(
+        id="s", title="t", created_at=now, updated_at=now, summary_threshold=75
+    )
+    assert effective_threshold(overridden, config) == 75  # 用户指定优先
+    clamped = SessionMeta(
+        id="s", title="t", created_at=now, updated_at=now, summary_threshold=10
+    )
+    assert effective_threshold(clamped, config) == 50  # 夹到合法区间

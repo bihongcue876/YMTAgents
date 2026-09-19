@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from app import bootstrap as bootstrap_mod
 from app import paths
 from shared.envelope import (
+    AssistantFinal,
     FetchModels,
     ModelSpec,
     NewSession,
@@ -19,6 +20,7 @@ from shared.envelope import (
     SendMessage,
     SetSlot,
     SettingsUpdate,
+    SummarizeSession,
     SwitchModel,
     TestConnection,
 )
@@ -51,7 +53,9 @@ def test_bootstrap_initial_and_dispatch(tmp_path, monkeypatch, qapp):
         ctx.controller.handle(SendMessage(text="你好"))
         types = [e.type for e in events]
         assert "msg.assistant.delta" in types
-        assert types[-1] == "turn.status" and events[-1].state == "done"
+        statuses = [e for e in events if e.type == "turn.status"]
+        assert statuses and statuses[-1].state == "done"
+        assert types[-1] == "session.detail.result", "rev24：回合结束后刷新会话详情"
 
         # 回放
         events.clear()
@@ -76,7 +80,8 @@ def test_bootstrap_timeout(tmp_path, monkeypatch, qapp):
         events.clear()
         ctx.controller.handle(SendMessage(text="hi"))
         assert any(e.type == "error" for e in events)
-        assert events[-1].type == "turn.status" and events[-1].state == "failed"
+        statuses = [e for e in events if e.type == "turn.status"]
+        assert statuses and statuses[-1].state == "failed"
     finally:
         ctx.worker.stop()
 
@@ -236,7 +241,8 @@ def test_unbound_slot_fails_turn_with_model_unbound(tmp_path, monkeypatch, qapp)
         errors = [e for e in events if e.type == "error"]
         assert errors and errors[0].code == "model_unbound"
         assert "模型配置" in errors[0].message  # 文案必须可操作
-        assert events[-1].type == "turn.status" and events[-1].state == "failed"
+        statuses = [e for e in events if e.type == "turn.status"]
+        assert statuses and statuses[-1].state == "failed"
     finally:
         ctx.worker.stop()
 
@@ -456,5 +462,36 @@ def test_shutdown_without_session_is_safe(tmp_path, monkeypatch, qapp):
     ctx = _boot(tmp_path, monkeypatch, MockGateway())
     try:
         ctx.controller.shutdown()  # 无当前会话：不得抛
+    finally:
+        ctx.worker.stop()
+
+
+# -- 历史摘要化 / 压缩（spec rev26） -------------------------------------------
+
+
+def test_summarize_dispatch_writes_summary_and_refreshes_detail(tmp_path, monkeypatch, qapp):
+    """`session.summarize` → `session.summary.result` + 详情回推带摘要状态。"""
+    ctx = _boot(tmp_path, monkeypatch, MockGateway())
+    events: list = []
+    ctx.bridge.event_received.connect(events.append)
+    try:
+        ctx.controller.handle(NewSession(title="压缩"))
+        sid = ctx.controller.current_session_id
+        # 直接落盘一段足够长的历史（超出尾部保留预算，保证有可压缩内容）
+        for i in range(6):
+            ctx.session_store.append_event(sid, SendMessage(text=f"问题{i}" + "细" * 300))
+            ctx.session_store.append_event(sid, AssistantFinal(content="答" * 300))
+        events.clear()
+
+        ctx.controller.handle(SummarizeSession(session_id=sid))
+
+        results = [e for e in events if e.type == "session.summary.result"]
+        assert results and results[-1].ok, results[-1].error if results else "no result"
+        assert ctx.session_store.read_summary(sid) is not None
+        assert ctx.session_store.read_summary_text(sid).strip()
+        detail = [e for e in events if e.type == "session.detail.result"][-1]
+        assert detail.summary_revision == 1
+        assert detail.summary_covered_seq >= 0
+        assert detail.summary_threshold == 90  # 未覆盖 → 全局默认
     finally:
         ctx.worker.stop()

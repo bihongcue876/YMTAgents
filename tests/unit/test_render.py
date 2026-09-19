@@ -63,6 +63,27 @@ def test_messages_to_html():
     assert "boom" in html
 
 
+def test_assistant_reasoning_renders_collapsible_block():
+    """rev25：思考用原生 <details>（CSP 禁脚本）；流式展开、完成后自动折叠。"""
+    from gui.widgets.render.md import messages_inner
+
+    streaming = messages_inner(
+        [{"role": "assistant", "content": "答", "reasoning": "<想> & 想", "streaming": True}],
+        "light",
+        "normal",
+    )
+    assert 'class="think" open' in streaming
+    assert "思考过程" in streaming
+    assert "&lt;想&gt; &amp; 想" in streaming  # 思考按纯文本转义，不解析 markdown
+
+    done = messages_inner(
+        [{"role": "assistant", "content": "答", "reasoning": "想完了", "streaming": False}],
+        "light",
+        "normal",
+    )
+    assert '<details class="think">' in done  # 无 open → 自动折叠
+
+
 def test_stream_fragment_and_stub_structure():
     """回归锚点（rev19）：壳/片段分离 —— 壳恒小（绕开 setHtml 的 2MB 上限），片段带主题样式。"""
     from gui.widgets.render.md import assemble, messages_inner, stub_doc

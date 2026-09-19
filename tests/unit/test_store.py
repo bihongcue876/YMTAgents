@@ -39,9 +39,13 @@ def test_config_store_roundtrip(tmp_path):
     store = ConfigStore(tmp_path)
     store.ensure_defaults()
     cfg = store.load("settings")
-    cfg.context.history_turns = 5
+    cfg.ui.theme = "dark"
+    cfg.logging.level = "DEBUG"
     store.save("settings", cfg)
-    assert store.load("settings").context.history_turns == 5
+    loaded = store.load("settings")
+    assert loaded.ui.theme == "dark"
+    assert loaded.logging.level == "DEBUG"
+    assert not hasattr(loaded, "context"), "rev24：全局上下文设置已移除"
 
 
 def test_migrate_guard(tmp_path):

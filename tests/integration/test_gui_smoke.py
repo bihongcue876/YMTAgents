@@ -142,6 +142,33 @@ def test_message_list_passes_theme_background(qapp):
     assert ml._renderer._view is not None  # 首帧后视图已建
 
 
+def test_input_bar_height_two_to_ten_lines(qapp):
+    """rev25（用户裁决）：输入区默认 2 行，随输入最多长到 10 行，发送清空后回到 2 行。"""
+    from gui.chat.input_bar import _LINE_PX, _MAX_LINES, _MIN_LINES, InputBar
+
+    assert (_MIN_LINES, _MAX_LINES) == (2, 10)
+    bar = InputBar()
+    assert bar._edit.height() == _MIN_LINES * _LINE_PX + 10
+    bar._edit.setPlainText("\n".join(str(i) for i in range(20)))
+    assert bar._edit.height() == _MAX_LINES * _LINE_PX + 10
+    bar._edit.clear()
+    assert bar._edit.height() == _MIN_LINES * _LINE_PX + 10
+
+
+def test_usage_text_includes_generation_tps(qapp):
+    """rev25：用量文案含「本次」口径 + 生成阶段 TPS + 总耗时；缺计时则不编速度。"""
+    from gui.chat.message_list import MessageList
+
+    text = MessageList.format_usage(
+        {"total_tokens": 30, "completion_tokens": 20, "elapsed_ms": 1200, "first_token_ms": 200}
+    )
+    assert "本次 30 tokens" in text
+    assert "20.0 tokens/s" in text  # 20 tokens ÷ 1.0s（生成阶段 = 1200-200ms）
+    assert "1.2s" in text
+    assert MessageList.format_usage(None) is None
+    assert MessageList.format_usage({"total_tokens": 5}) == "本次 5 tokens"
+
+
 def test_rail_buttons_carry_text_and_default_size_is_large(tmp_path, monkeypatch, qapp):
     """回归锚点（rev18）：rail 按钮图标右侧带文字；启动尺寸比旧的 1100×720 大。
 
@@ -353,16 +380,20 @@ def test_empty_state_title_width_follows_font_level(tmp_path, monkeypatch, qapp)
         ctx.worker.stop()
 
 
-def test_settings_context_labels_have_no_stray_characters(tmp_path, monkeypatch, qapp):
-    """回归锚点：设置页标签曾写成「历史保留轮数 N」，界面直接显示多余的 " N"。"""
+def test_settings_context_section_removed(tmp_path, monkeypatch, qapp):
+    """回归锚点（rev24）：全局「上下文策略」设置段已移除，改为逐会话在右侧详情面板设置。
+
+    旧设置页标签「历史保留轮数 / 输出预留（reserve）」随全局上下文设置一并下线；
+    界面标签也不得残留 " N" 这类占位符。
+    """
     monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
     ctx = bootstrap_mod.bootstrap(gateway_factory=lambda store: MockGateway())
     window = MainWindow(ctx.bridge, data_root=str(ctx.root))
     try:
         qapp.processEvents()
         texts = [label.text() for label in window.settings.findChildren(QLabel)]
-        assert "历史保留轮数" in texts
-        assert "输出预留（reserve）" in texts
+        assert "历史保留轮数" not in texts
+        assert "输出预留（reserve）" not in texts
         assert not any(t.endswith(" N") for t in texts)
     finally:
         ctx.worker.stop()
@@ -527,3 +558,58 @@ def test_models_page_fetch_ok_opens_picker(tmp_path, monkeypatch, qapp):
         assert seen == []  # 取消 → 不落盘
     finally:
         ctx.worker.stop()
+
+
+def test_session_panel_summary_controls(qapp):
+    """右栏压缩控件（rev26）：阈值可指定、按钮触发、保存随会话、失败有提示。"""
+    from datetime import datetime, timezone
+
+    from gui.chat.session_panel import SessionPanel
+    from shared.envelope import SessionDetailResult, SessionMeta
+
+    panel = SessionPanel()
+    triggered: list = []
+    panel.summarize_requested.connect(lambda: triggered.append(True))
+    panel._summarize.click()
+    assert triggered == [True]
+
+    saved: list = []
+    panel.save_requested.connect(saved.append)
+    now = datetime.now(timezone.utc)
+    meta = SessionMeta(id="s", title="T", created_at=now, updated_at=now)
+    panel.set_detail(
+        SessionDetailResult(
+            session_id="s",
+            meta=meta,
+            summary_revision=0,
+            summary_covered_seq=-1,
+            summary_tokens=0,
+            summary_threshold=90,
+        ),
+        ["问题一"],
+    )
+    assert "尚未压缩" in panel._summary_state.text()
+    assert panel._threshold_auto.isChecked()
+    panel._on_save()
+    assert saved and saved[-1]["summary_threshold"] is None  # 跟随默认
+
+    meta2 = meta.model_copy(update={"summary_threshold": 75})
+    panel.set_detail(
+        SessionDetailResult(
+            session_id="s",
+            meta=meta2,
+            summary_revision=2,
+            summary_covered_seq=5,
+            summary_tokens=120,
+            summary_threshold=75,
+        ),
+        [],
+    )
+    assert "已压缩 rev 2" in panel._summary_state.text()
+    assert not panel._threshold_auto.isChecked()
+    assert panel._threshold.value() == 75
+    panel._on_save()
+    assert saved[-1]["summary_threshold"] == 75  # 用户指定值随会话提交
+
+    panel.set_summary_error("上游拒绝")
+    assert "压缩未完成" in panel._summary_state.text()

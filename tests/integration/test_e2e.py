@@ -165,7 +165,8 @@ def test_a4_send_and_log(tmp_path, monkeypatch, qapp):
         ctx.controller.handle(SendMessage(text="hi"))
         types = [e.type for e in events]
         assert "msg.assistant.delta" in types
-        assert types[-1] == "turn.status" and events[-1].state == "done"
+        statuses = [e for e in events if e.type == "turn.status"]
+        assert statuses and statuses[-1].state == "done"
         logged = [e["type"] for e in ctx.session_store.replay(sid)]
         for expected in ("session.start", "msg.user", "msg.assistant.delta", "msg.assistant.final", "ctx.usage"):
             assert expected in logged
@@ -241,7 +242,8 @@ def test_a8_timeout(tmp_path, monkeypatch, qapp):
         events.clear()
         ctx.controller.handle(SendMessage(text="hi"))
         assert any(e.type == "error" for e in events)
-        assert events[-1].type == "turn.status" and events[-1].state == "failed"
+        statuses = [e for e in events if e.type == "turn.status"]
+        assert statuses and statuses[-1].state == "failed"
     finally:
         ctx.worker.stop()
 
