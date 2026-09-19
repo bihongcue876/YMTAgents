@@ -1,7 +1,8 @@
 """会话详情右栏（rev24，用户裁决：不做 Dialog，做可在会话内唤起的侧栏）。
 
 内容：会话状态（轮次/消息/时间/体积）、最近一次上下文用量（**单次**口径）、
-本会话策略（名称 / 作用 / 最大上下文 / 模型参数，可开关）与问题列表（点击跳转）。
+本会话策略（名称 / 作用 / 最大上下文 / 模型参数，可开关）与问题列表
+（rev30：轮次编号、当前高亮、完整内容、可搜索 / 可折叠，点击跳转）。
 
 - 面板不持有 core 对象：只接收 controller 回推的 `SessionDetailResult`，提交 `session.update` 请求。
 - 上下文用量区分「单次」与「累计」：单次 = 本次调用重发的全部输入；累计 = 各次之和。
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -67,6 +69,7 @@ class SessionPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._session_id: str | None = None
+        self._question_texts: list[str] = []
 
         header = QHBoxLayout()
         title = QLabel("会话详情")
@@ -93,11 +96,7 @@ class SessionPanel(QWidget):
         self._save = QPushButton("保存本会话设置")
         self._save.clicked.connect(self._on_save)
         body.addWidget(self._save)
-        body.addWidget(QLabel("问题列表"))
-        self._questions = QListWidget()
-        self._questions.setToolTip("点击跳转到该提问")
-        self._questions.itemClicked.connect(self._on_question)
-        body.addWidget(self._questions, 1)
+        body.addLayout(self._build_questions())
         body.addStretch(1)
 
         scroll = QScrollArea()
@@ -247,6 +246,72 @@ class SessionPanel(QWidget):
         form.addRow("输出上限", self._param_row("max_tokens", self._max_tokens_on, self._max_tokens))
         return form
 
+    def _build_questions(self) -> QVBoxLayout:
+        """问题列表（rev30）：轮次编号 + 当前高亮 + 完整内容 + 可搜索 / 可折叠。
+
+        列表项用 `Qt.UserRole` 存**原始序号**，搜索过滤后仍能正确跳转（不依赖行号）。
+        """
+        self._question_count = _muted("共 0 条")
+        self._question_toggle = QPushButton("收起")
+        self._question_toggle.setCheckable(True)
+        self._question_toggle.setChecked(True)
+        self._question_toggle.setFixedWidth(56)
+        self._question_toggle.toggled.connect(self._on_toggle_questions)
+
+        head = QHBoxLayout()
+        head.addWidget(QLabel("问题列表"))
+        head.addWidget(self._question_count)
+        head.addStretch(1)
+        head.addWidget(self._question_toggle)
+
+        self._question_search = QLineEdit()
+        self._question_search.setPlaceholderText("搜索提问…")
+        self._question_search.setClearButtonEnabled(True)
+        self._question_search.textChanged.connect(lambda _text: self._render_questions())
+
+        self._questions = QListWidget()
+        self._questions.setToolTip("点击跳转到该提问；右键可退回到此前 / 从此处分支（分支功能随下一步提供）")
+        self._questions.setWordWrap(True)
+        self._questions.itemClicked.connect(self._on_question)
+
+        self._question_body = QWidget()
+        inner = QVBoxLayout(self._question_body)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.addWidget(self._question_search)
+        inner.addWidget(self._questions)
+
+        box = QVBoxLayout()
+        box.addLayout(head)
+        box.addWidget(self._question_body)
+        return box
+
+    def _on_toggle_questions(self, shown: bool) -> None:
+        self._question_body.setVisible(shown)
+        self._question_toggle.setText("收起" if shown else "展开")
+
+    def _render_questions(self) -> None:
+        """按当前搜索词重绘问题列表；最后一条（当前所在位置）加粗高亮。"""
+        needle = self._question_search.text().strip().lower()
+        self._questions.clear()
+        total = len(self._question_texts)
+        shown = 0
+        for index, text in enumerate(self._question_texts):
+            if needle and needle not in text.lower():
+                continue
+            shown += 1
+            item = QListWidgetItem(f"第 {index + 1} 轮　{text}")
+            item.setData(Qt.UserRole, index)
+            item.setToolTip(text)
+            if index == total - 1:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setToolTip(f"{text}\n（当前所在位置）")
+            self._questions.addItem(item)
+        self._question_count.setText(
+            f"共 {total} 条" + (f"，筛出 {shown} 条" if needle else "")
+        )
+
     # -- 数据填充 ----------------------------------------------------------
     def set_detail(self, result: SessionDetailResult, questions: list[str]) -> None:
         self._session_id = result.session_id
@@ -305,9 +370,9 @@ class SessionPanel(QWidget):
 
         self._set_usage(result.last_usage, window, result.cumulative_tokens)
 
-        self._questions.clear()
-        for q in questions:
-            self._questions.addItem(q)
+        self._question_texts = list(questions)
+        self._question_search.clear()  # 切会话时重置搜索词
+        self._render_questions()
 
     def set_summary_error(self, message: str) -> None:
         """压缩失败提示（rev26）：只改状态行，不动摘要文件。"""
@@ -348,12 +413,16 @@ class SessionPanel(QWidget):
         self._name.clear()
         self._note.clear()
         self._summary_state.setText("尚未压缩")
-        self._questions.clear()
+        self._question_texts = []
+        self._question_search.clear()
+        self._render_questions()
         self._set_usage(None, 0, 0)
 
     # -- 交互 --------------------------------------------------------------
     def _on_question(self, item) -> None:
-        self.question_selected.emit(self._questions.row(item))
+        ordinal = item.data(Qt.UserRole)
+        if ordinal is not None:
+            self.question_selected.emit(int(ordinal))
 
     def _on_save(self) -> None:
         if not self._session_id:

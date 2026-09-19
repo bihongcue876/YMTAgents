@@ -274,13 +274,14 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _questions(self) -> list[str]:
-        """当前会话的用户提问（截断显示），供右栏问题列表跳转。"""
+        """当前会话的用户提问（rev30：完整内容，仅把换行折成空格），供右栏问题列表跳转。"""
         result: list[str] = []
         for event in self._current_events:
             if event.get("type") != "msg.user":
                 continue
-            text = (event.get("payload") or {}).get("text", "").strip() or "（空）"
-            result.append(text if len(text) <= 60 else text[:60] + "…")
+            text = (event.get("payload") or {}).get("text", "")
+            text = " ".join(text.split()) or "（空）"
+            result.append(text)
         return result
 
     def _on_rename(self, title: str) -> None:
