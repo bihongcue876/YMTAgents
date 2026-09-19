@@ -786,5 +786,149 @@ Coding agents 平台）；YMT 默认角色由 AI 起草；工作区设计暂缓�
 | 新增用例 | PersonaStore ×5（预置/往返/回退/删除/重开）、端到端 ×2（保存→切换→system 段生效→删除回退；会话内切换不漂移全局默认）、GUI 接线 ×1、下拉跟随修订 ×1 |
 | 门禁 | 依赖方向 / 契约（抓到 `ISessionStore.get_meta` 漏声明并修复）/ 主题与字号纪律 全部通过 |
 
+## 26. rev24 轮次记录 — 会话级上下文策略 · 右栏会话详情 · 模型参数下发（2026-09-18）
+
+用户裁决（原文要点）：右键会话可处理操作（删除、**详情**）；**取消全局上下文策略**，
+改为**逐对话（任务）设计**，参考 Cowork 类项目；明确**反对「保留最近多少轮」**
+（「本质是对话应用，不想丢对话」）。详情用**右侧边栏**而非 Dialog；消息框加宽。
+另：用户问「为何每轮 tokens 增长」→ 说明用量是**单次（prompt = 全量历史重发，completion = 本轮）**
+而非累计，右栏一并呈现单次与累计。
+
+### 26.1 交付
+
+| # | 交付 | 落点 |
+|---|---|---|
+| 1 | **取消全局上下文设置**：`SettingsConfig.context` 移除，设置页「上下文策略」分区删除；存量 `settings.json` 的 `context` 静默忽略不迁移 | `shared/schema.py`、`gui/pages/settings.py` |
+| 2 | **历史不设轮数上限**：删 `history_turns` / `_limit_turns`，仅按 token 预算从最旧淘汰，永不触及最后一条用户消息 | `core/agent/context.py` |
+| 3 | **逐对话有效窗口**：`SessionMeta.max_context`（None = 跟随模型窗口，即「不设默认上限」）；`effective = max_context or model_ctx_window` | `shared/envelope.py`、`core/agent/loop.py`、`core/agent/session.py` |
+| 4 | 契约：`session.detail` → `SessionDetailResult`（轮次/消息数/`data_bytes`/累计 tokens/最近 `ctx.usage`/有效窗口）；`session.update`（名称/作用/最大上下文/模型参数） | `shared/envelope.py`、`app/controller.py` |
+| 5 | **模型参数下发**：`SessionParams` → `stream_chat(params=...)` → `_param_options`，**只发显式启用项**；rev20「不把 reserve 映射 max_tokens」不变 | `core/gateway/provider.py` |
+| 6 | **右栏 `SessionPanel`**（可折叠，非 Dialog）：状态 / 用量分段（单次 vs 累计，讲清全量重发）/ 策略与参数编辑 / 问题列表跳转；双入口（会话右键「详情」+ 头条「详情」开关） | `gui/chat/session_panel.py`（新）、`gui/main_window.py`、`gui/sidebar.py`、`gui/chat/header.py`、`gui/chat/view.py` |
+| 7 | **补 `ctx.usage` 零消费缺口**（阶段 1 遗留）：用量事件终于上屏 | `gui/main_window.py` |
+| 8 | 输入体验：**Ctrl+Enter 发送 / Enter 换行** + 独立发送按钮；消息气泡 `78% → 90%`；消息块带 `id` 锚点供问题跳转 | `gui/chat/input_bar.py`、`gui/widgets/render/{md,view}.py`、`gui/chat/message_list.py` |
+
+### 26.2 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **190 passed, 2 skipped，退出码 0**（186+2 → 190+2，净增 4，只增不减） |
+| 新增/改造用例 | token 预算淘汰（替代固定轮数，含「全部保留」与「丢最旧留当前问」）×1、会话 `update/data_bytes` 往返 ×1、`_param_options` ×1、参数下发到网关 ×1、`max_context` 覆盖模型窗口 ×1；改造 `settings.context` 既有用例、设置页标签用例、回合完成事件顺序断言（详情事件为末条） |
+| 门禁 | 依赖方向（gui 仅见 shared + bus）/ 契约（`ISessionStore.update / data_bytes` 当场声明）/ 主题与字号纪律 全部通过 |
+
+### 26.3 与既有决策的关系
+
+- rev20（自适应 reserve/file_truncate）**保留**，但其配置来源由「全局 settings.context」改为模块默认常量
+  `_DEFAULT_RESERVE=4096` / `_DEFAULT_FILE=8192`（作为下限），逐对话上限由 `max_context` 决定。
+- rev8 §2 淘汰不变量（token 口径、不丢当前提问、不双计 reserve）不变。
+- rev14 的「上次使用接续」在 rev23 已修订为「全局配置 + 会话各自选择」，rev24 只承接（详情面板显示会话模型）。
+
+
+## 27. rev25 轮次记录 — 折叠思考块 · 思考能力探测 · 平均 TPS（2026-09-18）
+
+用户裁决（原文要点）：交互界面在模型**能思考**时出现**可折叠思考部分**；开关**由程序自动判定**
+（「开或者关并非由我来觉得」）；在**调用时**实际尝试 reasoning 参数探测，需**预告**会消耗一点
+token（单次 **50–100 token** 内）、**不每次都测**；**允许人工配置**、出错**允许反馈纠正**；
+**只探测 `reasoning_effort`**；探测结果落盘；完成后**自动折叠且允许手动展开**；TPS 取**生成阶段**。
+另：输入区默认 **2 行**、最多 **10 行**、发送后回 2 行（发送按钮样式不变）。
+用户同时澄清：**btcm 本阶段用不上**，不作为上下文系统。
+
+### 27.1 交付
+
+| # | 交付 | 落点 |
+|---|---|---|
+| 1 | **思考采集**：`_reasoning_text` 依次读 `reasoning_content` → `reasoning`，经 `on_reasoning` 与正文分流 | `core/gateway/provider.py` |
+| 2 | **能力判定**：`reasoning` 偏好（auto/on/off）优先；`reasoning_pending` 仅 `auto+unknown`；`probe_reasoning` 带 `reasoning_effort="low"`、`max_tokens=64` 探测一次，被拒则去参重探并记 `reasoning_param_ok=False` | `core/gateway/provider.py` |
+| 3 | **探测缓存落盘**：`reasoning_detected` / `reasoning_param_ok` 写入 `models.json`；`upsert_provider` 按 id 合并保留缓存、采纳新偏好 | `shared/schema.py`、`core/gateway/provider.py` |
+| 4 | **参数门控**：仅 `reasoning_param_ok` 为真才下发 `reasoning_effort`；失败一律 `unknown`（不写缓存、不阻断对话） | `core/gateway/provider.py` |
+| 5 | **回合接线**：`_probe_reasoning` 在装配后/调用前发瞬态 `turn.status(probing, note)`（**不落盘**）；思考增量独立累积；`final` 携带 reasoning | `core/agent/loop.py`、`core/agent/session.py` |
+| 6 | **计时**：`Usage` 增 `elapsed_ms` / `first_token_ms`（流内计时，落盘回放一致） | `shared/envelope.py`、`core/gateway/provider.py` |
+| 7 | **折叠思考块**：原生 `<details class="think">`（CSP 免脚本），流式 `open`、完成自动折叠；思考按纯文本转义 | `gui/widgets/render/md.py`、`gui/chat/message_list.py` |
+| 8 | **平均 TPS**：「本次 N tokens · X.X tokens/s · Y.Ys」，TPS = completion ÷（末期−首 token），旧数据不编速度 | `gui/chat/message_list.py`、`gui/chat/view.py` |
+| 9 | **模型页人工覆盖**：模型表增「思考」列（自动检测/强制开启/强制关闭）；卡片 muted 文案显示探测状态供纠偏 | `gui/pages/models.py` |
+| 10 | **输入区 2–10 行**自适应，发送清空回 2 行；探测预告经瞬态提示条显示 | `gui/chat/input_bar.py`、`gui/chat/view.py`、`gui/main_window.py` |
+
+### 27.2 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **202 passed, 2 skipped，退出码 0**（190+2 → 202+2，净增 12，只增不减） |
+| 新增用例 | 思考采集与生成阶段计时、探测 yes / no / 参数被拒回退 / 失败不写缓存、`upsert` 保留探测缓存、循环探测预告与 `final.reasoning` 落盘、计时透传、TPS 文案、输入区 2–10 行、思考块折叠渲染 |
+| 门禁 | 依赖方向 / 契约（`IModelGateway` 新增 `reasoning_pending/probe_reasoning`，`MockGateway` 全实现）/ 主题与字号纪律 全部通过 |
+
+### 27.3 与既有决策的关系
+
+- 探测**一次即缓存**、不每回合重测；人工覆盖可随时纠正（模型页「思考」列），符合用户「允许人工配置 + 反馈纠正」。
+- 思考内容**不进上下文**（`_history_messages` 只取正文），不改变 token 预算与淘汰语义（rev8 §2 不变）。
+- rev20「不把 reserve 映射 max_tokens」不受影响；`reasoning_effort` 为独立参数通道。
+- 本轮**不涉及 btcm**（用户澄清其本阶段用不上，且非上下文系统）。
+
+
+## 28. rev26 轮次记录 — 历史摘要化 / 压缩 · 输出侧策略（2026-09-19）
+
+用户裁决（原文要点）：**允许**历史摘要化，但**长度不到「特定压缩大小」时不需要马上压缩**；
+压缩本质是**概括**——「在一个文件里面概括前面做了什么，有格式有要求地概括」，且须采用**新的提示词**；
+**聊天记录与 `events.jsonl` 都要保留**；预告 token 成本**保留**；更深刻的部分留待后续轮次。
+关键裁决：**「超过 90%」应是用户指定的一个数值**（不得写死）。
+另指示：登记「**命令系统**」为后续需做项（当前交互全为按键/GUI 系统）。
+
+### 28.1 交付
+
+| # | 交付 | 落点 |
+|---|---|---|
+| 1 | **契约**：`SummaryConfig`（threshold/auto/keep_ratio/model_slot）、`SessionSummary`、`SessionMeta.summary_threshold`、请求 `session.summarize`、事件 `session.summary.result`、`SessionDetailResult` 摘要字段、`ContextUsage.summary` 段、`TurnStatus.summarizing` | `shared/schema.py`、`shared/envelope.py` |
+| 2 | **摘要提示词**：`config/summary_prompt.md` 首次使用时以内置默认落盘，之后以文件为准，**不与角色提示词叠加** | `core/agent/summarize.py` |
+| 3 | **摘要文件**：`sessions/<id>/summary.md`（五节模板，人工可编辑、权威）+ `summary.json`（revision/covered_seq/…）；`revision` 只增 | `core/agent/summarize.py`、`core/agent/session.py` |
+| 4 | **规划算法**：`plan_summary` 只取 `seq > covered_seq`；尾部按 token 预算保留（`window//keep_ratio`，下限 1024）；上一版摘要并入概括（渐进摘要） | `core/agent/summarize.py` |
+| 5 | **阈值**：会话级覆盖优先、否则全局默认，钳制 50–99；越界 → `invalid_request` | `core/agent/summarize.py`、`app/controller.py` |
+| 6 | **装配**：顺序 system·memory → summary → files → env → history；history 只取未覆盖事件、不设轮数上限 | `core/agent/context.py`、`core/agent/loop.py` |
+| 7 | **安全**：摘要落盘前过 `redact()`；失败或无内容 **fail-closed 不写** | `core/agent/summarize.py`、`core/agent/loop.py` |
+| 8 | **右栏「历史压缩」段**：阈值勾选 + 50–99 输入、「压缩历史」「打开摘要文件」按钮、状态与失败提示 | `gui/chat/session_panel.py`、`gui/main_window.py` |
+| 9 | **输出侧策略定稿**：沿用 rev20 —— 不下发 `max_tokens`，`reserve` 保持空间预算；仅保留逐会话显式 `max_tokens` 通道 | `shared/envelope.py`、`core/gateway/provider.py` |
+
+### 28.2 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **209 passed, 2 skipped，退出码 0**（202+2 → 209+2，净增 7，只增不减） |
+| 新增用例 | 尾部保留按 token 预算、摘要写盘并替换历史、无可压缩内容报错、上游失败不落盘、阈值用户值与钳制、控制器分派与详情回推、右栏压缩控件与失败提示 |
+| 门禁 | 依赖方向 / 契约（`IAgentLoop.summarize` 已声明，`MockGateway` 全实现）/ 主题与字号纪律 全部通过 |
+
+### 28.3 与既有决策的关系
+
+- `events.jsonl` 与聊天记录**只增不改**；摘要是**独立文件**，历史仅按 `covered_seq` 过滤，符合用户「记录要保留」。
+- rev8 §2 淘汰不变量不变（token 口径、不丢当前提问、不双计 reserve）；压缩只改变「更早历史」的表达形式。
+- 阈值为**用户指定值**（会话级优先），自动开关**默认关闭**，低于阈值不压缩，符合 m0339 裁决。
+- rev20「不把 reserve 映射 max_tokens」**保持不变**；输出侧本轮无新增全局设置。
+- 本轮**不涉及 btcm**。
+
+
+## 29. rev27 轮次记录 — 小缺陷修复 / 加固（2026-09-19）
+
+阶段 2 连续交付（rev24–rev26）后的**收口巡检**：用户要求「先看看有没有现阶段可直接修掉的小问题」。
+本轮**不改协议**（无新增请求/事件类型），只修正与文档不符或违背既定裁决之处。
+
+### 29.1 修复清单
+
+| # | 问题 | 修复 | 落点 |
+|---|---|---|---|
+| 1 | 思考探测未得结论（`unknown`）时不写缓存 → 每回合重复探测与重复预告，违背「不要每次都测试」 | 进程内 `_probe_attempted`：无论成败本进程不再重探；得结论仍落盘，未得结论不臆断 | `core/gateway/provider.py` |
+| 2 | 压缩失败信息直接回显 `str(exc)`，未接入脱敏层 | `_fail_summary` 先过 `redact()` 再回显 | `core/agent/loop.py` |
+| 3 | 摘要提示词首次落盘非原子写 | 改走 `atomic_write_text` | `core/agent/summarize.py` |
+| 4 | `session_not_found` 字面量散落 | 统一 `ErrorCode.SESSION_NOT_FOUND.value` | `app/controller.py` |
+| 5 | 「打开摘要文件」在无文件时静默调用系统打开 | 缺失时回可读提示 | `gui/main_window.py` |
+
+### 29.2 冒烟结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **211 passed, 2 skipped，退出码 0**（209+2 → 211+2，净增 2，只增不减） |
+| 新增用例 | 探测失败后同进程不再重探（新进程仍再试一次）、压缩失败信息过脱敏 |
+| 门禁 | 依赖方向（`agent` → `store.atomic` 属既有允许方向）/ 契约 / 主题与字号纪律 全部通过 |
+
+### 29.3 未决
+
+- `SummaryConfig.auto` 的**自动触发**仍属待设计（当前默认关闭）：阈值目前仅作展示与手动参考，
+  未在占用达阈值时自动压缩。留待后续轮次给方案裁决。
+
 
 
