@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
         # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
         self.detail = SessionPanel()
         self.detail.setVisible(False)
-        self._detail_w = 320
+        self._detail_w = 380  # rev29：默认宽一档，避免右栏按钮文字被挤
         self.chat_split = QSplitter(Qt.Horizontal)
         self.chat_split.setChildrenCollapsible(False)
         self.chat_split.addWidget(self.stack)
@@ -226,12 +226,13 @@ class MainWindow(QMainWindow):
         self.detail.setVisible(visible)
         total = max(self.chat_split.width() - self.chat_split.handleWidth(), 100)
         if visible:
-            width = min(max(self._detail_w, 280), 520)
+            # rev29：默认/最小再加宽一档 —— 原 280–520 会挤掉右栏按钮文字。
+            width = min(max(self._detail_w, 340), 560)
             self.chat_split.setSizes([total - width, width])
             if self._current_session_id:
                 self.bus.submit(SessionDetail(session_id=self._current_session_id))
         else:
-            self._detail_w = max(self.detail.width(), 280)
+            self._detail_w = max(self.detail.width(), 340)
             self.chat_split.setSizes([total, 0])
         self.chat.set_detail_active(visible)
 

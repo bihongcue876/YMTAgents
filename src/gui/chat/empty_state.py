@@ -54,9 +54,11 @@ class EmptyState(QWidget):
         layout = QVBoxLayout(self)
         layout.addStretch(1)
         layout.addWidget(title, alignment=Qt.AlignCenter)
-        layout.addWidget(tagline, alignment=Qt.AlignCenter)
+        # rev29：换行标签**不加** `alignment`，让它占满布局宽度 ——
+        # 加 `alignment` 时标签只拿到窄 sizeHint 宽，短句被折成两行（应为一行）。
+        layout.addWidget(tagline)
         layout.addSpacing(8)
-        layout.addWidget(self._hint, alignment=Qt.AlignCenter)
+        layout.addWidget(self._hint)
         layout.addWidget(self._cta, alignment=Qt.AlignCenter)
         layout.addStretch(1)
 
