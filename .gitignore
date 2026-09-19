@@ -1,8 +1,5 @@
-# 文档与规格：本地-only，不入库（用户要求）。唯一例外：docs/BUILD/ 允许更新并入库。
-# 注意：不能写成「docs/ + !docs/BUILD/」—— git 无法重新包含被排除目录下的内容，
-#      必须先忽略内容（docs/*）、再放行子目录。
-docs/*
-!docs/BUILD/
+# 文档与规格：本地-only，全部不入库（用户要求，含 docs/BUILD/）。
+docs/
 spec/
 
 # Python
