@@ -38,7 +38,7 @@ from shared.envelope import (
     SessionDetail,
     SessionParams,
     SessionUpdate,
-    SummarizeSession,
+    CompressMemory,
     RevertSession,
     SwitchBranch,
     SetSlot,
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
 
         self._current_session_id: str | None = None
         self._current_events: list[dict] = []  # rev24：问题列表来源
-        self._active_branch: str = "br0"  # rev31：当前活动分支（摘要文件按分支定位）
+        self._active_branch: str = "br0"  # rev31：当前活动分支（记忆文件按分支定位）
         self._session_titles: dict[str, str] = {}
         # rev14/rev23：模型与角色下拉都显示**当前会话**的选择；
         # 无会话/未选时回落全局默认（模型=slots.main，角色=manifest.current）
@@ -99,7 +99,7 @@ class MainWindow(QMainWindow):
         # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
         self.detail = SessionPanel()
         self.detail.setVisible(False)
-        self._detail_w = 380  # rev29：默认宽一档，避免右栏按钮文字被挤
+        self._detail_w = 440  # rev35：默认再加宽一档，避免右栏按钮被遮挡
         self.chat_split = QSplitter(Qt.Horizontal)
         self.chat_split.setChildrenCollapsible(False)
         self.chat_split.addWidget(self.stack)
@@ -229,8 +229,9 @@ class MainWindow(QMainWindow):
         self.detail.close_requested.connect(self._toggle_detail)
         self.detail.save_requested.connect(self._on_session_save)
         self.detail.question_selected.connect(self.chat.messages.scroll_to_user)
-        self.detail.summarize_requested.connect(self._on_summarize)
-        self.detail.open_summary_requested.connect(self._open_summary)
+        self.detail.compress_requested.connect(self._on_compress)
+        self.detail.open_memory_requested.connect(self._open_memory)
+        self.detail.open_memory_history_requested.connect(self._open_memory_history)
         self.detail.revert_requested.connect(self._on_revert)
         self.detail.branch_requested.connect(self._on_branch)
         self.detail.branch_switch_requested.connect(self._on_switch_branch)
@@ -241,13 +242,13 @@ class MainWindow(QMainWindow):
         self.detail.setVisible(visible)
         total = max(self.chat_split.width() - self.chat_split.handleWidth(), 100)
         if visible:
-            # rev29：默认/最小再加宽一档 —— 原 280–520 会挤掉右栏按钮文字。
-            width = min(max(self._detail_w, 340), 560)
+            # rev35：默认/最小再加宽一档 —— 原 340–560 仍会遮挡右栏按钮。
+            width = min(max(self._detail_w, 380), 640)
             self.chat_split.setSizes([total - width, width])
             if self._current_session_id:
                 self.bus.submit(SessionDetail(session_id=self._current_session_id))
         else:
-            self._detail_w = max(self.detail.width(), 340)
+            self._detail_w = max(self.detail.width(), 380)
             self.chat_split.setSizes([total, 0])
         self.chat.set_detail_active(visible)
 
@@ -270,24 +271,41 @@ class MainWindow(QMainWindow):
                 note=data.get("note", ""),
                 max_context=data.get("max_context"),
                 params=SessionParams(**data.get("params", {})),
-                summary_threshold=data.get("summary_threshold"),
+                memory_use=data.get("memory_use"),
+                memory_compress=data.get("memory_compress"),
+                memory_auto=data.get("memory_auto"),
+                memory_threshold=data.get("memory_threshold"),
             )
         )
 
-    def _on_summarize(self) -> None:
+    def _on_compress(self) -> None:
         if self._current_session_id:
-            self.bus.submit(SummarizeSession(session_id=self._current_session_id))
+            # 用户显式点按 = 强求压缩（忽略「是否压缩」开关，v0.0.1）
+            self.bus.submit(CompressMemory(session_id=self._current_session_id, force=True))
 
-    def _open_summary(self) -> None:
-        """用系统默认程序打开本会话的 summary.md（不写盘，仅查看/编辑用）。"""
+    def _open_memory(self) -> None:
+        """用系统默认程序打开本会话的 memory.md（不写盘，仅查看/编辑用）。"""
         if not self._current_session_id:
             return
         session_dir = Path(self._data_root) / "sessions" / self._current_session_id
-        path = session_dir / "branches" / self._active_branch / "summary.md"
+        path = session_dir / "branches" / self._active_branch / "memory.md"
         if not path.exists() and self._active_branch == "br0":
-            path = session_dir / "summary.md"  # rev26 旧布局（br0）
-        if not path.exists():  # rev27：文件不存在时给可读提示，避免系统静默失败
-            QMessageBox.information(self, "尚未压缩", "本会话还没有摘要文件，请先点「压缩历史」。")
+            path = session_dir / "summary.md"  # v0.0.1 之前旧布局（br0）
+        if not path.exists():  # 文件不存在时给可读提示，避免系统静默失败
+            QMessageBox.information(self, "尚未建立记忆", "本会话还没有记忆文件，请先点「压缩记忆」。")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _open_memory_history(self, revision: int) -> None:
+        """查看某版旧记忆（v0.0.1）：只读、不注入上下文。"""
+        if not self._current_session_id:
+            return
+        session_dir = Path(self._data_root) / "sessions" / self._current_session_id
+        path = (
+            session_dir / "branches" / self._active_branch / "memory" / "history" / f"{revision}.md"
+        )
+        if not path.exists():
+            QMessageBox.information(self, "旧记忆不存在", "该版本旧记忆文件已不存在。")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
@@ -432,10 +450,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "导入完成", f"已导入角色「{event.name}」。")
             else:
                 QMessageBox.warning(self, "导入失败", event.error or "导入失败。")
-        elif t == "session.summary.result":
+        elif t == "session.memory.result":
             # 成功由随后的 session.detail.result 刷新状态；失败在此提示且不改动原状
             if not event.ok and event.error:
-                self.detail.set_summary_error(event.error)
+                self.detail.set_memory_error(event.error)
         elif t == "session.branches":
             self._active_branch = event.active
             self.detail.set_branches(event)

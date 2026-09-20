@@ -240,6 +240,10 @@ QLabel#keyBadge[keyStored="false"], QLabel#testResult[testOk="false"] {{ color: 
 QLabel#fetchResult {{ color: {p.muted}; }}
 QLabel#fetchResult[fetchOk="true"] {{ color: {p.ok}; }}
 QLabel#fetchResult[fetchOk="false"] {{ color: {p.danger}; }}
+
+/* 三态开关（会话记忆）：态由属性驱动（rev35），勾选与否一眼可辨 */
+QCheckBox[tri="on"] {{ color: {p.ok}; }}
+QCheckBox[tri="off"] {{ color: {p.muted}; }}
 """
 
 

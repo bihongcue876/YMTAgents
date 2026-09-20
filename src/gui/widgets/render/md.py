@@ -73,7 +73,7 @@ blockquote { border-left: 3px solid; margin: 0; padding-left: 10px; }
 _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src http: https: data:;">
-<style>{base_css}</style></head><body><div id="stream">{inner}</div></body></html>"""
+<style>{base_css}{shell_bg}</style></head><body><div id="stream">{inner}</div></body></html>"""
 
 
 def _inner(theme: str | None, body: str, css: str, font_size: str | None) -> str:
@@ -81,14 +81,20 @@ def _inner(theme: str | None, body: str, css: str, font_size: str | None) -> str
     return f"<style>\n{markdown_css(theme, font_size)}\n{css}\n</style>\n{body}"
 
 
-def assemble(inner: str) -> str:
-    """流片段 → 完整文档（QTextBrowser 降级路径与 WebEngine 初始壳共用）。"""
-    return _TEMPLATE.format(base_css=_BASE_CSS, inner=inner)
+def assemble(inner: str, bg: str | None = None) -> str:
+    """流片段 → 完整文档（QTextBrowser 降级路径与 WebEngine 初始壳共用）。
+
+    rev35：`bg` 为页面底色；写进壳 CSS 后，首帧原生表面即带主题底色，
+    不再先露白（暗色下可见的“白闪”）。仅靠 `page.setBackgroundColor` 时，
+    壳本体无底色，首帧仍可能透出白底。
+    """
+    shell_bg = f"\nhtml, body {{ background: {bg}; }}" if bg else ""
+    return _TEMPLATE.format(base_css=_BASE_CSS, shell_bg=shell_bg, inner=inner)
 
 
-def stub_doc() -> str:
+def stub_doc(bg: str | None = None) -> str:
     """空壳文档：WebEngine 初始加载用它（恒小于 setHtml 的 2MB data: URL 上限）。"""
-    return assemble("")
+    return assemble("", bg)
 
 
 

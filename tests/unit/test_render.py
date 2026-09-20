@@ -100,6 +100,19 @@ def test_stream_fragment_and_stub_structure():
     assert "hi" in doc
 
 
+def test_stub_doc_carries_theme_background():
+    """回归锚点（rev35）：壳本体带主题底色 —— 否则首帧原生表面先露白（暗色下“白闪”）。"""
+    from gui.widgets.render.md import assemble, stub_doc
+
+    assert "background" not in stub_doc(), "无底色时不应凭空生成颜色"
+    stubbed = stub_doc("#101418")
+    assert "html, body { background: #101418; }" in stubbed
+    assert len(stubbed) < 4096
+
+    doc = assemble("<p>x</p>", "#101418")
+    assert "html, body { background: #101418; }" in doc and "<p>x</p>" in doc
+
+
 def test_update_script_is_valid_json_literal():
     """回归锚点（rev19）：局部更新脚本 —— 载荷必须是合法 JS 字符串字面量（任意内容安全转义）。"""
     import json as json_mod

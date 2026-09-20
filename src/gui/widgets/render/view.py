@@ -130,10 +130,10 @@ class RendererView(QWidget):
                 self._pending = (inner, jump_bottom)  # 壳加载中：最新帧排队
             else:
                 self._loading = True
-                self._view.setHtml(stub_doc())  # 空壳恒小于 2MB 上限
+                self._view.setHtml(stub_doc(self._bg))  # 空壳恒小于 2MB 上限（rev35：带底色）
                 self._pending = (inner, jump_bottom)
         else:
-            self._view.setHtml(assemble(inner))
+            self._view.setHtml(assemble(inner, self._bg))
             self._scroll_bottom()
             self._view.update()
 
@@ -200,6 +200,9 @@ class RendererView(QWidget):
                 self._view.page().setBackgroundColor(QColor(self._bg))
             except Exception:  # noqa: BLE001 - 底色失败不影响内容
                 pass
+            if self._loading:
+                # rev35：壳尚未落地时换主题 —— 用新底色重设壳，否则壳本体仍是旧底色
+                self._view.setHtml(stub_doc(self._bg))
         elif self._view is not None:
             self._view.setStyleSheet(f"QTextBrowser {{ background: {self._bg}; }}")
 
@@ -218,8 +221,8 @@ class RendererView(QWidget):
                 self._run_update(self._inner)
             else:
                 self._loading = True
-                self._view.setHtml(stub_doc())
+                self._view.setHtml(stub_doc(self._bg))
                 self._pending = (self._inner, False)
         else:
-            self._view.setHtml(assemble(self._inner))
+            self._view.setHtml(assemble(self._inner, self._bg))
             self._view.update()

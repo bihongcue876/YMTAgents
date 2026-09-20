@@ -60,9 +60,9 @@ class Sidebar(QWidget):
         self.setMaximumWidth(RAIL_PX + PANEL_MAX_PX)
 
         # -- 图标栏（折叠后仍保留；rev18：图标右侧带文字，只看图标猜不出功能） --
-        self._toggle = QPushButton("☰ 侧栏")
+        self._toggle = QPushButton("☰ 会话")
         self._toggle.setObjectName("railButton")
-        self._toggle.setToolTip("折叠 / 展开侧栏")
+        self._toggle.setToolTip("折叠 / 展开会话")
         self._toggle.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
         self._toggle.setCursor(Qt.PointingHandCursor)
         self._toggle.clicked.connect(self.toggle_requested.emit)

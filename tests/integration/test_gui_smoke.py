@@ -177,7 +177,7 @@ def test_rail_buttons_carry_text_and_default_size_is_large(tmp_path, monkeypatch
     ctx, window = _window(tmp_path, monkeypatch)
     try:
         for btn, word in (
-            (window.sidebar._toggle, "侧栏"),
+            (window.sidebar._toggle, "会话"),
             (window.sidebar._models_btn, "模型"),
             (window.sidebar._settings_btn, "设置"),
         ):
@@ -453,6 +453,20 @@ def test_renderer_view_is_lazy_and_uses_stub_plus_js(qapp):
     assert view._bg == "#26282C"
 
 
+def test_renderer_view_fallback_html_carries_background(monkeypatch, qapp):
+    """回归锚点（rev35）：降级路径整文档写入主题底色（暗色下防首帧白闪）。"""
+    captured: dict = {}
+
+    def spy(inner, bg=None):
+        captured["bg"] = bg
+        return "<html><body></body></html>"
+
+    monkeypatch.setattr("gui.widgets.render.view.assemble", spy)
+    view = RendererView()
+    view.set_stream("<p>x</p>", "#26282C")
+    assert captured["bg"] == "#26282C", "壳/整文档必须带底色"
+
+
 def test_renderer_view_replays_hidden_updates(qapp):
     """回归锚点：WebEngine 对**不可见视图**的 setHtml 会被推迟或丢弃（spec rev12 §1）。
 
@@ -580,17 +594,19 @@ def test_models_page_fetch_ok_opens_picker(tmp_path, monkeypatch, qapp):
         ctx.worker.stop()
 
 
-def test_session_panel_summary_controls(qapp):
-    """右栏压缩控件（rev26）：阈值可指定、按钮触发、保存随会话、失败有提示。"""
+def test_session_panel_memory_controls(qapp):
+    """右栏记忆控件（v0.0.1）：三态开关、阈值可指定、按钮触发、保存随会话、失败有提示。"""
     from datetime import datetime, timezone
+
+    from PySide6.QtCore import Qt
 
     from gui.chat.session_panel import SessionPanel
     from shared.envelope import SessionDetailResult, SessionMeta
 
     panel = SessionPanel()
     triggered: list = []
-    panel.summarize_requested.connect(lambda: triggered.append(True))
-    panel._summarize.click()
+    panel.compress_requested.connect(lambda: triggered.append(True))
+    panel._compress.click()
     assert triggered == [True]
 
     saved: list = []
@@ -601,38 +617,70 @@ def test_session_panel_summary_controls(qapp):
         SessionDetailResult(
             session_id="s",
             meta=meta,
-            summary_revision=0,
-            summary_covered_seq=-1,
-            summary_tokens=0,
-            summary_threshold=90,
+            memory_revision=0,
+            memory_covered_seq=-1,
+            memory_tokens=0,
+            memory_use=True,
+            memory_compress=True,
+            memory_threshold=90,
+            memory_recommended_min=500,
+            memory_recommended_max=1000,
         ),
         ["问题一"],
     )
-    assert "尚未压缩" in panel._summary_state.text()
+    assert "尚未建立记忆" in panel._memory_state.text()
+    assert panel._memory_use.checkState() == Qt.PartiallyChecked  # meta 未覆盖 → 跟随全局
+    assert panel._memory_compress.checkState() == Qt.PartiallyChecked
+    assert panel._memory_auto.checkState() == Qt.PartiallyChecked
+    # rev35：三态文字带状态后缀并按态着色（勾选与否一眼可辨）
+    assert "使用记忆（跟随默认）" == panel._memory_use.text()
+    assert panel._memory_use.property("tri") == "default"
+    assert "推荐范围" in panel._recommended.text()
     assert panel._threshold_auto.isChecked()
     panel._on_save()
-    assert saved and saved[-1]["summary_threshold"] is None  # 跟随默认
+    assert saved and saved[-1]["memory_threshold"] is None  # 跟随默认
+    assert saved[-1]["memory_use"] is None  # 三态半选 → 跟随全局
+    assert saved[-1]["memory_auto"] is None
 
-    meta2 = meta.model_copy(update={"summary_threshold": 75})
+    meta2 = meta.model_copy(
+        update={
+            "memory_threshold": 75,
+            "memory_use": False,
+            "memory_compress": True,
+            "memory_auto": True,
+        }
+    )
     panel.set_detail(
         SessionDetailResult(
             session_id="s",
             meta=meta2,
-            summary_revision=2,
-            summary_covered_seq=5,
-            summary_tokens=120,
-            summary_threshold=75,
+            memory_revision=2,
+            memory_covered_seq=5,
+            memory_tokens=120,
+            memory_use=False,
+            memory_compress=True,
+            memory_threshold=75,
+            memory_recommended_min=500,
+            memory_recommended_max=1000,
         ),
         [],
     )
-    assert "已压缩 rev 2" in panel._summary_state.text()
+    assert "记忆 rev 2" in panel._memory_state.text()
     assert not panel._threshold_auto.isChecked()
     assert panel._threshold.value() == 75
+    assert panel._memory_use.checkState() == Qt.Unchecked  # 会话显式关
+    assert panel._memory_auto.checkState() == Qt.Checked  # 会话显式开自动
+    assert panel._memory_use.text() == "使用记忆（已关闭）"
+    assert panel._memory_use.property("tri") == "off"
+    assert panel._memory_auto.text() == "自动压缩（已开启）"
+    assert panel._memory_auto.property("tri") == "on"
     panel._on_save()
-    assert saved[-1]["summary_threshold"] == 75  # 用户指定值随会话提交
+    assert saved[-1]["memory_threshold"] == 75  # 用户指定值随会话提交
+    assert saved[-1]["memory_use"] is False
+    assert saved[-1]["memory_auto"] is True
 
-    panel.set_summary_error("上游拒绝")
-    assert "压缩未完成" in panel._summary_state.text()
+    panel.set_memory_error("上游拒绝")
+    assert "压缩未完成" in panel._memory_state.text()
 
 
 def test_session_panel_question_list_features(qapp):
@@ -651,7 +699,7 @@ def test_session_panel_question_list_features(qapp):
     long_question = "这是一个很长的提问" * 20
     questions = ["第一个问题", long_question, "关于上下文的提问"]
     panel.set_detail(
-        SessionDetailResult(session_id="s", meta=meta, summary_threshold=90),
+        SessionDetailResult(session_id="s", meta=meta, memory_threshold=90),
         questions,
     )
 
@@ -725,3 +773,32 @@ def test_session_panel_branch_section(qapp):
     panel.clear()
     assert panel._branch_list.count() == 0
     assert "共 1/5 分支" in panel._branch_state.text()
+
+
+def test_session_panel_action_buttons_size_to_content(qapp):
+    """回归锚点（rev35）：面板加宽后，动作按钮仍按内容宽度左对齐，不纵向铺满。"""
+    from gui.chat.session_panel import SessionPanel
+
+    panel = SessionPanel()
+    panel.resize(440, 800)
+    panel.show()
+    qapp.processEvents()
+    try:
+        for button in (panel._save, panel._compress, panel._open_memory):
+            assert button.width() <= button.sizeHint().width() + 4
+            assert button.width() < panel.width() - 40
+    finally:
+        panel.close()
+
+
+def test_app_icon_loads_from_feature_ico(qapp):
+    """回归锚点（rev35）：应用图标取自 `src/feature/y-ico.ico`（标题栏与任务栏共用）。
+
+    源 ICO 可能是单张超大图，任务栏取不到合适尺寸会回退默认图标 —— 故须含 16–256 多档位。
+    """
+    from app.main import _app_icon
+
+    icon = _app_icon()
+    assert not icon.isNull()
+    sizes = {s.width() for s in icon.availableSizes()}
+    assert {16, 32, 48, 256} <= sizes

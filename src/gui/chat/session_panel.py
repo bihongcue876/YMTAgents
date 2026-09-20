@@ -31,6 +31,15 @@ from PySide6.QtWidgets import (
 
 from shared.envelope import ContextUsage, SessionBranches, SessionDetailResult
 
+from gui import theme
+
+#: 三态 → 文字后缀（rev35：强化可辨性）。
+_TRI_LABEL = {
+    Qt.Unchecked: "已关闭",
+    Qt.PartiallyChecked: "跟随默认",
+    Qt.Checked: "已开启",
+}
+
 
 def format_tokens(count: int) -> str:
     """token 数可读化（1,000,000 → 1.00M）。"""
@@ -71,12 +80,22 @@ def _muted(text: str) -> QLabel:
     return label
 
 
+def _action_row(*buttons: QPushButton) -> QHBoxLayout:
+    """按钮按内容宽度左对齐（rev35）：面板变宽后，纵向铺满会让按钮显得过宽。"""
+    row = QHBoxLayout()
+    for button in buttons:
+        row.addWidget(button)
+    row.addStretch(1)
+    return row
+
+
 class SessionPanel(QWidget):
     close_requested = Signal()
-    save_requested = Signal(dict)  # {title, note, max_context, params, summary_threshold}
+    save_requested = Signal(dict)  # {title, note, max_context, params, memory_use/compress/threshold}
     question_selected = Signal(int)  # 第 n 个用户提问（0 起）
-    summarize_requested = Signal()  # 压缩较早历史（rev26）
-    open_summary_requested = Signal()  # 打开 summary.md（rev26）
+    compress_requested = Signal()  # 压缩较早历史为记忆（v0.0.1）
+    open_memory_requested = Signal()  # 打开 memory.md（v0.0.1）
+    open_memory_history_requested = Signal(int)  # 查看某版旧记忆（只读、不注入）
     revert_requested = Signal(int)  # 退回到此前：该提问的原始序号（rev31）
     branch_requested = Signal(int)  # 从此处分支：该提问的原始序号（rev31）
     branch_switch_requested = Signal(str)  # 切换活动分支（rev31）
@@ -102,15 +121,15 @@ class SessionPanel(QWidget):
         body.addLayout(self._build_status())
         body.addWidget(QLabel("上下文用量"))
         body.addLayout(self._build_usage())
-        body.addWidget(QLabel("历史压缩"))
-        body.addLayout(self._build_summary())
+        body.addWidget(QLabel("记忆"))
+        body.addLayout(self._build_memory())
         body.addWidget(QLabel("本会话策略"))
         body.addLayout(self._build_policy())
         body.addWidget(QLabel("模型参数"))
         body.addLayout(self._build_params())
         self._save = QPushButton("保存本会话设置")
         self._save.clicked.connect(self._on_save)
-        body.addWidget(self._save)
+        body.addLayout(_action_row(self._save))
         body.addWidget(QLabel("分支"))
         body.addLayout(self._build_branches())
         body.addLayout(self._build_questions())
@@ -159,9 +178,18 @@ class SessionPanel(QWidget):
         )
         return box
 
-    def _build_summary(self) -> QVBoxLayout:
-        """历史压缩（rev26）：状态 + 用户指定阈值 + 手动触发 + 打开摘要文件。"""
-        self._summary_state = _muted("尚未压缩")
+    def _build_memory(self) -> QVBoxLayout:
+        """记忆（v0.0.1）：状态 + 使用/压缩开关 + 阈值 + 手动触发 + 打开文件 + 旧记忆。"""
+        self._memory_state = _muted("尚未建立记忆")
+        self._memory_use = self._tri_state(
+            "使用记忆", "勾选=注入记忆；取消=不注入；半选=跟随全局默认"
+        )
+        self._memory_compress = self._tri_state(
+            "压缩记忆", "勾选=允许压缩；取消=禁止；半选=跟随全局默认"
+        )
+        self._memory_auto = self._tri_state(
+            "自动压缩", "勾选=占用达阈值时自动压缩；取消=仅手动；半选=跟随全局默认（默认关）"
+        )
         self._threshold_auto = QCheckBox("跟随默认阈值")
         self._threshold_auto.setChecked(True)
         self._threshold_auto.toggled.connect(lambda on: self._threshold.setEnabled(not on))
@@ -175,23 +203,74 @@ class SessionPanel(QWidget):
         threshold_row.addWidget(self._threshold, 1)
 
         form = QFormLayout()
+        form.addRow("使用", self._memory_use)
+        form.addRow("压缩", self._memory_compress)
+        form.addRow("自动", self._memory_auto)
         form.addRow("压缩阈值", threshold_row)
-        self._summarize = QPushButton("压缩历史")
-        self._summarize.setToolTip("把较早对话概括为 summary.md（一次模型调用，会预告成本）")
-        self._summarize.clicked.connect(self.summarize_requested.emit)
-        self._open_summary = QPushButton("打开摘要文件")
-        self._open_summary.clicked.connect(self.open_summary_requested.emit)
+        self._recommended = _muted("推荐范围 —")
+
+        self._compress = QPushButton("压缩记忆")
+        self._compress.setToolTip("把较早对话概括为 memory.md（一次模型调用，会预告成本）")
+        self._compress.clicked.connect(self.compress_requested.emit)
+        self._open_memory = QPushButton("打开记忆文件")
+        self._open_memory.clicked.connect(self.open_memory_requested.emit)
+
+        self._memory_history = QListWidget()
+        self._memory_history.setToolTip("已归档的旧记忆版本（点击可查看，不注入）")
+        self._memory_history.itemClicked.connect(self._on_memory_history_item)
+        self._memory_history_hint = _muted("旧记忆版本会显示在此。")
 
         box = QVBoxLayout()
-        box.addWidget(self._summary_state)
+        box.addWidget(self._memory_state)
         box.addLayout(form)
+        box.addWidget(self._recommended)
         box.addWidget(
-            _muted("压缩本质是概括；占用达到你设定的阈值才允许自动压缩，低于阈值不压。"
+            _muted("记忆本质是概括；开启「自动」后，占用达到你设定的阈值才允许自动压缩，低于阈值不压。"
                    "聊天记录与 events.jsonl 始终保留。")
         )
-        box.addWidget(self._summarize)
-        box.addWidget(self._open_summary)
+        box.addLayout(_action_row(self._compress, self._open_memory))
+        box.addWidget(QLabel("旧记忆"))
+        box.addWidget(self._memory_history)
+        box.addWidget(self._memory_history_hint)
         return box
+
+    @staticmethod
+    def _tri_state(label: str, tip: str) -> QCheckBox:
+        """三态开关：半选=跟随全局默认，勾选=开，取消=关。
+
+        rev35：文字带状态后缀、按态着色（`gui.theme` 的 `QCheckBox[tri=…]`）——
+        原三态的半选外观不易辨认，用户反馈「勾选与否不明显」。
+        """
+        box = QCheckBox(label)
+        box.setTristate(True)
+        box.setToolTip(tip)
+        box.setProperty("triLabel", label)
+        box.stateChanged.connect(lambda _state, b=box: SessionPanel._retri_label(b))
+        SessionPanel._retri_label(box)
+        return box
+
+    @staticmethod
+    def _retri_label(box: QCheckBox) -> None:
+        """按当前三态刷新文字后缀与着色属性。"""
+        base = box.property("triLabel") or box.text()
+        state = box.checkState()
+        box.setText(f"{base}（{_TRI_LABEL[state]}）")
+        box.setProperty("tri", {Qt.Checked: "on", Qt.Unchecked: "off"}.get(state, "default"))
+        theme.restyle(box)
+
+    @staticmethod
+    def _set_tri_state(box: QCheckBox, value: bool | None) -> None:
+        if value is None:
+            box.setCheckState(Qt.PartiallyChecked)
+        else:
+            box.setCheckState(Qt.Checked if value else Qt.Unchecked)
+
+    @staticmethod
+    def _tri_state_value(box: QCheckBox) -> bool | None:
+        state = box.checkState()
+        if state == Qt.PartiallyChecked:
+            return None
+        return state == Qt.Checked
 
     def _build_policy(self) -> QVBoxLayout:
         self._name = QLineEdit()
@@ -385,19 +464,31 @@ class SessionPanel(QWidget):
         if params.max_tokens is not None:
             self._max_tokens.setValue(params.max_tokens)
 
-        if result.summary_revision > 0:
-            self._summary_state.setText(
-                f"已压缩 rev {result.summary_revision}：覆盖至第 {result.summary_covered_seq} 条事件，"
-                f"摘要 {format_tokens(result.summary_tokens)} tokens"
+        if result.memory_revision > 0:
+            self._memory_state.setText(
+                f"记忆 rev {result.memory_revision}：覆盖至第 {result.memory_covered_seq} 条事件，"
+                f"{format_tokens(result.memory_tokens)} tokens"
             )
         else:
-            self._summary_state.setText("尚未压缩")
-        if meta.summary_threshold is None:
+            self._memory_state.setText("尚未建立记忆")
+        self._set_tri_state(self._memory_use, meta.memory_use)
+        self._set_tri_state(self._memory_compress, meta.memory_compress)
+        self._set_tri_state(self._memory_auto, meta.memory_auto)
+        if meta.memory_threshold is None:
             self._threshold_auto.setChecked(True)
-            self._threshold.setValue(max(50, min(result.summary_threshold or 90, 99)))
+            self._threshold.setValue(max(50, min(result.memory_threshold or 90, 99)))
         else:
             self._threshold_auto.setChecked(False)
-            self._threshold.setValue(max(50, min(meta.summary_threshold, 99)))
+            self._threshold.setValue(max(50, min(meta.memory_threshold, 99)))
+        if result.memory_recommended_max > 0:
+            self._recommended.setText(
+                f"推荐范围 {format_tokens(result.memory_recommended_min)}–"
+                f"{format_tokens(result.memory_recommended_max)} tokens"
+            )
+        else:
+            self._recommended.setText("推荐范围 —（窗口未知）")
+        history = getattr(result, "memory_history", None)  # 契约暂未携带；有则填，无则留提示
+        self.set_memory_history([int(r) for r in history] if history else [])
 
         self._set_usage(result.last_usage, window, result.cumulative_tokens)
 
@@ -405,9 +496,26 @@ class SessionPanel(QWidget):
         self._question_search.clear()  # 切会话时重置搜索词
         self._render_questions()
 
-    def set_summary_error(self, message: str) -> None:
-        """压缩失败提示（rev26）：只改状态行，不动摘要文件。"""
-        self._summary_state.setText(f"压缩未完成：{message}")
+    def set_memory_history(self, revisions: list[int]) -> None:
+        """填「旧记忆」列表（只读）：版本号，可查看但不注入上下文。"""
+        self._memory_history.clear()
+        for revision in revisions:
+            item = QListWidgetItem(f"旧记忆 rev {revision}")
+            item.setData(Qt.UserRole, int(revision))
+            item.setToolTip("该版本已归档，可查看（不注入上下文）")
+            self._memory_history.addItem(item)
+        self._memory_history_hint.setText(
+            "已归档的旧记忆（只读、不注入）" if revisions else "旧记忆版本会显示在此。"
+        )
+
+    def _on_memory_history_item(self, item: QListWidgetItem) -> None:
+        revision = item.data(Qt.UserRole)
+        if revision is not None:
+            self.open_memory_history_requested.emit(int(revision))
+
+    def set_memory_error(self, message: str) -> None:
+        """压缩失败提示（v0.0.1）：只改状态行，不动记忆文件。"""
+        self._memory_state.setText(f"压缩未完成：{message}")
 
     def set_branches(self, event: SessionBranches) -> None:
         """填充分支树（rev31）：列表 + 上限状态；点击项切换活动分支。"""
@@ -436,11 +544,13 @@ class SessionPanel(QWidget):
             segments = usage.segments
             reserve = segments.get("reserve", 0)
             input_tokens = max(0, usage.total - reserve)
+            # v0.0.1 段名为 "memory"；旧回放可能仍是 "summary"，兼容读取。
+            memory_tokens = segments.get("memory", segments.get("summary", 0))
             pct = f"（占窗口 {usage.total / window * 100:.1f}%）" if window else ""
             self._usage_segments.setText(
                 f"单次输入 ≈ {format_tokens(input_tokens)} tokens{pct}\n"
                 f"　系统 {format_tokens(segments.get('system', 0))} · "
-                f"摘要 {format_tokens(segments.get('summary', 0))} · "
+                f"记忆 {format_tokens(memory_tokens)} · "
                 f"环境 {format_tokens(segments.get('env', 0))} · "
                 f"文件 {format_tokens(segments.get('files', 0))} · "
                 f"历史 {format_tokens(segments.get('history', 0))}\n"
@@ -460,7 +570,14 @@ class SessionPanel(QWidget):
         self._size.setText("—")
         self._name.clear()
         self._note.clear()
-        self._summary_state.setText("尚未压缩")
+        self._memory_state.setText("尚未建立记忆")
+        self._set_tri_state(self._memory_use, None)
+        self._set_tri_state(self._memory_compress, None)
+        self._set_tri_state(self._memory_auto, None)
+        self._threshold_auto.setChecked(True)
+        self._threshold.setValue(90)
+        self._recommended.setText("推荐范围 —")
+        self.set_memory_history([])
         self._branch_list.clear()
         self._branch_state.setText("共 1/5 分支")
         self._question_texts = []
@@ -515,7 +632,10 @@ class SessionPanel(QWidget):
                 "note": self._note.text().strip(),
                 "max_context": max_context,
                 "params": params,
-                "summary_threshold": (
+                "memory_use": self._tri_state_value(self._memory_use),
+                "memory_compress": self._tri_state_value(self._memory_compress),
+                "memory_auto": self._tri_state_value(self._memory_auto),
+                "memory_threshold": (
                     None if self._threshold_auto.isChecked() else int(self._threshold.value())
                 ),
             }
