@@ -791,6 +791,27 @@ def test_session_panel_action_buttons_size_to_content(qapp):
         panel.close()
 
 
+def test_session_panel_content_fits_default_width(tmp_path, monkeypatch, qapp):
+    """回归锚点（rev37）：右栏内容最小宽 ≤ 默认面板宽，否则右侧控件被遮挡。
+
+    `QSpinBox` 的最小宽按「最大位数 + 后缀」算（如 `2,000,000 tokens`），会把整栏
+    撑出视口；修法 = `_shrinkable()`（横向策略 `Ignored`），外层宽度保持不变。
+    """
+    from PySide6.QtWidgets import QScrollArea
+
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        panel = window.detail
+        panel.resize(window._detail_w, 900)
+        panel.show()
+        qapp.processEvents()
+        scroll = panel.findChild(QScrollArea)
+        assert scroll.horizontalScrollBar().maximum() == 0
+        assert scroll.widget().minimumSizeHint().width() <= panel.width()
+    finally:
+        window.close()
+
+
 def test_app_icon_loads_from_feature_ico(qapp):
     """回归锚点（rev35）：应用图标取自 `src/feature/y-ico.ico`（标题栏与任务栏共用）。
 

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -87,6 +88,14 @@ def _action_row(*buttons: QPushButton) -> QHBoxLayout:
         row.addWidget(button)
     row.addStretch(1)
     return row
+
+
+def _shrinkable(spin: QSpinBox | QDoubleSpinBox) -> None:
+    """允许数字框被压窄（rev37）：QSpinBox 的最小宽按「最大位数 + 后缀」算，
+    如 `2,000,000 tokens` 会把整栏撑到视口之外、右侧被遮挡。
+    `Ignored` 横向策略让布局忽略其 sizeHint，只受显式最小宽约束。"""
+    spin.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+    spin.setMinimumWidth(72)
 
 
 class SessionPanel(QWidget):
@@ -287,6 +296,7 @@ class SessionPanel(QWidget):
         self._max_ctx.setValue(128_000)
         self._max_ctx.setEnabled(False)
         self._max_ctx.setSuffix(" tokens")
+        _shrinkable(self._max_ctx)
         max_row = QHBoxLayout()
         max_row.addWidget(self._auto)
         max_row.addWidget(self._max_ctx, 1)
@@ -309,6 +319,7 @@ class SessionPanel(QWidget):
         spin.setDecimals(2)
         spin.setValue(value)
         spin.setEnabled(False)
+        _shrinkable(spin)
         return spin
 
     def _param_int(self, maximum: int, value: int, step: int) -> QSpinBox:
@@ -317,6 +328,7 @@ class SessionPanel(QWidget):
         spin.setSingleStep(step)
         spin.setValue(value)
         spin.setEnabled(False)
+        _shrinkable(spin)
         return spin
 
     def _param_row(self, label: str, check: QCheckBox, spin: QWidget) -> QHBoxLayout:
