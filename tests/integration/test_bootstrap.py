@@ -378,13 +378,13 @@ def test_settings_write_failure_is_reported(tmp_path, monkeypatch, qapp):
 
 
 def test_provider_write_failure_is_reported(tmp_path, monkeypatch, qapp):
-    """供应商写入失败（含凭据管理器不可用）同样上报，不得静默。"""
+    """供应商写入失败（含加密库不可用）同样上报，不得静默。"""
     ctx = _boot(tmp_path, monkeypatch, MockGateway())
     events: list = []
     ctx.bridge.event_received.connect(events.append)
 
     def boom(*_args, **_kwargs):
-        raise RuntimeError("keyring unavailable")
+        raise RuntimeError("secret vault unavailable")
 
     try:
         monkeypatch.setattr(ctx.gateway, "upsert_provider", boom)
@@ -395,7 +395,7 @@ def test_provider_write_failure_is_reported(tmp_path, monkeypatch, qapp):
         )
         errors = [e for e in events if e.type == "error"]
         assert errors and errors[0].code == "storage_error"
-        assert "凭据管理器" in errors[0].message
+        assert "加密库" in errors[0].message
     finally:
         ctx.worker.stop()
 

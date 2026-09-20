@@ -125,9 +125,9 @@ class CoreController:
         message: str,
         scope: str = "config",
     ) -> bool:
-        """执行一次落盘/凭据写入动作；失败**必须**上报，不得只留日志（spec rev8 §5）。
+        """执行一次落盘/密钥写入动作；失败**必须**上报，不得只留日志（spec rev8 §5）。
 
-        边界处统一收口：凭据管理器与文件系统的异常类型名不可控，故此处宽捕获，
+        边界处统一收口：本地加密库与文件系统的异常类型名不可控，故此处宽捕获，
         明细进日志（去敏：不把异常正文回显给界面，避免带出路径与凭据信息）。
         """
         try:
@@ -660,7 +660,7 @@ class CoreController:
         self._persist(
             "供应商写入",
             lambda: self.gateway.upsert_provider(request.provider, request.api_key),
-            "供应商保存失败：请检查系统凭据管理器与数据目录是否可用。",
+            "供应商保存失败：请检查本地加密库与数据目录是否可用。",
         )
         self._emit_providers()
 

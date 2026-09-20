@@ -38,6 +38,7 @@ def ensure_skeleton() -> Path:
         "config",
         "config/personas",
         "sessions",
+        "secrets",
         "libraries",
         "workspace",
         "workspace/files",

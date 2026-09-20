@@ -27,11 +27,11 @@ def test_provider_dialog_explains_key_storage(qapp):
     """回归锚点（rev17）：密钥行的可解释性 —— 存哪了、为什么看不到、留空是什么行为。"""
     dialog = ProviderDialog(None)
     notes = [
-        w for w in dialog.findChildren(QLabel, "mutedNote") if "凭据管理器" in w.text()
+        w for w in dialog.findChildren(QLabel, "mutedNote") if "加密库" in w.text()
     ]
     assert notes, "编辑对话框必须有密钥存储说明"
     text = notes[0].text()
-    assert "凭据管理器" in text and "不回显" in text and "留空" in text
+    assert "加密库" in text and "不回显" in text and "留空" in text
 
 
 def test_card_test_all_emits_per_model(qapp):

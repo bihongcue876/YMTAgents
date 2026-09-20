@@ -22,6 +22,9 @@ class ErrorCode(str, Enum):
     PROTOCOL_ERROR = "protocol_error"  # 供应商协议错误，无法归入以上
     KEY_MISSING = "key_missing"
     KEY_ERROR = "key_error"
+    SECRET_UNAVAILABLE = "secret_unavailable"  # 本机加密不可用（v0.0.2）
+    SECRET_DECRYPT_FAILED = "secret_decrypt_failed"  # 密文不可解（v0.0.2）
+    SECRET_WRITE_FAILED = "secret_write_failed"  # 机密库写入失败（v0.0.2）
     WHITELIST_BLOCKED = "whitelist_blocked"
     INSECURE_TRANSPORT = "insecure_transport"  # 明文传输：非本机地址未使用 https（rev15）
     AUTH_ERROR = "auth_error"
@@ -47,7 +50,10 @@ ERROR_TEXT: dict[str, str] = {
     ErrorCode.MODEL_NOT_FOUND.value: "该模型在供应商不可用",
     ErrorCode.PROTOCOL_ERROR.value: "供应商拒绝了请求",
     ErrorCode.KEY_MISSING.value: "凭据不可用",
-    ErrorCode.KEY_ERROR.value: "凭据管理器不可用",
+    ErrorCode.KEY_ERROR.value: "加密库不可用",
+    ErrorCode.SECRET_UNAVAILABLE.value: "本机加密不可用，无法安全保存密钥",
+    ErrorCode.SECRET_DECRYPT_FAILED.value: "密钥不可解（密文不属于当前账户或已损坏）",
+    ErrorCode.SECRET_WRITE_FAILED.value: "密钥保存失败",
     ErrorCode.WHITELIST_BLOCKED.value: "已被网络白名单拦截",
     ErrorCode.INSECURE_TRANSPORT.value: "明文传输不安全：非本机地址必须使用 https://",
     ErrorCode.AUTH_ERROR.value: "凭据不可用",

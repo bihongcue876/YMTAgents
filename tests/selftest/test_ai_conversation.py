@@ -1,4 +1,4 @@
-"""AI 对话有效性自检用例。
+﻿"""AI 对话有效性自检用例。
 
 - 离线用例（L1 / 注入式 L2）：**恒跑**，用合成数据根，不联网、不触碰真实配置。
 - 真实配置自检：默认 **skip**，`YMT_SELFTEST=1 uv run pytest tests/selftest -v -s` 才执行。
@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 from app import paths
-from core.gateway.keyring_store import KeyringStore
 from core.store.config_store import ConfigStore
 from shared.schema import ModelConfig, ModelsConfig, ProviderConfig
+from tests.mocks.secrets import FakeVault
 from tests.selftest.checks import (
     SELFTEST_ENV,
     Check,
@@ -31,14 +31,9 @@ needs_live = pytest.mark.skipif(
 )
 
 
-class FakeKeyring:
-    """不触碰系统凭据管理器（测试只关心状态判定）。"""
-
-    def __init__(self, stored: bool = True) -> None:
-        self.data = {"ymt": {"prv_x": "sk-x"}} if stored else {}
-
-    def get_password(self, service: str, user: str):
-        return self.data.get(service, {}).get(user)
+def _vault(stored: bool = True) -> FakeVault:
+    """不触碰系统加密（测试只关心状态判定）。"""
+    return FakeVault({"api_key/prv_x": "sk-x"} if stored else {})
 
 
 def _write_root(root: Path, *, key: bool = True, bind_main: bool = True, whitelist: bool = True) -> Path:
@@ -73,7 +68,7 @@ def _write_root(root: Path, *, key: bool = True, bind_main: bool = True, whiteli
 
 def test_empty_config_fails_with_actionable_hints(tmp_path):
     """零配置：必须报红，且每条都给出下一步（禁止白屏式失败）。"""
-    checks = check_config(tmp_path, keyring=KeyringStore(backend=FakeKeyring()))
+    checks = check_config(tmp_path, secrets=_vault())
     assert checks and all(not c.ok for c in checks)
     assert all(c.hint for c in checks if not c.ok)
     assert "添加供应商" in render_report(checks)
@@ -81,7 +76,7 @@ def test_empty_config_fails_with_actionable_hints(tmp_path):
 
 def test_configured_root_passes_l1(tmp_path):
     _write_root(tmp_path)
-    checks = check_config(tmp_path, keyring=KeyringStore(backend=FakeKeyring()))
+    checks = check_config(tmp_path, secrets=_vault())
     failed = [c for c in checks if not c.ok]
     assert not failed, render_report(checks)
     assert "对话管线有效" in render_report(checks)
@@ -89,7 +84,7 @@ def test_configured_root_passes_l1(tmp_path):
 
 def test_missing_key_and_whitelist_are_distinguished(tmp_path):
     _write_root(tmp_path, whitelist=False)
-    checks = check_config(tmp_path, keyring=KeyringStore(backend=FakeKeyring(stored=False)))
+    checks = check_config(tmp_path, secrets=_vault(stored=False))
     names = {c.name: c for c in checks}
     assert names["供应商「X」 · 凭据"].ok is False
     assert names["供应商「X」 · 凭据"].detail == "未设置"
@@ -98,7 +93,7 @@ def test_missing_key_and_whitelist_are_distinguished(tmp_path):
 
 def test_unbound_slot_is_reported_not_hidden(tmp_path):
     _write_root(tmp_path, bind_main=False)
-    checks = check_config(tmp_path, keyring=KeyringStore(backend=FakeKeyring()))
+    checks = check_config(tmp_path, secrets=_vault())
     slot = next(c for c in checks if c.name == "全局默认（main）")
     assert slot.ok is False and "未绑定" in slot.detail
 
@@ -110,7 +105,7 @@ def test_slot_pointing_to_unknown_model_is_flagged(tmp_path):
     models.slots["main"] = "ghost-model"  # 引用完整性破坏
     store.save("models", models)
 
-    checks = check_config(tmp_path, keyring=KeyringStore(backend=FakeKeyring()))
+    checks = check_config(tmp_path, secrets=_vault())
     slot = next(c for c in checks if c.name == "全局默认（main）")
     assert slot.ok is False and "不在任何供应商" in slot.detail
 

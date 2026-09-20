@@ -23,6 +23,9 @@ from core.bus.sink import EventSink
 from core.gateway.provider import ModelGateway
 from core.modules.supervisor import ModuleSupervisor
 from core.registry.registry import Registry
+from core.security.dpapi import DpapiBox
+from core.security.legacy import LegacyKeyring, migrate_keyring_to_vault
+from core.security.vault import ISecretStore, Vault
 from core.store.config_store import ConfigStore
 from core.store.migrate import migrate_all
 
@@ -42,9 +45,14 @@ class AppContext:
     controller: CoreController
     worker: CoreWorker
     personas: PersonaStore
+    secrets: ISecretStore
 
 
-def bootstrap(gateway_factory: Callable[[ConfigStore], ModelGateway] | None = None) -> AppContext:
+def bootstrap(
+    gateway_factory: Callable[[ConfigStore], ModelGateway] | None = None,
+    secrets: ISecretStore | None = None,
+    legacy: LegacyKeyring | None = None,
+) -> AppContext:
     root = paths.ensure_skeleton()
     migrate_all(root)
 
@@ -57,7 +65,14 @@ def bootstrap(gateway_factory: Callable[[ConfigStore], ModelGateway] | None = No
     sink = EventSink(root)
     session_store = SessionStore(root, sink)
 
-    gateway = gateway_factory(config_store) if gateway_factory else ModelGateway(config_store)
+    # v0.0.2：机密库 + 旧密钥迁移（配置装载后、网关构造前；失败不阻断启动）。
+    secret_store = secrets or Vault(root, DpapiBox(), audit=sink.append_audit)
+    migrate_keyring_to_vault(config_store, secret_store, legacy, audit=sink.append_audit)
+
+    if gateway_factory:
+        gateway = gateway_factory(config_store)
+    else:
+        gateway = ModelGateway(config_store, secret_store)
     supervisor = ModuleSupervisor()
     registry = Registry()
     personas = PersonaStore(root / "personas")
@@ -81,4 +96,5 @@ def bootstrap(gateway_factory: Callable[[ConfigStore], ModelGateway] | None = No
         controller=controller,
         worker=worker,
         personas=personas,
+        secrets=secret_store,
     )

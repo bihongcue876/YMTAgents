@@ -2,7 +2,7 @@
 
 对应 `ymtdata/config/` 下的四个 JSON 文件，均带 `schema_version: 1`。
 与 spec 的「下发视图」类型（ProviderSpec 等）不同：本模块是**落盘形态**，
-供应商携带 `key_ref`（引用系统凭据管理器），永不携带明文密钥。
+供应商携带 `key_ref`（引用本地加密库），永不携带明文密钥。
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class ProviderConfig(BaseModel):
     id: str  # prv_<uuid7>
     name: str
     base_url: str
-    key_ref: str | None = None  # keyring://ymt/<prv_id>；None = 未设置密钥
+    key_ref: str | None = None  # vault://<prv_id>；None = 未设置密钥（v0.0.2：本地加密机密库）
     local: bool = False  # 本地模型服务：免密钥（spec rev10 §1）
     models: list[ModelConfig] = Field(default_factory=list)
 

@@ -27,9 +27,10 @@ from core.gateway.errors import (
     GatewayProtocolError,
     GatewayTimeout,
 )
-from core.gateway.keyring_store import KeyringStore
 from core.gateway.meter import Meter
 from core.gateway.whitelist import Whitelist, domain_of
+from core.security.dpapi import DpapiBox
+from core.security.vault import ISecretStore, Vault, key_ref_for, secret_name
 from core.store.config_store import ConfigStore
 
 log = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class IModelGateway(ABC):
 
     @abstractmethod
     def upsert_provider(self, spec: ProviderSpec, api_key: str | None) -> ProviderSpec:
-        """新增或更新供应商；api_key 非空时写入凭据管理器（None = 保持不变）。"""
+        """新增或更新供应商；api_key 非空时写入本地加密机密库（None = 保持不变）。"""
 
     @abstractmethod
     def delete_provider(self, provider_id: str) -> bool:
@@ -162,12 +163,12 @@ class ModelGateway(IModelGateway):
     def __init__(
         self,
         store: ConfigStore,
-        keyring: KeyringStore | None = None,
+        secrets: ISecretStore | None = None,
         client_factory: Callable[[str, str], object] | None = None,
         silent_timeout: float = SILENT_TIMEOUT_S,
     ) -> None:
         self.store = store
-        self.keyring = keyring or KeyringStore()
+        self.secrets = secrets or Vault(store.root, DpapiBox())
         self.meter = Meter()
         self.silent_timeout = silent_timeout
         self._client_factory = client_factory or self._default_client
@@ -233,7 +234,7 @@ class ModelGateway(IModelGateway):
                 )
                 for m in pc.models
             ],
-            key_status=self.keyring.status(pc.id) if not pc.local else "missing",
+            key_status=self.secrets.status(secret_name(pc.id)) if not pc.local else "missing",
             local=pc.local,
         )
 
@@ -245,7 +246,7 @@ class ModelGateway(IModelGateway):
         """
         if pc.local:
             return LOCAL_API_KEY
-        return self.keyring.get_key(pc.id)
+        return self.secrets.get(secret_name(pc.id))
 
     def list_providers(self) -> list[ProviderSpec]:
         return [self._to_spec(p) for p in self.models.providers]
@@ -403,8 +404,8 @@ class ModelGateway(IModelGateway):
                 )
             )
         if api_key and not pc.local:
-            self.keyring.set_key(spec.id, api_key)
-            pc.key_ref = f"keyring://{self.keyring.service}/{spec.id}"
+            self.secrets.set(secret_name(spec.id), api_key)
+            pc.key_ref = key_ref_for(spec.id)
         self.store.save("models", self.models)
 
         host = domain_of(spec.base_url)
@@ -421,7 +422,7 @@ class ModelGateway(IModelGateway):
         for slot, model_id in list(self.models.slots.items()):
             if model_id and self._find_provider_for_model(model_id) is None:
                 self.models.slots[slot] = None  # type: ignore[index]
-        self.keyring.delete_key(provider_id)
+        self.secrets.delete(secret_name(provider_id))
         self.store.save("models", self.models)
         return True
 

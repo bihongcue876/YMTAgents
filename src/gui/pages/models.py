@@ -141,9 +141,9 @@ class ProviderDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         # 密钥可解释性（rev17）：回答「密码存哪了、为什么看不到」——
-        # 密钥只入系统凭据管理器（OS 级加密），界面永不回显
+        # 密钥只入本地加密库（设备绑定），界面永不回显
         self._key_note = QLabel(
-            "密钥保存到系统凭据管理器（操作系统级加密），界面不回显；留空表示保持不变。"
+            "密钥保存到本地加密库（设备绑定，界面不回显）；留空表示保持不变。"
         )
         self._key_note.setObjectName("mutedNote")
         self._key_note.setWordWrap(True)

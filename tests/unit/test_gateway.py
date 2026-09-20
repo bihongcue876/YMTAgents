@@ -12,26 +12,17 @@ from core.gateway.errors import (
     GatewayProtocolError,
     GatewayTimeout,
 )
-from core.gateway.keyring_store import KeyringStore
 from core.gateway.provider import ModelGateway
 from core.gateway.whitelist import Whitelist, domain_of
 from core.store.config_store import ConfigStore
 from shared.envelope import ModelSpec, ProviderSpec
 from shared.schema import ModelConfig, ModelsConfig, ProviderConfig, SettingsConfig
+from tests.mocks.secrets import FakeVault
 
 
-class FakeKeyring:
-    def __init__(self) -> None:
-        self.data: dict[tuple[str, str], str] = {}
-
-    def get_password(self, service: str, user: str):
-        return self.data.get((service, user))
-
-    def set_password(self, service: str, user: str, password: str) -> None:
-        self.data[(service, user)] = password
-
-    def delete_password(self, service: str, user: str) -> None:
-        self.data.pop((service, user), None)
+def make_vault(provider_id: str = "prv_1", key: str = "sk-test") -> FakeVault:
+    """构建只含一条 api_key 的内存机密库（v0.0.2 起密钥存本地加密库）。"""
+    return FakeVault({f"api_key/{provider_id}": key})
 
 
 class _Usage:
@@ -92,7 +83,7 @@ def seed_store(store: ConfigStore, base_url="https://api.test.com", whitelist=Tr
             id="prv_1",
             name="P",
             base_url=base_url,
-            key_ref="keyring://ymt/prv_1",
+            key_ref="vault://prv_1",
             models=[ModelConfig(id="m1", ctx_window=1000)],
         )
     )
@@ -108,10 +99,8 @@ def make_gateway(tmp_path, chunks, key="sk-test", **kwargs):
     store = ConfigStore(tmp_path)
     store.ensure_defaults()
     seed_store(store, **kwargs)
-    backend = FakeKeyring()
-    if key:
-        backend.set_password("ymt", "prv_1", key)
-    gateway = ModelGateway(store, keyring=KeyringStore(backend=backend), client_factory=make_factory(chunks))
+    vault = make_vault(key=key) if key else FakeVault()
+    gateway = ModelGateway(store, secrets=vault, client_factory=make_factory(chunks))
     return gateway
 
 
@@ -151,9 +140,7 @@ def test_stream_chat_missing_key(tmp_path):
 def test_upsert_provider_adds_whitelist(tmp_path):
     store = ConfigStore(tmp_path)
     store.ensure_defaults()
-    gateway = ModelGateway(
-        store, keyring=KeyringStore(backend=FakeKeyring()), client_factory=make_factory([])
-    )
+    gateway = ModelGateway(store, secrets=FakeVault(), client_factory=make_factory([]))
     spec = ProviderSpec(
         id="prv_x",
         name="X",
@@ -207,7 +194,7 @@ def _seeded_insecure_gateway(tmp_path, base_url: str) -> ModelGateway:
             id="prv_1",
             name="P",
             base_url=base_url,
-            key_ref="keyring://ymt/prv_1",
+            key_ref="vault://prv_1",
             models=[ModelConfig(id="m1", ctx_window=1000)],
         )
     )
@@ -216,10 +203,9 @@ def _seeded_insecure_gateway(tmp_path, base_url: str) -> ModelGateway:
     settings = SettingsConfig()
     settings.network.whitelist = ["api.test.com"]
     store.save("settings", settings)
-    backend = FakeKeyring()
-    backend.set_password("ymt", "prv_1", "sk-test")
+    backend = make_vault()
     return ModelGateway(
-        store, keyring=KeyringStore(backend=backend), client_factory=make_factory([])
+        store, secrets=backend, client_factory=make_factory([])
     )
 
 
@@ -250,9 +236,7 @@ def test_list_remote_models_reports_insecure_transport(tmp_path):
 def _bare_gateway(tmp_path) -> ModelGateway:
     store = ConfigStore(tmp_path)
     store.ensure_defaults()
-    return ModelGateway(
-        store, keyring=KeyringStore(backend=FakeKeyring()), client_factory=make_factory([])
-    )
+    return ModelGateway(store, secrets=FakeVault(), client_factory=make_factory([]))
 
 
 def test_set_slot_persists_to_models_json(tmp_path):
@@ -363,11 +347,10 @@ def make_gateway_with_client(tmp_path, client, silent_timeout: float | None = No
     store = ConfigStore(tmp_path)
     store.ensure_defaults()
     seed_store(store)
-    backend = FakeKeyring()
-    backend.set_password("ymt", "prv_1", "sk-test")
+    backend = make_vault()
     kw = {} if silent_timeout is None else {"silent_timeout": silent_timeout}
     return ModelGateway(
-        store, keyring=KeyringStore(backend=backend), client_factory=lambda _b, _k: client, **kw
+        store, secrets=backend, client_factory=lambda _b, _k: client, **kw
     )
 
 
@@ -550,7 +533,7 @@ def make_local_gateway(tmp_path, client, backend=None) -> ModelGateway:
     seed_local_store(store)
     return ModelGateway(
         store,
-        keyring=KeyringStore(backend=backend or FakeKeyring()),
+        secrets=backend or FakeVault(),
         client_factory=lambda _b, _k: client,
     )
 
@@ -575,12 +558,12 @@ def test_local_provider_works_without_api_key(tmp_path):
 
 
 def test_upsert_local_provider_does_not_store_key(tmp_path):
-    """本地类型即便被塞了密钥也不写凭据管理器；`local` 标记随配置落盘。"""
-    backend = FakeKeyring()
+    """本地类型即便被塞了密钥也不写机密库；`local` 标记随配置落盘。"""
+    backend = FakeVault()
     store = ConfigStore(tmp_path)
     store.ensure_defaults()
     gateway = ModelGateway(
-        store, keyring=KeyringStore(backend=backend), client_factory=make_factory([])
+        store, secrets=backend, client_factory=make_factory([])
     )
     gateway.upsert_provider(
         ProviderSpec(
@@ -630,10 +613,8 @@ class _RejectParamClient:
 
 
 def _gateway_on_existing_store(tmp_path, client) -> ModelGateway:
-    backend = FakeKeyring()
-    backend.set_password("ymt", "prv_1", "sk-test")
     return ModelGateway(
-        ConfigStore(tmp_path), keyring=KeyringStore(backend=backend), client_factory=lambda _b, _k: client
+        ConfigStore(tmp_path), secrets=make_vault(), client_factory=lambda _b, _k: client
     )
 
 

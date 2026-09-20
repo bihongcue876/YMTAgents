@@ -18,9 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from core.gateway.keyring_store import KeyringStore
 from core.gateway.provider import ModelGateway
 from core.gateway.whitelist import Whitelist, domain_of
+from core.security.dpapi import DpapiBox
+from core.security.vault import ISecretStore, Vault, secret_name
 from core.store.config_store import ConfigStore
 from shared.errors import ERROR_TEXT
 
@@ -29,7 +30,7 @@ SELFTEST_ENV = "YMT_SELFTEST"
 # (ok, latency_ms, error_code)
 Probe = Callable[[str, str], tuple]
 
-_STATUS_TEXT = {"stored": "已存储", "missing": "未设置", "error": "凭据管理器不可用"}
+_STATUS_TEXT = {"stored": "已存储", "missing": "未设置", "error": "加密库不可用"}
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def _conn_hint(code: str | None) -> str:
     if code == "whitelist_blocked":
         return "在网络白名单中加入该供应商域名"
     if code in ("auth_error", "key_missing", "key_error"):
-        return "重新输入 API Key（密钥只入系统凭据管理器）"
+        return "重新输入 API Key（密钥只存本地加密库，不落明文）"
     if code == "protocol_error":
         return "核对 base_url 是否为 OpenAI 兼容端点"
     return "核对 base_url、API Key 与网络出口"
@@ -86,11 +87,11 @@ def _owner_of(models, model_id: str) -> tuple[str | None, str | None]:
 # ---------------------------------------------------------------------------
 # L1：离线配置体检（不联网、零成本）
 # ---------------------------------------------------------------------------
-def check_config(root: Path | str, keyring: KeyringStore | None = None) -> list[Check]:
+def check_config(root: Path | str, secrets: ISecretStore | None = None) -> list[Check]:
     """只读现有配置做一致性检查。"""
     root = Path(root)
     store = ConfigStore(root)
-    keyring = keyring or KeyringStore()
+    secrets = secrets or Vault(root, DpapiBox())
     models = store.load("models")
     settings = store.load("settings")
     whitelist = Whitelist(settings.network.whitelist)
@@ -119,13 +120,13 @@ def check_config(root: Path | str, keyring: KeyringStore | None = None) -> list[
                 "在供应商编辑对话框中登记模型 ID",
             )
         )
-        status = keyring.status(p.id)
+        status = secrets.status(secret_name(p.id))
         checks.append(
             Check(
                 f"{label} · 凭据",
                 status == "stored",
                 _STATUS_TEXT.get(status, status),
-                "重新输入 API Key（密钥只入系统凭据管理器，不落明文）",
+                "重新输入 API Key（密钥只存本地加密库，不落明文）",
             )
         )
         checks.append(

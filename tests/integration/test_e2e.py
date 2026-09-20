@@ -6,7 +6,6 @@ import json
 
 from app import bootstrap as bootstrap_mod
 from app import paths
-from core.gateway.keyring_store import KeyringStore
 from core.gateway.provider import ModelGateway
 from core.gateway.whitelist import Whitelist
 from shared.envelope import (
@@ -23,25 +22,12 @@ from shared.envelope import (
     UnarchiveSession,
 )
 from tests.mocks.gateway import MockGateway
+from tests.mocks.secrets import FakeVault
 
 
 # ---------------------------------------------------------------------------
 # 测试替身
 # ---------------------------------------------------------------------------
-class FakeKeyring:
-    def __init__(self) -> None:
-        self.data: dict = {}
-
-    def get_password(self, service, user):
-        return self.data.get((service, user))
-
-    def set_password(self, service, user, password):
-        self.data[(service, user)] = password
-
-    def delete_password(self, service, user):
-        self.data.pop((service, user), None)
-
-
 class _Usage:
     def __init__(self):
         self.prompt_tokens = 1
@@ -86,10 +72,10 @@ def _collect(ctx):
     return events
 
 
-def _real_gateway_factory(keyring, chunks_client=True):
+def _real_gateway_factory(secrets, chunks_client=True):
     return lambda store: ModelGateway(
         store,
-        keyring=KeyringStore(backend=keyring),
+        secrets=secrets,
         client_factory=lambda base_url, api_key: _Client(),
     )
 
@@ -102,7 +88,7 @@ def _spec(model_id="m1", base_url="https://api.test.com/v1"):
 # A1 首启零配置
 # ---------------------------------------------------------------------------
 def test_a1_empty_state(tmp_path, monkeypatch, qapp):
-    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(FakeKeyring()))
+    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(FakeVault()))
     events = _collect(ctx)
     try:
         ctx.controller.push_initial_state()
@@ -115,17 +101,17 @@ def test_a1_empty_state(tmp_path, monkeypatch, qapp):
 
 
 # ---------------------------------------------------------------------------
-# A2 添加供应商（密钥入 keyring / models.json / 白名单）
+# A2 添加供应商（密钥入加密库 / models.json / 白名单）
 # ---------------------------------------------------------------------------
 def test_a2_upsert_provider(tmp_path, monkeypatch, qapp):
-    keyring = FakeKeyring()
-    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(keyring))
+    vault = FakeVault()
+    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(vault))
     events = _collect(ctx)
     try:
         ctx.controller.handle(ProviderUpsert(provider=_spec(), api_key="sk-abc"))
         provider_list = [e for e in events if e.type == "provider.list"][-1]
         assert provider_list.providers[0].key_status == "stored"
-        assert keyring.data[("ymt", "prv_1")] == "sk-abc"
+        assert vault.data["api_key/prv_1"] == "sk-abc"
         models = json.loads((ctx.root / "config" / "models.json").read_text(encoding="utf-8"))
         assert models["providers"][0]["id"] == "prv_1"
         settings = json.loads((ctx.root / "config" / "settings.json").read_text(encoding="utf-8"))
@@ -138,8 +124,8 @@ def test_a2_upsert_provider(tmp_path, monkeypatch, qapp):
 # A3 测试连接
 # ---------------------------------------------------------------------------
 def test_a3_test_connection(tmp_path, monkeypatch, qapp):
-    keyring = FakeKeyring()
-    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(keyring))
+    vault = FakeVault()
+    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(vault))
     events = _collect(ctx)
     try:
         ctx.controller.handle(ProviderUpsert(provider=_spec(), api_key="sk"))
@@ -252,10 +238,10 @@ def test_a8_timeout(tmp_path, monkeypatch, qapp):
 # A9 白名单拦截
 # ---------------------------------------------------------------------------
 def test_a9_whitelist_blocked(tmp_path, monkeypatch, qapp):
-    keyring = FakeKeyring()
+    vault = FakeVault()
 
     def factory(store):
-        gateway = ModelGateway(store, keyring=KeyringStore(backend=keyring), client_factory=lambda b, k: _Client())
+        gateway = ModelGateway(store, secrets=vault, client_factory=lambda b, k: _Client())
         return gateway
 
     ctx = _boot(tmp_path, monkeypatch, factory)
@@ -277,8 +263,8 @@ def test_a9_whitelist_blocked(tmp_path, monkeypatch, qapp):
 # A10 密钥缺失
 # ---------------------------------------------------------------------------
 def test_a10_key_missing(tmp_path, monkeypatch, qapp):
-    keyring = FakeKeyring()
-    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(keyring))
+    vault = FakeVault()
+    ctx = _boot(tmp_path, monkeypatch, _real_gateway_factory(vault))
     events = _collect(ctx)
     try:
         ctx.controller.handle(ProviderUpsert(provider=_spec(), api_key=None))
