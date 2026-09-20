@@ -1,6 +1,6 @@
 [project]
 name = "ymt"
-version = "0.0.0"
+version = "0.0.1"
 description = "言明通 / YMTAgents - 桌面端个人超级 Agent 工作台"
 requires-python = ">=3.14"
 dependencies = [
