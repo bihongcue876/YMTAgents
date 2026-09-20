@@ -48,6 +48,19 @@ def test_config_store_roundtrip(tmp_path):
     assert not hasattr(loaded, "context"), "rev24：全局上下文设置已移除"
 
 
+def test_config_store_memory_replaces_summary(tmp_path):
+    """v0.0.1：全局配置项由 summary 改为 memory（MemoryConfig）。"""
+    from shared.schema import CONFIG_FILES, MemoryConfig
+
+    assert "memory" in CONFIG_FILES and "summary" not in CONFIG_FILES
+    store = ConfigStore(tmp_path)
+    store.ensure_defaults()
+    assert store.path("memory").exists()
+    config = store.load("memory")
+    assert isinstance(config, MemoryConfig)
+    assert config.use is True and config.compress is True
+
+
 def test_migrate_guard(tmp_path):
     store = ConfigStore(tmp_path)
     store.ensure_defaults()

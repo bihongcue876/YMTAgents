@@ -40,9 +40,10 @@ def estimate_tokens(text: str) -> int:
 @dataclass
 class ConfigSnapshot:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    # AGENTS.md 级联记忆（docs 06 §4.1），随 system 段注入。
     memory: str = ""
-    # rev26：历史摘要（较早对话的概括，替代被覆盖的 history 段）。空串 = 未压缩。
-    summary: str = ""
+    # v0.0.1：会话记忆（较早对话的概括，替代被覆盖的 history 段）。空串 = 未建立。
+    session_memory: str = ""
     files: list[tuple[str, str]] = field(default_factory=list)
     reserve: int = 4096
     file_truncate: int = 8192
@@ -126,8 +127,8 @@ class ContextAssembler(IContextAssembler):
 
         env = _env_statement(config)
         system_text = "\n\n".join(p for p in (config.system_prompt, config.memory) if p)
-        # rev26：摘要紧随系统段之后、先于文件与历史；history 段只含 `covered_seq` 之后的事件。
-        summary_text = config.summary
+        # v0.0.1：会话记忆紧随系统段之后、先于文件与历史；history 段只含 `covered_seq` 之后的事件。
+        session_memory_text = config.session_memory
 
         # rev20：file_truncate 语义 = **每文件**上限（此前全部文件共享一个总额，
         # 挂多个文件时每个只能分到零头 —— 对超级 Agent 的文件工作流完全不够用）。
@@ -142,7 +143,7 @@ class ContextAssembler(IContextAssembler):
         headroom = (
             token_budget
             - estimate_tokens(system_text)
-            - estimate_tokens(summary_text)
+            - estimate_tokens(session_memory_text)
             - estimate_tokens(env)
         )
         if estimate_tokens(files_block) > headroom:
@@ -158,7 +159,7 @@ class ContextAssembler(IContextAssembler):
             """**输入**侧用量（不含 reserve）。"""
             return (
                 estimate_tokens(system_text)
-                + estimate_tokens(summary_text)
+                + estimate_tokens(session_memory_text)
                 + estimate_tokens(env)
                 + estimate_tokens(files_block)
                 + hist_tokens()
@@ -175,14 +176,16 @@ class ContextAssembler(IContextAssembler):
                 break
             history.pop(0)
 
-        content = "\n\n".join(p for p in (system_text, summary_text, files_block, env) if p)
+        content = "\n\n".join(
+            p for p in (system_text, session_memory_text, files_block, env) if p
+        )
         messages: list[dict] = [{"role": "system", "content": content}]
         messages.extend(history)
 
         usage = ContextUsage(
             segments={
                 "system": estimate_tokens(system_text),
-                "summary": estimate_tokens(summary_text),
+                "memory": estimate_tokens(session_memory_text),
                 "env": estimate_tokens(env),
                 "files": estimate_tokens(files_block),
                 "retrieve": 0,

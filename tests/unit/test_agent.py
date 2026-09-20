@@ -544,14 +544,15 @@ def test_final_usage_carries_timing_for_tps(tmp_path):
     assert usage["completion_tokens"] == 20
 
 
-# -- 历史摘要化 / 压缩（spec rev26） --------------------------------------------
+# -- 会话记忆 / 压缩（spec v0.0.1） --------------------------------------------
 
 
-SUMMARY_REPLY = "## 会话目标\n（无）\n## 已达成的结论与决定\n（无）"
+MEMORY_MARK = "会话记忆："
+MEMORY_REPLY = f"{MEMORY_MARK}\n- 目标：测试记忆压缩。\n- 关键事实：无。"
 
 
-class SummaryGateway(FakeGateway):
-    """可区分「摘要调用」与「普通回合」：前者 system 含摘要提示词。"""
+class MemoryGateway(FakeGateway):
+    """可区分「记忆压缩调用」与「普通回合」：前者 system 含记忆提示词。"""
 
     def __init__(self, **kwargs):
         super().__init__(chunks=("回复" * 200,), **kwargs)
@@ -570,14 +571,14 @@ class SummaryGateway(FakeGateway):
     ):
         self.last_messages = [dict(m) for m in messages]
         self.last_system = messages[0]["content"] if messages else ""
-        text = SUMMARY_REPLY if "压缩器" in self.last_system else "回复" * 200
+        text = MEMORY_REPLY if "记忆整理器" in self.last_system else "回复" * 200
         on_delta(text)
         return Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
 
-def test_plan_summary_keeps_tail_by_token_budget():
+def test_plan_memory_keeps_tail_by_token_budget():
     """选择面按 token 预算保留近段（不是固定最近 N 轮）。"""
-    from core.agent.summarize import plan_summary
+    from core.agent.memory import plan_memory
 
     events = []
     for i in range(6):
@@ -585,60 +586,108 @@ def test_plan_summary_keeps_tail_by_token_budget():
         events.append(
             {"seq": i * 2 + 1, "type": "msg.assistant.final", "payload": {"content": "答" * 300}}
         )
-    plan = plan_summary(events, "", covered_seq=-1, keep_budget=100)
+    plan = plan_memory(events, "", covered_seq=-1, keep_budget=100)
     assert plan is not None
     assert 0 <= plan.covered_seq < 11, "更早的消息被概括"
     assert plan.transcript, "转录非空"
-    # 最后一条事件（seq=11）作为近段保留，不进入摘要
+    # 最后一条事件（seq=11）作为近段保留，不进入记忆
     assert plan.covered_seq < 11
 
 
-def test_summarize_writes_file_and_replaces_history(tmp_path):
+def test_plan_memory_force_keeps_only_last_turn():
+    """强求压缩（rev35）：不按预算保留，只留最后 1 轮问答；不足两轮则无内容。"""
+    from core.agent.memory import plan_memory
+
+    events = []
+    for i in range(3):
+        events.append({"seq": i * 2, "type": "msg.user", "payload": {"text": f"问{i}"}})
+        events.append(
+            {"seq": i * 2 + 1, "type": "msg.assistant.final", "payload": {"content": f"答{i}"}}
+        )
+
+    # 预算极大：常规压缩无内容可压（整段都在尾部保留内）
+    assert plan_memory(events, "", covered_seq=-1, keep_budget=10**9) is None
+
+    plan = plan_memory(events, "", covered_seq=-1, keep_budget=10**9, force=True)
+    assert plan is not None
+    assert plan.covered_seq == 3, "只概括到倒数第 2 条（保留最后 1 轮）"
+    assert "问0" in plan.transcript and "问2" not in plan.transcript
+
+    # 仅 1 轮问答：强求也无内容可概括（保留最后那一轮）
+    one_turn = events[:2]
+    assert plan_memory(one_turn, "", covered_seq=-1, keep_budget=10**9, force=True) is None
+
+
+def test_compress_memory_writes_file_and_replaces_history(tmp_path):
     store = make_store(tmp_path)
     meta = store.create(None, None)
-    gw = SummaryGateway(ctx_window=8000)
+    gw = MemoryGateway(ctx_window=8000)
     emitted: list = []
     loop = AgentLoop(store, gw, emitted.append, tmp_path)
     for i in range(6):
         loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
 
-    loop.summarize(meta.id)
+    loop.compress_memory(meta.id)
 
-    results = [e for e in emitted if e.type == "session.summary.result"]
+    results = [e for e in emitted if e.type == "session.memory.result"]
     assert results and results[-1].ok, results[-1].error if results else "no result"
-    summary = store.read_summary(meta.id)
-    assert summary is not None and summary.revision == 1 and summary.covered_seq >= 0
-    assert "## 会话目标" in store.read_summary_text(meta.id)
+    assert results[-1].recommended_max > 0, "推荐范围随结果下发"
+    memory = store.read_memory(meta.id)
+    assert memory is not None and memory.revision == 1 and memory.covered_seq >= 0
+    assert MEMORY_MARK in store.read_memory_text(meta.id)
 
     before = len([e for e in store.replay(meta.id) if e["type"] == "msg.user"])
     loop.run_turn(meta.id, SendMessage(text="追加一问"))
-    # 摘要进入 system 段，历史段只保留 covered_seq 之后的消息
-    assert "## 会话目标" in gw.last_system
+    # 记忆进入 system 段，历史段只保留 covered_seq 之后的消息
+    assert MEMORY_MARK in gw.last_system
     history_msgs = [m for m in gw.last_messages if m["role"] != "system"]
     assert len(history_msgs) < before * 2
 
 
-def test_summarize_without_content_reports_error(tmp_path):
+def test_compress_memory_force_builds_even_short_chat(tmp_path):
+    """强求压缩（rev35 用户反馈修复）：短对话常规无内容可压，按钮强求仍能建立记忆。"""
     store = make_store(tmp_path)
     meta = store.create(None, None)
     emitted: list = []
-    loop = AgentLoop(store, SummaryGateway(), emitted.append, tmp_path)
-    loop.summarize(meta.id)
-    results = [e for e in emitted if e.type == "session.summary.result"]
+    loop = AgentLoop(store, MemoryGateway(ctx_window=8000), emitted.append, tmp_path)
+    for i in range(2):
+        loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
+
+    loop.compress_memory(meta.id)  # 常规：近段整段在保留预算内 → 无内容
+    results = [e for e in emitted if e.type == "session.memory.result"]
+    assert results and not results[-1].ok, results[-1].error if results else "no result"
+    assert store.read_memory(meta.id) is None
+
+    emitted.clear()
+    loop.compress_memory(meta.id, force=True)  # 强求：只留最后 1 轮
+    results = [e for e in emitted if e.type == "session.memory.result"]
+    assert results and results[-1].ok, results[-1].error if results else "no result"
+    memory = store.read_memory(meta.id)
+    assert memory is not None and memory.revision == 1
+    assert MEMORY_MARK in store.read_memory_text(meta.id)
+
+
+def test_compress_memory_without_content_reports_error(tmp_path):
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    emitted: list = []
+    loop = AgentLoop(store, MemoryGateway(), emitted.append, tmp_path)
+    loop.compress_memory(meta.id)
+    results = [e for e in emitted if e.type == "session.memory.result"]
     assert results and not results[-1].ok
     assert "无可压缩" in (results[-1].error or "")
-    assert store.read_summary(meta.id) is None
+    assert store.read_memory(meta.id) is None
 
 
-def test_summarize_gateway_failure_keeps_state(tmp_path):
+def test_compress_memory_gateway_failure_keeps_state(tmp_path):
     from core.gateway.errors import GatewayError
 
     store = make_store(tmp_path)
     meta = store.create(None, None)
 
-    class BrokenGateway(SummaryGateway):
+    class BrokenGateway(MemoryGateway):
         def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None):
-            if "压缩器" in (messages[0]["content"] if messages else ""):
+            if "记忆整理器" in (messages[0]["content"] if messages else ""):
                 raise GatewayError("上游拒绝", code="protocol_error")
             return super().stream_chat(
                 session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning, params
@@ -650,23 +699,23 @@ def test_summarize_gateway_failure_keeps_state(tmp_path):
         loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
     emitted: list = []
     loop.emit = emitted.append
-    loop.summarize(meta.id)
-    results = [e for e in emitted if e.type == "session.summary.result"]
+    loop.compress_memory(meta.id)
+    results = [e for e in emitted if e.type == "session.memory.result"]
     assert results and not results[-1].ok
-    assert store.read_summary(meta.id) is None, "失败不得写入摘要"
+    assert store.read_memory(meta.id) is None, "失败不得写入记忆"
 
 
-def test_summarize_failure_message_is_redacted(tmp_path):
-    """rev27：`session.summary.result.error` 是回显通道，上游异常文本须过统一脱敏。"""
+def test_compress_memory_failure_message_is_redacted(tmp_path):
+    """`session.memory.result.error` 是回显通道，上游异常文本须过统一脱敏。"""
     from core.gateway.errors import GatewayError
     from shared.redact import MASK
 
     store = make_store(tmp_path)
     meta = store.create(None, None)
 
-    class KeyLeakGateway(SummaryGateway):
+    class KeyLeakGateway(MemoryGateway):
         def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None):
-            if "压缩器" in (messages[0]["content"] if messages else ""):
+            if "记忆整理器" in (messages[0]["content"] if messages else ""):
                 raise GatewayError("认证失败 api_key=sk-deadbeefcafe1234", code="auth_error")
             return super().stream_chat(
                 session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning, params
@@ -678,11 +727,128 @@ def test_summarize_failure_message_is_redacted(tmp_path):
         loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
     emitted: list = []
     loop.emit = emitted.append
-    loop.summarize(meta.id)
-    results = [e for e in emitted if e.type == "session.summary.result"]
+    loop.compress_memory(meta.id)
+    results = [e for e in emitted if e.type == "session.memory.result"]
     assert results and not results[-1].ok
     assert "sk-deadbeefcafe1234" not in (results[-1].error or "")
     assert MASK in (results[-1].error or "")
+
+
+def test_compress_disabled_reports_error_and_writes_nothing(tmp_path):
+    """会话级「压缩记忆」关闭时：按钮触发也尊重该选择，ok=False 且不写文件。"""
+    from shared.envelope import SessionParams
+
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    store.update(
+        meta.id,
+        title="T",
+        note="",
+        max_context=None,
+        params=SessionParams(),
+        memory_use=True,
+        memory_compress=False,
+        memory_threshold=None,
+    )
+    emitted: list = []
+    loop = AgentLoop(store, MemoryGateway(ctx_window=8000), emitted.append, tmp_path)
+    loop.compress_memory(meta.id)
+    results = [e for e in emitted if e.type == "session.memory.result"]
+    assert results and not results[-1].ok
+    assert "已关闭记忆压缩" in (results[-1].error or "")
+    assert store.read_memory(meta.id) is None
+    assert not store._memory_md_path(meta.id).exists()
+
+
+def test_compress_memory_cancel_writes_nothing(tmp_path):
+    """spec §5：summarizing 期间 CancelTurn → interrupted，不写记忆文件。"""
+    store = make_store(tmp_path)
+    meta = store.create(None, None)
+    holder: dict = {}
+
+    class CancellingGateway(MemoryGateway):
+        def stream_chat(
+            self,
+            session_id,
+            turn_seq,
+            model_id,
+            messages,
+            cancel_token,
+            on_delta,
+            on_reasoning=None,
+            params=None,
+        ):
+            if "记忆整理器" in (messages[0]["content"] if messages else ""):
+                holder["loop"].cancel(session_id)
+            return super().stream_chat(
+                session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning, params
+            )
+
+    gw = CancellingGateway(ctx_window=8000)
+    emitted: list = []
+    loop = AgentLoop(store, gw, emitted.append, tmp_path)
+    holder["loop"] = loop
+    for i in range(6):
+        loop.run_turn(meta.id, SendMessage(text=f"问题{i}"))
+
+    emitted.clear()
+    loop.compress_memory(meta.id)
+
+    results = [e for e in emitted if e.type == "session.memory.result"]
+    assert results and not results[-1].ok
+    assert "取消" in (results[-1].error or "")
+    assert store.read_memory(meta.id) is None, "取消不得写入记忆"
+    assert not store._memory_md_path(meta.id).exists()
+    assert "interrupted" in [e.state for e in emitted if e.type == "turn.status"]
+
+
+def test_auto_compress_gated_by_switches_and_threshold(tmp_path):
+    """M5：仅 `use & compress & auto` 且输入侧占用 ≥ 阈值时，回合结束后自动压缩一次。"""
+    from shared.envelope import ContextUsage, SessionParams
+
+    def run_case(tag: str, *, auto: bool, threshold: int, total: int, window: int = 1000):
+        store = make_store(tmp_path / tag)
+        meta = store.create(None, None)
+        store.update(
+            meta.id,
+            title="T",
+            note="",
+            max_context=window,
+            params=SessionParams(),
+            memory_use=True,
+            memory_compress=True,
+            memory_auto=auto,
+            memory_threshold=threshold,
+        )
+        for i in range(6):
+            store.append_event(meta.id, SendMessage(text="问题" * 200))
+            store.append_event(meta.id, AssistantFinal(content="回答" * 200))
+        gw = MemoryGateway(ctx_window=window)
+        emitted: list = []
+        loop = AgentLoop(store, gw, emitted.append, tmp_path / tag)
+        # 注入装配用量（total 含 reserve），隔离阈值判定
+        loop._usage_by_session[meta.id] = ContextUsage(
+            segments={"reserve": window // 8}, total=total, window=window
+        )
+        loop._maybe_auto_compress(meta.id, store.get_meta(meta.id))
+        results = [e for e in emitted if e.type == "session.memory.result"]
+        return store, meta, results
+
+    # auto 开 + 占用 90% ≥ 阈值 50% → 自动压缩
+    store, meta, results = run_case("on", auto=True, threshold=50, total=900)
+    assert results and results[-1].ok, results
+    assert store.read_memory(meta.id) is not None
+    assert store._memory_md_path(meta.id).exists()
+
+    # auto 关 → 不自动压缩
+    store, meta, results = run_case("off", auto=False, threshold=50, total=900)
+    assert results == []
+    assert store.read_memory(meta.id) is None
+
+    # 占用 40% < 阈值 50% → 不自动压缩
+    store, meta, results = run_case("low", auto=True, threshold=50, total=400)
+    assert results == []
+    assert store.read_memory(meta.id) is None
 
 
 def test_branch_revert_and_switch(tmp_path):
@@ -751,41 +917,112 @@ def test_branch_limit_and_unknown(tmp_path):
         store.revert_to(sid, 999_999)
 
 
-def test_per_branch_summary_isolated_and_copied(tmp_path):
-    """rev31：摘要按分支隔离；分叉时父摘要快照给子分支，互不覆盖。"""
+def test_per_branch_memory_isolated_and_copied(tmp_path):
+    """rev31：记忆按分支隔离；分叉时父记忆快照给子分支，互不覆盖。"""
     store = make_store(tmp_path)
-    sid = store.create("摘要", None).id
+    sid = store.create("记忆", None).id
     store.append_event(sid, SendMessage(text="q0"))
     q0 = [e for e in store.replay(sid) if e.get("type") == "msg.user"][0]["seq"]
-    store.write_summary(sid, covered_seq=q0, model="m", tokens_est=5, text="## 目标\nA")
-    assert store.read_summary_text(sid).startswith("## 目标")
+    store.write_memory(sid, covered_seq=q0, model="m", tokens_est=5, text="记忆A")
+    assert store.read_memory_text(sid) == "记忆A"
 
     store.append_event(sid, SendMessage(text="q1"))
     q1 = [e for e in store.replay(sid) if e.get("type") == "msg.user"][1]["seq"]
-    store.create_branch(sid, q1)  # 父摘要 covered_seq=q0 <= q1 → 继承
-    assert store.read_summary_text(sid).startswith("## 目标")
+    store.create_branch(sid, q1)  # 父记忆 covered_seq=q0 <= q1 → 继承
+    assert store.read_memory_text(sid) == "记忆A"
 
-    store.write_summary(sid, covered_seq=q1, model="m", tokens_est=6, text="## 目标\nB")
+    store.write_memory(sid, covered_seq=q1, model="m", tokens_est=6, text="记忆B")
     store.switch_branch(sid, "br0")
-    assert store.read_summary_text(sid).startswith("## 目标\nA")
+    assert store.read_memory_text(sid) == "记忆A"
+
+
+def test_memory_history_after_two_compressions(tmp_path):
+    """两次写入：上一版归档到 memory/history/<rev>.md，可列可读（不注入）。"""
+    store = make_store(tmp_path)
+    sid = store.create("记忆", None).id
+    store.write_memory(sid, covered_seq=1, model="m", tokens_est=5, text="第一版")
+    first = store.read_memory_text(sid)
+    memory = store.write_memory(sid, covered_seq=3, model="m", tokens_est=6, text="第二版")
+    assert memory.revision == 2
+    assert store.read_memory_text(sid) == "第二版"
+    assert store.list_memory_history(sid) == [1]
+    assert store.read_memory_history(sid, 1) == first
+    assert store.read_memory_history(sid, 99) == ""  # 不存在的版本 → 空串
+
+
+def test_legacy_summary_read_as_memory(tmp_path):
+    """旧 rev26 布局（`sessions/<id>/summary.*`）仍可读作记忆（br0 回退）。"""
+    import json
+
+    from shared.schema import SessionMemory
+
+    store = make_store(tmp_path)
+    sid = store.create("旧", None).id
+    session_dir = store.session_dir(sid)
+    legacy = SessionMemory(revision=3, covered_seq=7, model="old", tokens_est=9)
+    (session_dir / "summary.json").write_text(
+        json.dumps(legacy.model_dump(mode="json")), encoding="utf-8"
+    )
+    (session_dir / "summary.md").write_text("旧版记忆正文", encoding="utf-8")
+    memory = store.read_memory(sid)
+    assert memory is not None and memory.revision == 3 and memory.covered_seq == 7
+    assert store.read_memory_text(sid) == "旧版记忆正文"
 
 
 def test_effective_threshold_user_value_clamped():
-    from shared.envelope import SessionMeta
-    from shared.schema import SummaryConfig
     from datetime import datetime, timezone
 
-    from core.agent.summarize import effective_threshold
+    from shared.envelope import SessionMeta
+    from shared.schema import MemoryConfig
+
+    from core.agent.memory import effective_threshold
 
     now = datetime.now(timezone.utc)
-    config = SummaryConfig(threshold=90)
+    config = MemoryConfig(threshold=90)
     plain = SessionMeta(id="s", title="t", created_at=now, updated_at=now)
     assert effective_threshold(plain, config) == 90  # 未覆盖 → 全局默认
     overridden = SessionMeta(
-        id="s", title="t", created_at=now, updated_at=now, summary_threshold=75
+        id="s", title="t", created_at=now, updated_at=now, memory_threshold=75
     )
     assert effective_threshold(overridden, config) == 75  # 用户指定优先
     clamped = SessionMeta(
-        id="s", title="t", created_at=now, updated_at=now, summary_threshold=10
+        id="s", title="t", created_at=now, updated_at=now, memory_threshold=10
     )
     assert effective_threshold(clamped, config) == 50  # 夹到合法区间
+
+
+def test_effective_switches_session_override_wins():
+    from datetime import datetime, timezone
+
+    from shared.envelope import SessionMeta
+    from shared.schema import MemoryConfig
+
+    from core.agent.memory import effective_switches
+
+    now = datetime.now(timezone.utc)
+    config = MemoryConfig(use=True, compress=True, auto=False)
+    plain = SessionMeta(id="s", title="t", created_at=now, updated_at=now)
+    assert effective_switches(plain, config) == (True, True, False)  # None → 跟随全局
+    off = SessionMeta(
+        id="s", title="t", created_at=now, updated_at=now, memory_use=False, memory_compress=False
+    )
+    assert effective_switches(off, config) == (False, False, False)  # 会话覆盖优先
+    mixed = SessionMeta(
+        id="s", title="t", created_at=now, updated_at=now, memory_use=False, memory_compress=None
+    )
+    assert effective_switches(mixed, config) == (False, True, False)  # 逐项覆盖
+    auto_on = SessionMeta(
+        id="s", title="t", created_at=now, updated_at=now, memory_auto=True
+    )
+    assert effective_switches(auto_on, config) == (True, True, True)  # 会话开自动
+
+
+def test_recommended_range_by_target_ratio():
+    """窗口 <=0 → (0,0)；否则 max=窗口//target_ratio，min=max//2。"""
+    from core.agent.memory import recommended_range
+    from shared.schema import MemoryConfig
+
+    config = MemoryConfig(target_ratio=16)
+    assert recommended_range(0, config) == (0, 0)
+    assert recommended_range(-5, config) == (0, 0)
+    assert recommended_range(32000, config) == (1000, 2000)

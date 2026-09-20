@@ -24,7 +24,8 @@ from shared.envelope import (
     SendMessage,
     SetSlot,
     SettingsUpdate,
-    SummarizeSession,
+    CompressMemory,
+    SessionUpdate,
     SwitchBranch,
     SwitchModel,
     TestConnection,
@@ -504,11 +505,11 @@ def test_shutdown_without_session_is_safe(tmp_path, monkeypatch, qapp):
         ctx.worker.stop()
 
 
-# -- 历史摘要化 / 压缩（spec rev26） -------------------------------------------
+# -- 会话记忆 / 压缩（spec v0.0.1） -------------------------------------------
 
 
-def test_summarize_dispatch_writes_summary_and_refreshes_detail(tmp_path, monkeypatch, qapp):
-    """`session.summarize` → `session.summary.result` + 详情回推带摘要状态。"""
+def test_compress_dispatch_writes_memory_and_refreshes_detail(tmp_path, monkeypatch, qapp):
+    """`session.compress` → `session.memory.result` + 详情回推带记忆状态。"""
     ctx = _boot(tmp_path, monkeypatch, MockGateway())
     events: list = []
     ctx.bridge.event_received.connect(events.append)
@@ -521,16 +522,29 @@ def test_summarize_dispatch_writes_summary_and_refreshes_detail(tmp_path, monkey
             ctx.session_store.append_event(sid, AssistantFinal(content="答" * 300))
         events.clear()
 
-        ctx.controller.handle(SummarizeSession(session_id=sid))
+        ctx.controller.handle(CompressMemory(session_id=sid))
 
-        results = [e for e in events if e.type == "session.summary.result"]
+        results = [e for e in events if e.type == "session.memory.result"]
         assert results and results[-1].ok, results[-1].error if results else "no result"
-        assert ctx.session_store.read_summary(sid) is not None
-        assert ctx.session_store.read_summary_text(sid).strip()
+        assert results[-1].recommended_max > 0
+        assert ctx.session_store.read_memory(sid) is not None
+        assert ctx.session_store.read_memory_text(sid).strip()
         detail = [e for e in events if e.type == "session.detail.result"][-1]
-        assert detail.summary_revision == 1
-        assert detail.summary_covered_seq >= 0
-        assert detail.summary_threshold == 90  # 未覆盖 → 全局默认
+        assert detail.memory_revision == 1
+        assert detail.memory_covered_seq >= 0
+        assert detail.memory_threshold == 90  # 未覆盖 → 全局默认
+        assert detail.memory_use is True and detail.memory_compress is True
+        assert detail.memory_auto is False  # 未覆盖 → 全局默认关
+
+        # 会话覆盖自动开关（v0.0.1 M5）：SessionUpdate → 落 meta + 回推详情
+        events.clear()
+        ctx.controller.handle(
+            SessionUpdate(session_id=sid, title="压缩", memory_auto=True, memory_threshold=75)
+        )
+        assert ctx.session_store.get_meta(sid).memory_auto is True
+        detail2 = [e for e in events if e.type == "session.detail.result"][-1]
+        assert detail2.memory_auto is True
+        assert detail2.memory_threshold == 75
     finally:
         ctx.worker.stop()
 

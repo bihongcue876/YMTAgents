@@ -16,9 +16,10 @@ from typing import Callable
 from shared.envelope import (
     AssistantDelta,
     AssistantFinal,
+    ContextUsage,
     ErrorReport,
     SendMessage,
-    SessionSummaryResult,
+    SessionMemoryResult,
     TurnStatus,
     Usage,
 )
@@ -32,10 +33,13 @@ from core.agent.context import (
     ContextAssembler,
     estimate_tokens,
 )
-from core.agent.summarize import (
-    load_summary_prompt,
-    plan_summary,
-    sanitize_summary,
+from core.agent.memory import (
+    effective_switches,
+    effective_threshold,
+    load_memory_prompt,
+    plan_memory,
+    recommended_range,
+    sanitize_memory,
 )
 from core.agent.session import SessionStore
 from core.gateway.errors import GatewayError
@@ -95,8 +99,8 @@ class IAgentLoop(ABC):
     def run_turn(self, session_id: str, user_message: SendMessage) -> None: ...
 
     @abstractmethod
-    def summarize(self, session_id: str) -> None:
-        """压缩较早历史为摘要文件（rev26）；结果经 SessionSummaryResult 事件回报。"""
+    def compress_memory(self, session_id: str, force: bool = False) -> None:
+        """压缩较早历史为记忆文件（v0.0.1）；`force` 时强求压缩；结果经 SessionMemoryResult 回报。"""
 
     @abstractmethod
     def cancel(self, session_id: str) -> None:
@@ -131,6 +135,8 @@ class AgentLoop(IAgentLoop):
         # rev23：角色内容解析（None 时回退默认提示词 —— 兼容既有测试的构造方式）
         self.personas = personas
         self._active: dict[str, CancelToken] = {}
+        # v0.0.1：最近一次装配用量（供阈值自动压缩判定「占用」）
+        self._usage_by_session: dict[str, ContextUsage] = {}
 
     def cancel(self, session_id: str) -> None:
         token = self._active.get(session_id)
@@ -182,40 +188,68 @@ class AgentLoop(IAgentLoop):
         )
         self.gateway.probe_reasoning(model_id)
 
-    # -- 压缩（rev26 · 轮 C） ----------------------------------------------
-    def summarize(self, session_id: str) -> None:
-        """把较早历史概括为 `summary.md`（一次独立模型调用）；失败不改动原状。"""
+    # -- 压缩（v0.0.1 · 记忆） ----------------------------------------------
+    def compress_memory(self, session_id: str, force: bool = False) -> None:
+        """把较早历史概括为 `memory.md`（一次独立模型调用）；失败不改动原状。
+
+        `force=True`（用户显式点按「压缩记忆」）时**强求压缩**：忽略会话的「是否压缩」开关，
+        且不按尾部保留预算，只留最后 1 轮问答、其余全部进记忆。
+        """
         try:
             meta = self.store.get_meta(session_id)
         except KeyError:
-            self._emit_summary_result(session_id, ok=False, error="会话不存在。")
+            self._emit_memory_result(session_id, ok=False, error="会话不存在。")
             return
-        config = self.config_store.load("summary")
+        config = self.config_store.load("memory")
         model_id = self._resolve_model(meta.main_model)
         if config.model_slot:
             model_id = self.gateway.get_slots().get(config.model_slot) or model_id
+        window = meta.max_context or (self._ctx_window(model_id) if model_id else 0)
+        rec_min, rec_max = recommended_range(window, config)
+        _use, compress, _auto = effective_switches(meta, config)
+        if not compress and not force:
+            # 未强求时尊重「是否压缩」开关；强求（按钮）则继续。
+            self._emit_memory_result(
+                session_id,
+                ok=False,
+                error="本会话已关闭记忆压缩。",
+                recommended_min=rec_min,
+                recommended_max=rec_max,
+            )
+            return
         turn_seq = self.store.turn_count(session_id)
         if not model_id:
-            self._emit_summary_result(
+            self._emit_memory_result(
                 session_id,
                 ok=False,
                 error="尚未绑定模型：请先在「模型配置」页为 main 槽位选择模型。",
+                recommended_min=rec_min,
+                recommended_max=rec_max,
             )
             return
 
-        previous = self.store.read_summary(session_id)
-        previous_text = self.store.read_summary_text(session_id) if previous else ""
+        previous = self.store.read_memory(session_id)
+        previous_text = self.store.read_memory_text(session_id) if previous else ""
         covered = previous.covered_seq if previous else -1
-        window = meta.max_context or self._ctx_window(model_id)
         keep_budget = (window // config.keep_ratio) if window else 8192
-        plan = plan_summary(self.store.replay(session_id), previous_text, covered, keep_budget)
+        plan = plan_memory(
+            self.store.replay(session_id), previous_text, covered, keep_budget, force=force
+        )
         if plan is None:
-            self._emit_summary_result(
-                session_id, ok=False, error="暂无可压缩的较早内容（近段按预算保留）。"
+            self._emit_memory_result(
+                session_id,
+                ok=False,
+                error=(
+                    "对话还不够建立记忆：至少需要两轮问答。"
+                    if force
+                    else "暂无可压缩的较早内容（近段按预算保留）。"
+                ),
+                recommended_min=rec_min,
+                recommended_max=rec_max,
             )
             return
 
-        system_prompt = load_summary_prompt(self.root)
+        system_prompt = load_memory_prompt(self.root)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": plan.transcript},
@@ -225,7 +259,7 @@ class AgentLoop(IAgentLoop):
             TurnStatus(
                 turn_seq=turn_seq,
                 state="summarizing",
-                note=f"正在压缩历史：调用一次摘要模型，预计约 {estimate} tokens。",
+                note=f"正在压缩记忆：调用一次模型，预计约 {estimate} tokens。",
             )
         )
         token = CancelToken()
@@ -242,42 +276,60 @@ class AgentLoop(IAgentLoop):
             )
         except GatewayError as exc:
             self._active.pop(session_id, None)
-            self._fail_summary(session_id, _code_of(exc), str(exc))
+            self._fail_memory(session_id, _code_of(exc), str(exc), rec_min, rec_max)
             return
         except Exception:  # noqa: BLE001
             log.exception("压缩异常")
             self._active.pop(session_id, None)
-            self._fail_summary(session_id, ErrorCode.INTERNAL.value, "内部错误")
+            self._fail_memory(session_id, ErrorCode.INTERNAL.value, "内部错误", rec_min, rec_max)
             return
         self._active.pop(session_id, None)
 
-        text = sanitize_summary("".join(parts).strip())
+        if token.is_cancelled():
+            # spec §5：summarizing --(CancelTurn)--> interrupted（不写文件）
+            self._emit_memory_result(
+                session_id,
+                ok=False,
+                error="压缩已取消，未写入记忆。",
+                recommended_min=rec_min,
+                recommended_max=rec_max,
+            )
+            self.emit(TurnStatus(turn_seq=turn_seq, state="interrupted"))
+            return
+
+        text = sanitize_memory("".join(parts).strip())
         if not text:
-            self._emit_summary_result(
-                session_id, ok=False, error="摘要为空：模型未返回内容，未写入。"
+            self._emit_memory_result(
+                session_id,
+                ok=False,
+                error="记忆为空：模型未返回内容，未写入。",
+                recommended_min=rec_min,
+                recommended_max=rec_max,
             )
             self.emit(TurnStatus(turn_seq=turn_seq, state="done"))
             return
-        summary = self.store.write_summary(
+        memory = self.store.write_memory(
             session_id,
             covered_seq=plan.covered_seq,
             model=model_id,
             tokens_est=estimate_tokens(text),
             text=text,
         )
-        self._emit_summary_result(
+        self._emit_memory_result(
             session_id,
             ok=True,
-            revision=summary.revision,
-            covered_seq=summary.covered_seq,
+            revision=memory.revision,
+            covered_seq=memory.covered_seq,
             tokens_before=plan.tokens_before,
-            tokens_after=summary.tokens_est,
-            summary_tokens=summary.tokens_est,
+            tokens_after=memory.tokens_est,
+            memory_tokens=memory.tokens_est,
             model=model_id,
+            recommended_min=rec_min,
+            recommended_max=rec_max,
         )
         self.emit(TurnStatus(turn_seq=turn_seq, state="done"))
 
-    def _emit_summary_result(
+    def _emit_memory_result(
         self,
         session_id: str,
         *,
@@ -286,28 +338,68 @@ class AgentLoop(IAgentLoop):
         covered_seq: int = -1,
         tokens_before: int = 0,
         tokens_after: int = 0,
-        summary_tokens: int = 0,
+        memory_tokens: int = 0,
+        recommended_min: int = 0,
+        recommended_max: int = 0,
         model: str | None = None,
         error: str | None = None,
     ) -> None:
         self.emit(
-            SessionSummaryResult(
+            SessionMemoryResult(
                 session_id=session_id,
                 ok=ok,
                 revision=revision,
                 covered_seq=covered_seq,
                 tokens_before=tokens_before,
                 tokens_after=tokens_after,
-                summary_tokens=summary_tokens,
+                memory_tokens=memory_tokens,
+                recommended_min=recommended_min,
+                recommended_max=recommended_max,
                 model=model,
                 error=error,
             )
         )
 
-    def _fail_summary(self, session_id: str, code: str, message: str | None) -> None:
-        # rev27：`session.summary.result.error` 是新增回显通道 —— 上游异常文本须过统一脱敏。
+    def _fail_memory(
+        self,
+        session_id: str,
+        code: str,
+        message: str | None,
+        recommended_min: int = 0,
+        recommended_max: int = 0,
+    ) -> None:
+        # `session.memory.result.error` 是新增回显通道 —— 上游异常文本须过统一脱敏。
         text = (redact(message) if message else None) or error_text(code)
-        self._emit_summary_result(session_id, ok=False, error=text)
+        self._emit_memory_result(
+            session_id,
+            ok=False,
+            error=text,
+            recommended_min=recommended_min,
+            recommended_max=recommended_max,
+        )
+
+    def _maybe_auto_compress(self, session_id: str, meta) -> None:
+        """阈值自动压缩（v0.0.1）：仅 `use & compress & auto` 且占用 ≥ 阈值时执行。
+
+        - `auto` 默认关；三者皆真才自动（会话覆盖优先）。
+        - 「占用」取**输入侧**（装配用量去掉 reserve）占生效窗口的百分比。
+        - 压缩走 `compress_memory(force=False)`，仍受「是否压缩」约束；失败/无内容由其自行回报。
+        """
+        config = self.config_store.load("memory")
+        use, compress, auto = effective_switches(meta, config)
+        if not (use and compress and auto):
+            return
+        usage = self._usage_by_session.get(session_id)
+        if usage is None:
+            return
+        model_id = self._resolve_model(meta.main_model)
+        window = meta.max_context or (self._ctx_window(model_id) if model_id else 0)
+        if window <= 0:
+            return
+        input_tokens = usage.total - usage.segments.get("reserve", 0)
+        if input_tokens * 100 < effective_threshold(meta, config) * window:
+            return
+        self.compress_memory(session_id)
 
     # -- 回合 --------------------------------------------------------------
     def run_turn(self, session_id: str, user_message: SendMessage) -> None:
@@ -389,6 +481,9 @@ class AgentLoop(IAgentLoop):
         if interrupted:
             self.store.append(session_id, "user", "interrupt", {"initiator": "user"})
         self.emit(TurnStatus(turn_seq=turn_seq, state="interrupted" if interrupted else "done"))
+        if not interrupted:
+            # v0.0.1：回合正常结束后，按阈值自动压缩记忆（默认关；见 _maybe_auto_compress）。
+            self._maybe_auto_compress(session_id, meta)
 
     def _prepare_context(
         self, session_id: str, turn_seq: int, model_id: str, meta
@@ -403,13 +498,15 @@ class AgentLoop(IAgentLoop):
         system_prompt = (
             self.personas.resolve_content(meta.persona_id) if self.personas else DEFAULT_SYSTEM_PROMPT
         ) or DEFAULT_SYSTEM_PROMPT
-        # rev26：有摘要时，摘要替代其覆盖点之前的历史；近段历史仍按 token 预算参与装配。
-        summary_meta = self.store.read_summary(session_id)
-        summary_text = self.store.read_summary_text(session_id) if summary_meta else ""
+        # v0.0.1：会话记忆注入受「使用记忆」开关控制；关闭时不注入，且历史**不按覆盖点过滤**
+        # （相当于完全忽略记忆；events.jsonl 只增不改，完整历史仍在）。
+        use_memory, _compress, _auto = effective_switches(meta, self.config_store.load("memory"))
+        memory_meta = self.store.read_memory(session_id) if use_memory else None
+        memory_text = self.store.read_memory_text(session_id) if memory_meta is not None else ""
         config = ConfigSnapshot(
             system_prompt=system_prompt,
             memory=read_cascade(self.root, session_id),
-            summary=summary_text,
+            session_memory=memory_text,
             reserve=effective_reserve(_DEFAULT_RESERVE, window),
             file_truncate=effective_file_cap(_DEFAULT_FILE, window),
             window=window,
@@ -418,15 +515,17 @@ class AgentLoop(IAgentLoop):
         )
         budget = config.window - config.reserve if config.window else _UNBOUNDED
         snapshot = self.store.resume(session_id)
-        if summary_meta is not None:
+        if memory_meta is not None:
             snapshot.events = [
                 event
                 for event in snapshot.events
-                if int(event.get("seq", -1)) > summary_meta.covered_seq
+                if int(event.get("seq", -1)) > memory_meta.covered_seq
             ]
         messages, usage = self.assembler.build(snapshot, config, budget)
         self.store.append_event(session_id, usage)
         self.emit(usage)
+        # v0.0.1：记本次装配用量，供回合结束后的阈值自动压缩判定（input 侧占用）。
+        self._usage_by_session[session_id] = usage
 
         # 超窗本地拦截（spec §7 / rev8 §2）：淘汰已保不住当前提问时，请求必然被上游拒绝，
         # 且往往被上游报成 model_not_found 一类误导性错误。判据取**输入侧**用量

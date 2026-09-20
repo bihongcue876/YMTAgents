@@ -36,7 +36,7 @@ from shared.envelope import (
     SessionEvents,
     SessionIndex,
     SessionUpdate,
-    SummarizeSession,
+    CompressMemory,
     BranchSession,
     RevertSession,
     SwitchBranch,
@@ -68,7 +68,7 @@ from shared.schema import (
 from core.agent.loop import AgentLoop, model_ctx_window
 from core.agent.session import MAX_BRANCHES, SessionStore
 from core.agent.persona import PersonaStore, YMT_PERSONA_ID
-from core.agent.summarize import effective_threshold
+from core.agent.memory import effective_switches, effective_threshold, recommended_range
 from core.bus.bridge import BusBridge
 from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
@@ -330,8 +330,8 @@ class CoreController:
             self._on_detail(request)
         elif t == "session.update":
             self._on_update(request)
-        elif t == "session.summarize":
-            self._on_summarize(request)
+        elif t == "session.compress":
+            self._on_compress(request)
         elif t == "session.branch":
             self._on_branch(request)
         elif t == "session.revert":
@@ -520,8 +520,11 @@ class CoreController:
                 except ValidationError:
                     last_usage = None
                 break
-        summary = self.store.read_summary(session_id)
-        threshold = effective_threshold(meta, self.config_store.load("summary"))
+        memory = self.store.read_memory(session_id)
+        memory_config = self.config_store.load("memory")
+        threshold = effective_threshold(meta, memory_config)
+        memory_use, memory_compress, memory_auto = effective_switches(meta, memory_config)
+        rec_min, rec_max = recommended_range(self._effective_window(meta), memory_config)
         graph = self.store.list_branches(session_id)
         self.emit(
             SessionDetailResult(
@@ -534,10 +537,16 @@ class CoreController:
                 effective_window=self._effective_window(meta),
                 last_usage=last_usage,
                 cumulative_tokens=cumulative,
-                summary_revision=(summary.revision if summary else 0),
-                summary_covered_seq=(summary.covered_seq if summary else -1),
-                summary_tokens=(summary.tokens_est if summary else 0),
-                summary_threshold=threshold,
+                memory_revision=(memory.revision if memory else 0),
+                memory_covered_seq=(memory.covered_seq if memory else -1),
+                memory_tokens=(memory.tokens_est if memory else 0),
+                memory_use=memory_use,
+                memory_compress=memory_compress,
+                memory_auto=memory_auto,
+                memory_threshold=threshold,
+                memory_recommended_min=rec_min,
+                memory_recommended_max=rec_max,
+                memory_history=self.store.list_memory_history(session_id),
                 branch_count=len(graph.branches),
                 active_branch=graph.active,
                 max_branches=MAX_BRANCHES,
@@ -555,9 +564,9 @@ class CoreController:
         if request.max_context is not None and request.max_context < 0:
             self._report("session", ErrorCode.INVALID_REQUEST.value, "上下文上限不能为负数。")
             return
-        if request.summary_threshold is not None and not 50 <= request.summary_threshold <= 99:
+        if request.memory_threshold is not None and not 50 <= request.memory_threshold <= 99:
             self._report(
-                "session", ErrorCode.INVALID_REQUEST.value, "压缩阈值需在 50–99 之间。"
+                "session", ErrorCode.INVALID_REQUEST.value, "记忆压缩阈值需在 50–99 之间。"
             )
             return
         try:
@@ -567,7 +576,10 @@ class CoreController:
                 note=request.note.strip(),
                 max_context=request.max_context,
                 params=request.params,
-                summary_threshold=request.summary_threshold,
+                memory_use=request.memory_use,
+                memory_compress=request.memory_compress,
+                memory_auto=request.memory_auto,
+                memory_threshold=request.memory_threshold,
             )
         except KeyError:
             self._report("session", ErrorCode.SESSION_NOT_FOUND.value, "会话不存在。")
@@ -575,15 +587,15 @@ class CoreController:
         self._emit_index()
         self._emit_detail(request.session_id)
 
-    def _on_summarize(self, request: SummarizeSession) -> None:
-        """压缩较早历史（rev26）：结果由 loop 以 `session.summary.result` 回报。"""
+    def _on_compress(self, request: CompressMemory) -> None:
+        """压缩较早历史为记忆（v0.0.1）：结果由 loop 以 `session.memory.result` 回报。"""
         try:
             self.store.get_meta(request.session_id)
         except KeyError:
             self._report("session", ErrorCode.SESSION_NOT_FOUND.value, "会话不存在。")
             return
-        self.agent.summarize(request.session_id)
-        self._emit_detail(request.session_id)  # 摘要状态/用量刷新右栏
+        self.agent.compress_memory(request.session_id, force=request.force)
+        self._emit_detail(request.session_id)  # 记忆状态/用量刷新右栏
 
     # -- 分支树 / 回退（rev31） ---------------------------------------------
     def _emit_branches(self, session_id: str) -> None:

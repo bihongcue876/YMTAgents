@@ -89,8 +89,11 @@ class SessionMeta(BaseModel):
     max_context: int | None = None  # 输入侧上下文上限（token）；None = 用模型窗口
     note: str | None = None  # 作用/备注，纯展示
     params: SessionParams = Field(default_factory=SessionParams)
-    # rev26：本会话的压缩阈值（占用百分比，用户指定）；None = 用 config/summary.json 默认
-    summary_threshold: int | None = None
+    # v0.0.1：本会话记忆开关（None = 用 config/memory.json 默认）
+    memory_use: bool | None = None
+    memory_compress: bool | None = None
+    memory_auto: bool | None = None
+    memory_threshold: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -177,17 +180,20 @@ class SessionUpdate(Envelope):
     note: str = ""
     max_context: int | None = None
     params: SessionParams = Field(default_factory=SessionParams)
-    summary_threshold: int | None = None  # rev26：None = 用全局默认
+    memory_use: bool | None = None  # v0.0.1：None = 用全局默认
+    memory_compress: bool | None = None
+    memory_auto: bool | None = None
+    memory_threshold: int | None = None
 
 
-class SummarizeSession(Envelope):
-    """压缩当前会话的较早历史（rev26）。
+class CompressMemory(Envelope):
+    """压缩/概括当前会话记忆（v0.0.1）。
 
-    只概括「较早、且未被上次摘要覆盖」的部分；近段按 token 预算保留（`keep_ratio`）。
+    只概括「较早、且未被上次记忆覆盖」的部分；近段按 token 预算保留（`keep_ratio`）。
     这是一次独立的模型调用，调用前会预告成本。
     """
 
-    type: Literal["session.summarize"] = "session.summarize"
+    type: Literal["session.compress"] = "session.compress"
     session_id: str
     force: bool = False  # 预留：True 时忽略阈值（当前按钮触发即视为显式）
 
@@ -288,7 +294,10 @@ class TurnStatus(Envelope):
 class ContextUsage(Envelope):
     type: Literal["ctx.usage"] = "ctx.usage"
     segments: dict[
-        Literal["system", "summary", "env", "files", "retrieve", "history", "reserve"], int
+        Literal[
+            "system", "memory", "summary", "env", "files", "retrieve", "history", "reserve"
+        ],
+        int,
     ] = Field(default_factory=dict)
     total: int = 0
     window: int = 0
@@ -326,28 +335,36 @@ class SessionDetailResult(Envelope):
     effective_window: int = 0  # 实际生效窗口（会话 max_context 优先，否则模型窗口）
     last_usage: ContextUsage | None = None
     cumulative_tokens: int = 0  # 本会话各次调用 total 之和（用户裁决：区分单次 / 累计）
-    # rev26：历史摘要化状态（无摘要时 summary_revision=0、summary_covered_seq=-1）
-    summary_revision: int = 0
-    summary_covered_seq: int = -1
-    summary_tokens: int = 0
-    summary_threshold: int = 0  # 本会话实际生效阈值（会话覆盖优先，否则全局默认）
+    # v0.0.1：会话记忆状态（无记忆时 revision=0、covered_seq=-1）
+    memory_revision: int = 0
+    memory_covered_seq: int = -1
+    memory_tokens: int = 0
+    memory_use: bool = True
+    memory_compress: bool = True
+    memory_auto: bool = False
+    memory_threshold: int = 0
+    memory_recommended_min: int = 0
+    memory_recommended_max: int = 0
+    memory_history: list[int] = Field(default_factory=list)  # 旧记忆归档 revision（可查看不注入）
     # rev31：分支树状态（活动分支作用域）。
     branch_count: int = 0
     active_branch: str = ""
     max_branches: int = 5
 
 
-class SessionSummaryResult(Envelope):
-    """`session.summarize` 的结果（rev26）。失败时 ok=False 且 error 为可读文案。"""
+class SessionMemoryResult(Envelope):
+    """`session.compress` 的结果（v0.0.1）。失败时 ok=False 且 error 为可读文案。"""
 
-    type: Literal["session.summary.result"] = "session.summary.result"
+    type: Literal["session.memory.result"] = "session.memory.result"
     session_id: str
     ok: bool = True
     revision: int = 0
     covered_seq: int = -1
     tokens_before: int = 0  # 被覆盖历史部分的估算 token
-    tokens_after: int = 0  # 摘要正文的估算 token（替代被覆盖部分）
-    summary_tokens: int = 0  # 摘要正文估算 token
+    tokens_after: int = 0  # 记忆正文的估算 token（替代被覆盖部分）
+    memory_tokens: int = 0  # 记忆正文估算 token
+    recommended_min: int = 0  # 推荐范围下限（按 target_ratio 推导）
+    recommended_max: int = 0  # 推荐范围上限（按 target_ratio 推导）
     model: str | None = None
     error: str | None = None
 
@@ -516,7 +533,7 @@ Request = Annotated[
         DeleteSession,
         SessionDetail,
         SessionUpdate,
-        SummarizeSession,
+        CompressMemory,
         BranchSession,
         RevertSession,
         SwitchBranch,
@@ -546,7 +563,7 @@ Event = Annotated[
         SessionIndex,
         SessionEvents,
         SessionDetailResult,
-        SessionSummaryResult,
+        SessionMemoryResult,
         SessionBranches,
         ProviderList,
         TestResult,

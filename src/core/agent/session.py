@@ -14,7 +14,7 @@ from pathlib import Path
 
 from shared.envelope import BranchInfo, SessionMeta, SessionParams
 from shared.ids import SESS, new_id
-from shared.schema import BranchRecord, SessionGraph, SessionSummary
+from shared.schema import BranchRecord, SessionGraph, SessionMemory
 
 from core.bus.sink import EventSink
 from core.store.atomic import atomic_write_json, atomic_write_text
@@ -115,20 +115,23 @@ class ISessionStore(ABC):
         note: str,
         max_context: int | None,
         params: SessionParams,
-        summary_threshold: int | None = None,
+        memory_use: bool | None = None,
+        memory_compress: bool | None = None,
+        memory_auto: bool | None = None,
+        memory_threshold: int | None = None,
     ) -> SessionMeta:
-        """整态更新会话可编辑字段（rev24）：标题/作用/上下文上限/模型参数。"""
+        """整态更新会话可编辑字段（rev24）：标题/作用/上下文上限/模型参数/记忆开关。"""
 
     @abstractmethod
-    def read_summary(self, session_id: str) -> SessionSummary | None:
-        """读取摘要**状态**（rev26）；无摘要返回 None（正文另见 `read_summary_text`）。"""
+    def read_memory(self, session_id: str) -> SessionMemory | None:
+        """读取记忆**状态**（v0.0.1）；无记忆返回 None（正文另见 `read_memory_text`）。"""
 
     @abstractmethod
-    def read_summary_text(self, session_id: str) -> str:
-        """读取摘要正文 `summary.md`；不存在返回空串。"""
+    def read_memory_text(self, session_id: str) -> str:
+        """读取记忆正文 `memory.md`；不存在返回空串。"""
 
     @abstractmethod
-    def write_summary(
+    def write_memory(
         self,
         session_id: str,
         *,
@@ -136,8 +139,16 @@ class ISessionStore(ABC):
         model: str | None,
         tokens_est: int,
         text: str,
-    ) -> SessionSummary:
-        """写入/更新摘要（rev26）：正文 + 状态，revision 自增。"""
+    ) -> SessionMemory:
+        """写入/更新记忆（v0.0.1）：正文 + 状态，revision 自增；旧版归档到 history。"""
+
+    @abstractmethod
+    def list_memory_history(self, session_id: str) -> list[int]:
+        """当前分支已归档的旧记忆版本号（降序）；无则空列表。"""
+
+    @abstractmethod
+    def read_memory_history(self, session_id: str, revision: int) -> str:
+        """读取当前分支某归档版本正文；不存在返回空串。"""
 
     @abstractmethod
     def list_branches(self, session_id: str) -> SessionGraph:
@@ -353,7 +364,10 @@ class SessionStore(ISessionStore):
         note: str,
         max_context: int | None,
         params: SessionParams,
-        summary_threshold: int | None = None,
+        memory_use: bool | None = None,
+        memory_compress: bool | None = None,
+        memory_auto: bool | None = None,
+        memory_threshold: int | None = None,
     ) -> SessionMeta:
         """整态更新（rev24）：面板提交完整期望状态，未变的字段原样回写。"""
         meta = self._read_meta(session_id)
@@ -361,7 +375,10 @@ class SessionStore(ISessionStore):
         meta.note = note or None
         meta.max_context = max_context
         meta.params = params
-        meta.summary_threshold = summary_threshold
+        meta.memory_use = memory_use
+        meta.memory_compress = memory_compress
+        meta.memory_auto = memory_auto
+        meta.memory_threshold = memory_threshold
         self._touch(meta)
         self.append(
             session_id,
@@ -372,49 +389,60 @@ class SessionStore(ISessionStore):
                 "note": meta.note,
                 "max_context": meta.max_context,
                 "params": params.model_dump(mode="json"),
-                "summary_threshold": meta.summary_threshold,
+                "memory_use": meta.memory_use,
+                "memory_compress": meta.memory_compress,
+                "memory_auto": meta.memory_auto,
+                "memory_threshold": meta.memory_threshold,
             },
         )
         return meta
 
-    # -- 摘要（rev26 / rev31）：正文与状态分文件，按**分支**隔离；events.jsonl 只增不改 --
+    # -- 记忆（v0.0.1 / rev31）：正文与状态分文件，按**分支**隔离；events.jsonl 只增不改 --
     def _branch_dir(self, session_id: str, branch_id: str) -> Path:
         return self.session_dir(session_id) / "branches" / branch_id
 
-    def _summary_md_path(self, session_id: str, branch_id: str | None = None) -> Path:
+    def _memory_md_path(self, session_id: str, branch_id: str | None = None) -> Path:
         bid = branch_id or self._active_branch(self._load_graph(session_id)).id
-        return self._branch_dir(session_id, bid) / "summary.md"
+        return self._branch_dir(session_id, bid) / "memory.md"
 
-    def _summary_json_path(self, session_id: str, branch_id: str | None = None) -> Path:
+    def _memory_json_path(self, session_id: str, branch_id: str | None = None) -> Path:
         bid = branch_id or self._active_branch(self._load_graph(session_id)).id
-        return self._branch_dir(session_id, bid) / "summary.json"
+        return self._branch_dir(session_id, bid) / "memory.json"
 
-    def _read_summary_at(self, session_id: str, branch_id: str) -> SessionSummary | None:
+    def _memory_history_dir(self, session_id: str, branch_id: str | None = None) -> Path:
+        bid = branch_id or self._active_branch(self._load_graph(session_id)).id
+        return self._branch_dir(session_id, bid) / "memory" / "history"
+
+    def _legacy_memory_paths(self, session_id: str, branch_id: str, suffix: str) -> list[Path]:
+        """v0.0.1 之前的旧布局（rev26 `summary.*`）：优先同分支，br0 再退回会话根目录。"""
+        paths = [self._branch_dir(session_id, branch_id) / f"summary{suffix}"]
+        if branch_id == "br0":
+            paths.append(self.session_dir(session_id) / f"summary{suffix}")
+        return paths
+
+    def _read_memory_at(self, session_id: str, branch_id: str) -> SessionMemory | None:
         import json
 
-        path = self._summary_json_path(session_id, branch_id)
-        if not path.exists() and branch_id == "br0":
-            legacy = self.session_dir(session_id) / "summary.json"  # rev26 旧布局
-            if legacy.exists():
-                path = legacy
+        path = self._memory_json_path(session_id, branch_id)
+        if not path.exists():
+            for legacy in self._legacy_memory_paths(session_id, branch_id, ".json"):
+                if legacy.exists():
+                    path = legacy
+                    break
         if not path.exists():
             return None
         try:
-            return SessionSummary.model_validate(json.loads(path.read_text(encoding="utf-8")))
+            return SessionMemory.model_validate(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             return None
 
-    def read_summary(self, session_id: str) -> SessionSummary | None:
-        bid = self._active_branch(self._load_graph(session_id)).id
-        return self._read_summary_at(session_id, bid)
-
-    def read_summary_text(self, session_id: str) -> str:
-        bid = self._active_branch(self._load_graph(session_id)).id
-        path = self._summary_md_path(session_id, bid)
-        if not path.exists() and bid == "br0":
-            legacy = self.session_dir(session_id) / "summary.md"  # rev26 旧布局
-            if legacy.exists():
-                path = legacy
+    def _read_memory_text_at(self, session_id: str, branch_id: str) -> str:
+        path = self._memory_md_path(session_id, branch_id)
+        if not path.exists():
+            for legacy in self._legacy_memory_paths(session_id, branch_id, ".md"):
+                if legacy.exists():
+                    path = legacy
+                    break
         if not path.exists():
             return ""
         try:
@@ -422,7 +450,15 @@ class SessionStore(ISessionStore):
         except OSError:
             return ""
 
-    def write_summary(
+    def read_memory(self, session_id: str) -> SessionMemory | None:
+        bid = self._active_branch(self._load_graph(session_id)).id
+        return self._read_memory_at(session_id, bid)
+
+    def read_memory_text(self, session_id: str) -> str:
+        bid = self._active_branch(self._load_graph(session_id)).id
+        return self._read_memory_text_at(session_id, bid)
+
+    def write_memory(
         self,
         session_id: str,
         *,
@@ -430,11 +466,11 @@ class SessionStore(ISessionStore):
         model: str | None,
         tokens_est: int,
         text: str,
-    ) -> SessionSummary:
+    ) -> SessionMemory:
         now = _utcnow()
         bid = self._active_branch(self._load_graph(session_id)).id
-        previous = self._read_summary_at(session_id, bid)
-        summary = SessionSummary(
+        previous = self._read_memory_at(session_id, bid)
+        memory = SessionMemory(
             revision=(previous.revision + 1) if previous else 1,
             covered_seq=covered_seq,
             model=model,
@@ -442,26 +478,49 @@ class SessionStore(ISessionStore):
             created_at=(previous.created_at if previous else now),
             updated_at=now,
         )
-        atomic_write_text(self._summary_md_path(session_id, bid), text)
-        atomic_write_json(self._summary_json_path(session_id, bid), summary.model_dump(mode="json"))
-        return summary
+        if previous is not None:
+            # 覆盖前先把上一版正文归档（可查看、不注入）；先归档再覆盖，失败不丢旧版。
+            previous_text = self._read_memory_text_at(session_id, bid)
+            if previous_text:
+                archive = self._memory_history_dir(session_id, bid) / f"{previous.revision}.md"
+                atomic_write_text(archive, previous_text)
+        atomic_write_text(self._memory_md_path(session_id, bid), text)
+        atomic_write_json(self._memory_json_path(session_id, bid), memory.model_dump(mode="json"))
+        return memory
 
-    def _copy_summary(self, session_id: str, parent_id: str, child_id: str, fork_seq: int) -> None:
-        """分叉时把父分支摘要快照给子分支（rev31）；父摘要若已覆盖分叉点之后的内容则不继承。"""
-        parent = self._read_summary_at(session_id, parent_id)
+    def list_memory_history(self, session_id: str) -> list[int]:
+        bid = self._active_branch(self._load_graph(session_id)).id
+        directory = self._memory_history_dir(session_id, bid)
+        if not directory.exists():
+            return []
+        revisions: list[int] = []
+        for path in directory.glob("*.md"):
+            try:
+                revisions.append(int(path.stem))
+            except ValueError:
+                continue  # 非版本号命名：忽略，不影响其它版本
+        return sorted(revisions, reverse=True)
+
+    def read_memory_history(self, session_id: str, revision: int) -> str:
+        bid = self._active_branch(self._load_graph(session_id)).id
+        path = self._memory_history_dir(session_id, bid) / f"{int(revision)}.md"
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def _copy_memory(self, session_id: str, parent_id: str, child_id: str, fork_seq: int) -> None:
+        """分叉时把父分支记忆快照给子分支（rev31）；父记忆若已覆盖分叉点之后的内容则不继承。"""
+        parent = self._read_memory_at(session_id, parent_id)
         if parent is None or parent.covered_seq > fork_seq:
             return
-        text = ""
-        src_md = self._summary_md_path(session_id, parent_id)
-        if src_md.exists():
-            try:
-                text = src_md.read_text(encoding="utf-8")
-            except OSError:
-                return
+        text = self._read_memory_text_at(session_id, parent_id)
         if text:
-            atomic_write_text(self._summary_md_path(session_id, child_id), text)
+            atomic_write_text(self._memory_md_path(session_id, child_id), text)
         atomic_write_json(
-            self._summary_json_path(session_id, child_id), parent.model_dump(mode="json")
+            self._memory_json_path(session_id, child_id), parent.model_dump(mode="json")
         )
 
     # -- 分支操作（rev31） -----------------------------------------------------
@@ -509,7 +568,7 @@ class SessionStore(ISessionStore):
         graph.branches.append(new_branch)
         graph.active = new_branch.id
         self._save_graph(session_id, graph)
-        self._copy_summary(session_id, active.id, new_branch.id, from_seq)
+        self._copy_memory(session_id, active.id, new_branch.id, from_seq)
         return graph
 
     def revert_to(self, session_id: str, to_seq: int) -> SessionGraph:

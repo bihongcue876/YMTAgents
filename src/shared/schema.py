@@ -77,36 +77,43 @@ class SettingsConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# summary.json（rev26：历史摘要化的**出厂默认**，阈值为用户可改的数值）
+# memory.json（v0.0.1：会话记忆（压缩）的出厂默认，阈值为用户可改的数值）
 # ---------------------------------------------------------------------------
-class SummaryConfig(BaseModel):
-    """压缩（历史摘要化）的全局出厂默认；按会话只覆盖 `threshold`。
+class MemoryConfig(BaseModel):
+    """会话记忆（历史压缩）的全局出厂默认；按会话覆盖 `use`/`compress`/`threshold`。
 
+    - `use`：是否把会话记忆注入上下文（默认开）。
+    - `compress`：是否**允许**压缩（默认开）。
+    - `auto`：是否**自动**在占用达阈值时压缩（默认关；需 `use & compress & auto` 三者皆真）。
     - `threshold`：占用百分比，**由用户指定**；占用达到该值才**允许**自动压缩，
       低于它绝不压（用户裁决 2026-09-19）。
-    - `auto`：自动压缩开关，默认关（压缩不轻易做）。
-    - `keep_ratio`：尾部保留 = 生效窗口 // keep_ratio（默认 1/8），保证近期对话不进摘要。
-    - `model_slot`：摘要调用所用槽位；None = 用会话当前模型。
+    - `keep_ratio`：尾部保留 = 生效窗口 // keep_ratio（默认 1/8），保证近期对话不进记忆。
+    - `target_ratio`：记忆目标按窗口比例推导**推荐范围**（max = 窗口 // target_ratio，
+      min = max // 2）；**不设绝对目标、不硬钳窗口**，压缩以质量优先。
+    - `model_slot`：压缩调用所用槽位；None = 用会话当前模型。
     """
 
     schema_version: Literal[1] = 1
-    threshold: int = 90
+    use: bool = True
+    compress: bool = True
     auto: bool = False
+    threshold: int = 90
     keep_ratio: int = 8
+    target_ratio: int = 16
     model_slot: Literal["main", "thinking", "fast", "embedding"] | None = None
 
 
 # ---------------------------------------------------------------------------
-# sessions/<id>/summary.json（rev26：摘要**状态**；正文在同目录 summary.md）
+# sessions/<id>/branches/<bid>/memory.json（v0.0.1：会话记忆状态；正文在同目录 memory.md）
 # ---------------------------------------------------------------------------
-class SessionSummary(BaseModel):
-    """一次历史摘要化的落盘状态（append-only 事实源 `events.jsonl` 不动）。"""
+class SessionMemory(BaseModel):
+    """一次记忆压缩的落盘状态（append-only 事实源 `events.jsonl` 不动）。"""
 
     schema_version: Literal[1] = 1
     revision: int = 0
-    covered_seq: int = -1  # 已被摘要覆盖到的最后一个事件 seq；-1 = 尚未压缩
-    model: str | None = None  # 生成该摘要的模型
-    tokens_est: int = 0  # 摘要正文的估算 token（装配时占用的量）
+    covered_seq: int = -1  # 已被记忆覆盖到的最后一个事件 seq；-1 = 尚未压缩
+    model: str | None = None  # 生成该记忆的模型
+    tokens_est: int = 0  # 记忆正文的估算 token（装配时占用的量）
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -195,7 +202,7 @@ class PluginsConfig(BaseModel):
 CONFIG_FILES = {
     "models": ("models.json", ModelsConfig),
     "settings": ("settings.json", SettingsConfig),
-    "summary": ("summary.json", SummaryConfig),  # rev26：压缩出厂默认
+    "memory": ("memory.json", MemoryConfig),  # v0.0.1：会话记忆出厂默认
     "modules": ("modules.json", ModulesConfig),
     "plugins": ("plugins.json", PluginsConfig),
 }
