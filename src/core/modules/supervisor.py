@@ -18,13 +18,24 @@ class IModuleSupervisor(ABC):
     def get_states(self) -> dict[str, str]: ...
 
     @abstractmethod
+    def set_state(self, module: str, state: ModuleState | str) -> None: ...
+
+    @abstractmethod
     def reload(self, module: str) -> None: ...
 
 
 class ModuleSupervisor(IModuleSupervisor):
+    def __init__(self) -> None:
+        # 首期仅 mcp 有宿主实现（rev41/rev44）；其余仍 disabled。
+        self._states: dict[str, str] = {name: ModuleState.DISABLED.value for name in MODULE_NAMES}
+
     def get_states(self) -> dict[str, str]:
-        return {name: ModuleState.DISABLED.value for name in MODULE_NAMES}
+        return dict(self._states)
+
+    def set_state(self, module: str, state: ModuleState | str) -> None:
+        if module in self._states:
+            self._states[module] = state.value if isinstance(state, ModuleState) else str(state)
 
     def reload(self, module: str) -> None:
-        # 首期无模块实现（占位）：无操作。
+        # 宿主模块的启停由各自 manager 负责；supervisor 只聚合健康度。
         return None

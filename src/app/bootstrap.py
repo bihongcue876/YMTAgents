@@ -21,7 +21,9 @@ from core.agent.session import SessionStore
 from core.bus.bridge import BusBridge
 from core.bus.sink import EventSink
 from core.gateway.provider import ModelGateway
+from core.mcp.manager import McpManager
 from core.modules.supervisor import ModuleSupervisor
+from core.registry.executor import ToolExecutor
 from core.registry.registry import Registry
 from core.security.dpapi import DpapiBox
 from core.security.legacy import LegacyKeyring, migrate_keyring_to_vault
@@ -46,6 +48,8 @@ class AppContext:
     worker: CoreWorker
     personas: PersonaStore
     secrets: ISecretStore
+    mcp_manager: McpManager
+    executor: ToolExecutor
 
 
 def bootstrap(
@@ -76,11 +80,25 @@ def bootstrap(
     supervisor = ModuleSupervisor()
     registry = Registry()
     personas = PersonaStore(root / "personas")
-    agent = AgentLoop(session_store, gateway, bridge.emit_event, root, config_store, personas=personas)
+    # rev41/rev43/rev44：MCP 宿主 + 工具执行器（无启用的 server 时宿主为 disabled，零影响）。
+    mcp_manager = McpManager(
+        registry, config_store, secret_store, audit=sink.append_audit, emit=bridge.emit_event
+    )
+    mcp_manager.load()
+    executor = ToolExecutor(
+        registry, store=session_store, emit=bridge.emit_event, audit=sink.append_audit
+    )
+    agent = AgentLoop(
+        session_store, gateway, bridge.emit_event, root, config_store,
+        personas=personas, executor=executor,
+    )
     controller = CoreController(
         bridge, session_store, gateway, agent, supervisor, registry, config_store, root,
-        personas=personas,
+        personas=personas, executor=executor, mcp_manager=mcp_manager,
     )
+    # 启用的 server 在此启动；连接失败只落 server 状态（不阻断启动）。
+    mcp_manager.start_all()
+    controller.refresh_modules()
     worker = CoreWorker(bridge, controller.handle)
     worker.start()
 
@@ -97,4 +115,6 @@ def bootstrap(
         worker=worker,
         personas=personas,
         secrets=secret_store,
+        mcp_manager=mcp_manager,
+        executor=executor,
     )

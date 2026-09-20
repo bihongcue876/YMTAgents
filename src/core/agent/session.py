@@ -70,6 +70,43 @@ def wire_to_line(event) -> tuple[str, str, dict] | None:
             "error",
             {"scope": d["scope"], "code": d["code"], "message": d["message"], "detail": d.get("detail")},
         )
+    if t == "tool.call":
+        # v0.0.3：工具调用请求（落盘供回放重建 assistant.tool_calls；另推 UI 聊天流）。
+        return (
+            "agent",
+            "tool.call",
+            {
+                "call_id": d["call_id"],
+                "name": d["name"],
+                "args": d.get("args", {}),
+                "permission": d.get("permission", "confirm"),
+            },
+        )
+    if t == "tool.result":
+        return (
+            "agent",
+            "tool.result",
+            {
+                "call_id": d["call_id"],
+                "ok": d.get("ok", False),
+                "output": d.get("output"),
+                "output_ref": d.get("output_ref"),
+                "usage": d.get("usage"),
+                "duration_ms": d.get("duration_ms", 0),
+                "error": d.get("error"),
+            },
+        )
+    if t == "gate.result":
+        # 关卡结论仅作安全审计留痕（不参与历史重建）。
+        return (
+            "agent",
+            "gate.result",
+            {
+                "call_id": d["call_id"],
+                "decision": d.get("decision", "deny"),
+                "decider": d.get("decider", "policy"),
+            },
+        )
     return None
 
 
@@ -189,6 +226,14 @@ class ISessionStore(ABC):
 
     @abstractmethod
     def replay(self, session_id: str) -> list[dict]: ...
+
+    @abstractmethod
+    def write_output(self, session_id: str, call_id: str, text: str) -> str:
+        """外置超大工具输出到会话目录，返回会话内相对引用（v0.0.3 完善 output_ref）。"""
+
+    @abstractmethod
+    def read_output(self, session_id: str, ref: str) -> str:
+        """按相对引用读取外置工具输出；不存在返回空串。"""
 
 
 class SessionStore(ISessionStore):
@@ -663,3 +708,19 @@ class SessionStore(ISessionStore):
         """
         self.append(session_id, "agent", "session.end", {"reason": reason})
         self.sink.fsync(session_id)
+
+    # -- 大工具输出外置（v0.0.3 完善 output_ref）：事件流只留预览，全文落 outputs/<call_id>.txt --
+    def write_output(self, session_id: str, call_id: str, text: str) -> str:
+        directory = self.session_dir(session_id) / "outputs"
+        directory.mkdir(parents=True, exist_ok=True)
+        safe = "".join(ch for ch in str(call_id) if ch.isalnum() or ch in "-_") or "output"
+        atomic_write_text(directory / f"{safe}.txt", text)
+        return f"outputs/{safe}.txt"
+
+    def read_output(self, session_id: str, ref: str) -> str:
+        if not ref:
+            return ""
+        try:
+            return (self.session_dir(session_id) / ref).read_text(encoding="utf-8")
+        except OSError:
+            return ""

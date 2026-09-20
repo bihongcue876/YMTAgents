@@ -27,6 +27,9 @@ class ModelConfig(BaseModel):
     # 该端点是否接受 `reasoning_effort` 参数（探测得知）。False 时即便模型会思考，
     # 也只能被动接收其回流，不能主动下发参数（否则某些模型会 400，rev25）。
     reasoning_param_ok: bool = False
+    # rev42：该端点不接受 function calling（带 tools 的请求返回 400）。
+    # 被动判定：某回合带工具被拒 → 撤工具重试一次并置 True，此后不再下发工具。
+    tools_unsupported: bool = False
 
 
 class ProviderConfig(BaseModel):
@@ -164,9 +167,31 @@ class ShellConfig(BaseModel):
     policy: Literal["confirm"] = "confirm"
 
 
+class McpServerConfig(BaseModel):
+    """单个 MCP server 的落盘配置（v0.0.3）。
+
+    - `transport`：stdio（子进程）/ sse（GET 流 + POST）/ http（Streamable HTTP 单端点）。
+    - `command`/`args`/`env`：stdio 专用；env 值为明文（非密钥）。
+    - `url`/`headers_ref`：sse/http 专用；`headers_ref` = header 名 → `vault://<id>`（密钥值不入盘）。
+    - `tool_permissions`：逐工具权限覆盖（键 = sanitize 后工具名）；缺省 = confirm。
+    """
+
+    id: str
+    name: str
+    enabled: bool = False
+    transport: Literal["stdio", "sse", "http"] = "stdio"
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str | None = None
+    headers_ref: dict[str, str] | None = None
+    tool_permissions: dict[str, Literal["safe", "confirm", "restricted"]] | None = None
+    timeout_ms: int = 10000
+
+
 class McpConfig(BaseModel):
     enabled: bool = False
-    servers: list[dict] = Field(default_factory=list)
+    servers: list[McpServerConfig] = Field(default_factory=list)
 
 
 class ModulesConfig(BaseModel):

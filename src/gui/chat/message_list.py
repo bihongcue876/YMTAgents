@@ -107,6 +107,55 @@ class MessageList(QWidget):
         self._messages.append({"role": "error", "content": message, "detail": detail})
         self._render()
 
+    # -- 工具调用（v0.0.3 完善）：折叠块进入消息流，结果到达后就地补全 --------------
+    def add_tool_call(self, payload: dict) -> None:
+        self._track_tool_call(payload)
+        self._render()
+
+    def add_tool_result(self, payload: dict) -> None:
+        self._track_tool_result(payload)
+        self._render()
+
+    def _track_tool_call(self, payload: dict) -> None:
+        self._messages.append(
+            {
+                "role": "tool",
+                "call_id": payload.get("call_id", ""),
+                "name": payload.get("name", ""),
+                "args": payload.get("args") or {},
+                "permission": payload.get("permission", "confirm"),
+                "ok": None,
+                "output": None,
+                "output_ref": None,
+                "error": None,
+                "duration_ms": 0,
+            }
+        )
+
+    def _track_tool_result(self, payload: dict) -> None:
+        call_id = payload.get("call_id", "")
+        target = self._find_tool(call_id)
+        if target is None:
+            target = {
+                "role": "tool",
+                "call_id": call_id,
+                "name": payload.get("name", ""),
+                "args": {},
+                "permission": "confirm",
+            }
+            self._messages.append(target)
+        target["ok"] = bool(payload.get("ok"))
+        target["output"] = payload.get("output")
+        target["output_ref"] = payload.get("output_ref")
+        target["error"] = payload.get("error")
+        target["duration_ms"] = payload.get("duration_ms", 0)
+
+    def _find_tool(self, call_id: str) -> dict | None:
+        for message in reversed(self._messages):
+            if message.get("role") == "tool" and message.get("call_id") == call_id:
+                return message
+        return None
+
     @staticmethod
     def format_usage(usage: dict | None) -> str | None:
         """用量文案（rev24/25）：单次口径 + 平均 TPS + 总耗时。
@@ -162,4 +211,8 @@ class MessageList(QWidget):
                 self._messages.append(
                     {"role": "error", "content": payload.get("message", ""), "detail": payload.get("detail")}
                 )
+            elif t == "tool.call":
+                self._track_tool_call(payload)
+            elif t == "tool.result":
+                self._track_tool_result(payload)
         self._render(jump_bottom=True)  # 会话回放：从最新处看起（rev21）

@@ -13,6 +13,7 @@ Pygments 输出的 class 名与样式无关，故高亮回调无需感知主题�
 from __future__ import annotations
 
 import html as _html
+import json
 import re
 
 from markdown_it import MarkdownIt
@@ -68,7 +69,12 @@ blockquote { border-left: 3px solid; margin: 0; padding-left: 10px; }
 .assistant { display: block; }
 .usage { margin-top: 4px; }
 .tag { margin-left: 6px; }
-.error { border: 1px solid; border-radius: 6px; padding: 6px 10px; }"""
+.error { border: 1px solid; border-radius: 6px; padding: 6px 10px; }
+.tool { margin: 6px 0; }
+.tool details { border: 1px solid rgba(128,128,128,0.35); border-radius: 6px; padding: 4px 10px; }
+.tool summary { cursor: pointer; opacity: 0.85; }
+.tool pre { margin: 6px 0 2px; }
+.tool .tool-label { opacity: 0.7; }"""
 
 _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -149,6 +155,40 @@ def _block_error(message: str, detail: str | None, index: int = 0) -> str:
     return f'<div class="msg error" id="m{index}">{text}</div>'
 
 
+def _block_tool(message: dict, index: int = 0) -> str:
+    """工具调用块（v0.0.3 完善）：折叠展示入参与结果；结果未到前显示「进行中」。
+
+    用原生 `<details>`（CSP 禁脚本），默认折叠，点击展开。
+    """
+    name = _html.escape(str(message.get("name") or "tool"))
+    permission = _html.escape(str(message.get("permission") or "confirm"))
+    ok = message.get("ok")
+    status = "完成" if ok is True else ("失败" if ok is False else "进行中")
+    parts = [
+        f'<div class="msg tool" id="m{index}">',
+        f'<details><summary>工具调用 · {name}（{permission}）· {status}</summary>',
+    ]
+    args = message.get("args")
+    if args:
+        parts.append(
+            '<div class="tool-label">入参</div>'
+            f"<pre>{_html.escape(json.dumps(args, ensure_ascii=False, indent=2))}</pre>"
+        )
+    output = message.get("output")
+    if output:
+        parts.append(f'<div class="tool-label">输出</div><pre>{_html.escape(str(output))}</pre>')
+    error = message.get("error")
+    if error:
+        code = _html.escape(str(error.get("code", "")))
+        msg = _html.escape(str(error.get("message", "")))
+        parts.append(f'<div class="tool-label">错误</div><pre>{code} {msg}</pre>')
+    duration = message.get("duration_ms") or 0
+    if duration and ok is not None:
+        parts.append(f'<div class="tool-label">{int(duration)} ms</div>')
+    parts.append("</details></div>")
+    return "".join(parts)
+
+
 def _messages_body(messages: list[dict]) -> str:
     # rev24：每个消息带 `id="m{i}"` 锚点 —— 右侧问题列表点击后 scrollIntoView 跳转。
     parts: list[str] = []
@@ -168,6 +208,8 @@ def _messages_body(messages: list[dict]) -> str:
             )
         elif role == "error":
             parts.append(_block_error(m.get("content", ""), m.get("detail"), i))
+        elif role == "tool":
+            parts.append(_block_tool(m, i))
     return "\n".join(parts)
 
 

@@ -88,10 +88,15 @@ class IModelGateway(ABC):
         on_delta: Callable[[str], None],
         on_reasoning: Callable[[str], None] | None = None,
         params: SessionParams | None = None,
+        tools: list[dict] | None = None,
+        on_tool_calls: Callable[[list[dict]], None] | None = None,
     ) -> Usage:
         """流式对话。`params` 为会话级模型参数（rev24）：仅下发用户显式启用的项。
 
         `on_reasoning`（rev25）：思考过程增量回调（正文与思考分流）；模型不支持时为 None。
+        `tools`（v0.0.3）：native function calling 工具定义；`on_tool_calls` 在流结束后
+        一次性回传聚合的 tool_calls（无则回调）。端点若因 tools 返回 400，网关自动撤工具
+        重试一次并标记该模型（`tools_unsupported`），不再下发工具。
         """
 
     @abstractmethod
@@ -142,6 +147,27 @@ def _param_options(params: SessionParams | None) -> dict:
         if value is not None:
             options[name] = value
     return options
+
+
+def _merge_tool_calls(slot: list[dict], deltas) -> None:
+    """把流式 tool_calls 增量按 index 归并到 slot（name 整段到达，arguments 分片追加）。"""
+    for tc in deltas:
+        idx = getattr(tc, "index", 0) or 0
+        while len(slot) <= idx:
+            slot.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+        entry = slot[idx]
+        tc_id = getattr(tc, "id", None)
+        if tc_id:
+            entry["id"] = tc_id
+        fn = getattr(tc, "function", None)
+        if fn is None:
+            continue
+        name = getattr(fn, "name", None)
+        if name:
+            entry["function"]["name"] = name
+        args = getattr(fn, "arguments", None)
+        if args:
+            entry["function"]["arguments"] += args
 
 
 def _reasoning_text(delta) -> str:
@@ -502,6 +528,8 @@ class ModelGateway(IModelGateway):
         on_delta: Callable[[str], None],
         on_reasoning: Callable[[str], None] | None = None,
         params: SessionParams | None = None,
+        tools: list[dict] | None = None,
+        on_tool_calls: Callable[[list[dict]], None] | None = None,
     ) -> Usage:
         provider = self._find_provider_for_model(model_id)
         if provider is None:
@@ -517,11 +545,25 @@ class ModelGateway(IModelGateway):
             raise GatewayAuthError("凭据不可用", code="key_missing")
         client = self._client(provider.base_url, api_key)
 
+        effective_tools = None if (tools and self._tools_unsupported(model_id)) else tools
         usage = self._stream_with_retry(
-            client, model_id, messages, cancel_token, on_delta, on_reasoning, params
+            client, model_id, messages, cancel_token, on_delta, on_reasoning, params,
+            effective_tools, on_tool_calls,
         )
         self.meter.add(usage)
         return usage
+
+    def _tools_unsupported(self, model_id: str) -> bool:
+        m = self._find_model(model_id)
+        return bool(m is not None and m.tools_unsupported)
+
+    def _record_tools_unsupported(self, model_id: str) -> None:
+        """被动判定：该端点不接受 function calling，落盘标记（幂等）。"""
+        m = self._find_model(model_id)
+        if m is None or m.tools_unsupported:
+            return
+        m.tools_unsupported = True
+        self.store.save("models", self.models)
 
     def _stream_with_retry(
         self,
@@ -532,17 +574,32 @@ class ModelGateway(IModelGateway):
         on_delta: Callable[[str], None],
         on_reasoning: Callable[[str], None] | None = None,
         params: SessionParams | None = None,
+        tools: list[dict] | None = None,
+        on_tool_calls: Callable[[list[dict]], None] | None = None,
     ) -> Usage:
         last_exc: GatewayError | None = None
+        effective_tools = tools
+        tools_retried = False
         for attempt in range(2):  # 初次 + 至多 1 次重试
-            holder = {"got_delta": False}
+            holder = {"got_delta": False, "tool_calls": [], "tools_rejected": False}
             try:
-                return self._stream_once(
-                    client, model_id, messages, cancel_token, on_delta, holder, on_reasoning, params
+                usage = self._stream_once(
+                    client, model_id, messages, cancel_token, on_delta, holder,
+                    on_reasoning, params, effective_tools,
                 )
+                if on_tool_calls is not None and holder["tool_calls"]:
+                    on_tool_calls(holder["tool_calls"])
+                return usage
             except GatewayTimeout:
                 raise
             except Exception as exc:  # noqa: BLE001
+                if holder.get("tools_rejected") and effective_tools is not None and not tools_retried:
+                    # 端点因 tools 返回 400：判定为不支持 function calling，撤工具重试一次并标记。
+                    tools_retried = True
+                    effective_tools = None
+                    self._record_tools_unsupported(model_id)
+                    log.info("模型不接受 function calling，撤工具重试一次：%s", model_id)
+                    continue
                 last_exc = _map_exception(exc)
                 if (
                     holder["got_delta"]
@@ -564,6 +621,7 @@ class ModelGateway(IModelGateway):
         holder: dict,
         on_reasoning: Callable[[str], None] | None = None,
         params: SessionParams | None = None,
+        tools: list[dict] | None = None,
     ) -> Usage:
         """单次流式调用。
 
@@ -573,16 +631,26 @@ class ModelGateway(IModelGateway):
         2. 循环内判定 —— 兜底自定义客户端（如测试替身）忽略 `timeout` 的情形。
 
         rev25：正文与思考分流（`reasoning_content`）；记录首 token / 流结束时刻，供平均 TPS。
+        v0.0.3：`tools` 走 native function calling；流式聚合 `tool_calls` 增量写入 holder。
         """
         options = {**_param_options(params), **self._reasoning_options(model_id)}
-        stream = client.chat.completions.create(
-            model=model_id,
-            messages=messages,
-            stream=True,
-            stream_options={"include_usage": True},
-            timeout=self.silent_timeout,
-            **options,
-        )
+        if tools:
+            options["tools"] = tools
+            options["tool_choice"] = "auto"
+        try:
+            stream = client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                stream=True,
+                stream_options={"include_usage": True},
+                timeout=self.silent_timeout,
+                **options,
+            )
+        except Exception as exc:  # noqa: BLE001 - 400 可能因 tools 不被接受，交由上层撤工具重试
+            name = type(exc).__name__
+            if tools is not None and ("BadRequest" in name or "Unprocessable" in name):
+                holder["tools_rejected"] = True
+            raise
         prompt = completion = total = 0
         started = time.monotonic()
         first_token: float | None = None
@@ -613,6 +681,12 @@ class ModelGateway(IModelGateway):
                             first_token = now
                         on_delta(content)
                         holder["got_delta"] = True
+                    tool_deltas = getattr(delta, "tool_calls", None) if delta is not None else None
+                    if tool_deltas:
+                        if first_token is None:
+                            first_token = now
+                        holder["got_delta"] = True
+                        _merge_tool_calls(holder["tool_calls"], tool_deltas)
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage is not None:
                     prompt = getattr(chunk_usage, "prompt_tokens", 0) or 0

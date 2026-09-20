@@ -38,6 +38,27 @@ def test_page_css_wraps_long_unbroken_strings():
     html = markdown_to_html("正文")
     assert "overflow-wrap: anywhere" in html  # body
     assert "overflow-wrap: anywhere" in html and "pre-wrap" in html  # .user .bubble
+
+
+def test_tool_message_renders_foldable_block():
+    """工具调用块（v0.0.3 完善）：折叠展示名称/入参/输出，默认不展开。"""
+    html = messages_to_html(
+        [
+            {
+                "role": "tool",
+                "call_id": "c1",
+                "name": "mcp.demo.echo",
+                "args": {"text": "hi"},
+                "permission": "confirm",
+                "ok": True,
+                "output": "echo: hi",
+                "duration_ms": 3,
+            }
+        ]
+    )
+    assert "工具调用" in html and "mcp.demo.echo" in html
+    assert "<details" in html and "<details open" not in html  # 默认折叠
+    assert "hi" in html and "echo: hi" in html
     assert "overflow-x: auto" in html  # pre 保留横向滚动
 
 

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -58,9 +59,13 @@ from shared.envelope import (
     PersonaExported,
     PersonaImport,
     PersonaImported,
+    McpServerList,
+    McpServerStatus,
+    ToolList,
 )
 from shared.schema import (
     LoggingSettings,
+    McpServerConfig,
     NetworkSettings,
     UISettings,
 )
@@ -72,7 +77,9 @@ from core.agent.memory import effective_switches, effective_threshold, recommend
 from core.bus.bridge import BusBridge
 from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
+from core.mcp.manager import McpManager
 from core.modules.supervisor import ModuleSupervisor
+from core.registry.executor import GATE_TIMEOUT_S, ToolExecutor
 from core.registry.registry import Registry
 from core.store.config_store import ConfigStore
 
@@ -94,6 +101,8 @@ class CoreController:
         config_store: ConfigStore,
         root: Path,
         personas: PersonaStore | None = None,
+        executor: ToolExecutor | None = None,
+        mcp_manager: McpManager | None = None,
     ) -> None:
         self.bridge = bridge
         self.store = store
@@ -104,7 +113,13 @@ class CoreController:
         self.config_store = config_store
         self.root = Path(root)
         self.personas = personas
+        self.executor = executor
+        self.mcp_manager = mcp_manager
         self.current_session_id: str | None = None
+        # rev43：confirm 关卡裁决登记（泵取队列时命中；正常分派路径亦可投递）。
+        self._gate_decisions: dict[str, bool] = {}
+        if self.executor is not None:
+            self.executor.set_gate(self._gate_handler)
 
     # -- 发射辅助 ----------------------------------------------------------
     def emit(self, event) -> None:
@@ -156,6 +171,7 @@ class CoreController:
         self.emit(SessionIndex(sessions=sessions))
 
     def _emit_health(self) -> None:
+        self.refresh_modules()
         slots = self.gateway.get_slots()
         self.emit(
             HealthReport(
@@ -165,6 +181,11 @@ class CoreController:
             )
         )
 
+    def refresh_modules(self) -> None:
+        """把宿主态同步进 supervisor（rev44：mcp 模块实装）。"""
+        if self.mcp_manager is not None:
+            self.supervisor.set_state("mcp", self.mcp_manager.host_state())
+
     def push_initial_state(self) -> None:
         """GUI 连接信号后调用，推送首屏数据。"""
         self._emit_providers()
@@ -172,6 +193,7 @@ class CoreController:
         self._emit_settings()
         self._emit_health()
         self._emit_personas()
+        self._emit_mcp()
 
     # -- Persona（阶段 2 · spec rev23） --------------------------------------
     def _emit_personas(self) -> None:
@@ -303,6 +325,96 @@ class CoreController:
         settings = self.config_store.load("settings")
         self.emit(SettingsState(data=settings.model_dump(mode="json")))
 
+    # -- MCP / 工具（rev41/rev43/rev44） -------------------------------------
+    def _emit_mcp(self) -> None:
+        if self.mcp_manager is None:
+            return
+        self.emit(McpServerList(servers=self.mcp_manager.list_status()))
+        self.emit(ToolList(tools=self.mcp_manager.tool_entries()))
+
+    def _on_mcp_upsert(self, request) -> None:
+        if self.mcp_manager is None:
+            return
+        try:
+            config = McpServerConfig.model_validate(request.server)
+        except ValidationError as exc:
+            self._report(
+                "config",
+                ErrorCode.INVALID_REQUEST.value,
+                "MCP 服务器配置不合法。",
+                redact(str(exc))[:500],
+            )
+            return
+        self._persist(
+            "mcp.server.upsert", lambda: self.mcp_manager.upsert(config), "保存 MCP 服务器失败。"
+        )
+        self._emit_mcp()
+        self._emit_health()
+
+    def _on_mcp_delete(self, request) -> None:
+        if self.mcp_manager is not None:
+            self._persist(
+                "mcp.server.delete",
+                lambda: self.mcp_manager.delete(request.id),
+                "删除 MCP 服务器失败。",
+            )
+            self._emit_mcp()
+            self._emit_health()
+
+    def _on_mcp_toggle(self, request) -> None:
+        if self.mcp_manager is not None:
+            self._persist(
+                "mcp.server.toggle",
+                lambda: self.mcp_manager.set_enabled(request.id, request.enabled),
+                "切换 MCP 服务器失败。",
+            )
+            self._emit_mcp()
+            self._emit_health()
+
+    def _on_mcp_reconnect(self, request) -> None:
+        if self.mcp_manager is not None:
+            self.mcp_manager.reconnect(request.id)
+            self._emit_mcp()
+            self._emit_health()
+
+    def _on_gate_respond(self, request) -> None:
+        # 正常路径下 gate.respond 多被 _gate_handler 泵取命中；此处登记以兜底竞态。
+        self._gate_decisions[request.call_id] = request.decision == "allow"
+
+    def _gate_handler(self, call_id: str, name: str, args: dict, permission: str) -> bool:
+        """confirm 关卡：泵取请求队列直到收到本次 call_id 的 gate.respond。
+
+        回合运行于核心线程；若仅阻塞等待，gate.respond 永远排不到队列头（单线程 FIFO），
+        故此处自行泵取：命中决策即返回；turn.cancel 记为**拒绝**（中断在途确认一律拒绝）；
+        其余请求暂存，关卡结束后回投队列。
+        """
+        if call_id in self._gate_decisions:
+            return self._gate_decisions.pop(call_id)
+        deadline = time.monotonic() + GATE_TIMEOUT_S
+        deferred = []
+        try:
+            while True:
+                if call_id in self._gate_decisions:
+                    return self._gate_decisions.pop(call_id)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False  # 超时 = 拒绝（docs 09 §3）
+                request = self.bridge.get(timeout=min(0.2, remaining))
+                if request is None:
+                    continue
+                t = getattr(request, "type", None)
+                if t == "gate.respond":
+                    if request.call_id == call_id:
+                        return request.decision == "allow"
+                    continue
+                if t == "turn.cancel":
+                    self._on_cancel(request)
+                    return False
+                deferred.append(request)
+        finally:
+            for request in deferred:
+                self.bridge.submit(request)
+
     # -- 分派 --------------------------------------------------------------
     def handle(self, request) -> None:
         t = getattr(request, "type", None)
@@ -362,6 +474,18 @@ class CoreController:
             self._on_persona_export(request)
         elif t == "persona.import":
             self._on_persona_import(request)
+        elif t == "mcp.server.upsert":
+            self._on_mcp_upsert(request)
+        elif t == "mcp.server.delete":
+            self._on_mcp_delete(request)
+        elif t == "mcp.server.toggle":
+            self._on_mcp_toggle(request)
+        elif t == "mcp.server.reconnect":
+            self._on_mcp_reconnect(request)
+        elif t == "mcp.server.refresh":
+            self._emit_mcp()
+        elif t == "gate.respond":
+            self._on_gate_respond(request)
         else:
             # 未知类型**不得静默**：此前只写一条 warning，调用方拿不到任何反馈（spec rev9 §1）。
             log.warning("未知请求类型：%s", t)
@@ -741,6 +865,12 @@ class CoreController:
         退出路径不得再向外抛异常。
         """
         session_id = self.current_session_id
+        # rev44：无论是否有当前会话，都要回收 MCP 子进程/连接（退出路径不抛）。
+        if self.mcp_manager is not None:
+            try:
+                self.mcp_manager.shutdown()
+            except Exception:  # noqa: BLE001 - 退出路径不抛
+                log.exception("MCP 收尾失败")
         if not session_id:
             return
         try:

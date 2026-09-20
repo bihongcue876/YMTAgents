@@ -119,13 +119,23 @@ class ChatView(QWidget):
         self._refresh_empty()
 
     def on_status(self, event) -> None:
-        if event.state in ("assembling", "probing", "summarizing", "calling"):
+        if event.state in ("assembling", "probing", "summarizing", "calling", "gating", "executing"):
             self.input.set_generating(True)
         else:
             self.input.set_generating(False)
         note = event.note if event.state in ("probing", "summarizing") else None
         self._notice.setText(note or "")
         self._notice.setVisible(bool(note))
+
+    def on_tool_call(self, event) -> None:
+        """工具调用（v0.0.3 完善）：以折叠块进入消息流。"""
+        self.messages.add_tool_call(event.model_dump())
+        self._refresh_empty()
+
+    def on_tool_result(self, event) -> None:
+        """工具结果：按 call_id 就地补全对应工具块。"""
+        self.messages.add_tool_result(event.model_dump())
+        self._refresh_empty()
 
     def on_error(self, event) -> None:
         self.messages.add_error(event.message, event.detail)

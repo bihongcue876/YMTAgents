@@ -285,7 +285,8 @@ class TurnStatus(Envelope):
     type: Literal["turn.status"] = "turn.status"
     turn_seq: int = 0
     state: Literal[
-        "assembling", "probing", "summarizing", "calling", "done", "failed", "interrupted"
+        "assembling", "probing", "summarizing", "calling", "gating", "executing",
+        "done", "failed", "interrupted"
     ] = "assembling"
     error: str | None = None
     note: str | None = None  # rev25：瞬态用户提示（如探测思考能力的成本预告）
@@ -295,7 +296,7 @@ class ContextUsage(Envelope):
     type: Literal["ctx.usage"] = "ctx.usage"
     segments: dict[
         Literal[
-            "system", "memory", "summary", "env", "files", "retrieve", "history", "reserve"
+            "system", "memory", "summary", "env", "files", "tools", "retrieve", "history", "reserve"
         ],
         int,
     ] = Field(default_factory=dict)
@@ -498,6 +499,46 @@ class PersonaImport(Envelope):
     path: str
 
 
+# ---------------------------------------------------------------------------
+# MCP 服务器管理 + 关卡（v0.0.3）
+# ---------------------------------------------------------------------------
+class McpServerUpsert(Envelope):
+    """新增或更新 MCP server 配置。server 字段经 controller 校验为 McpServerConfig。"""
+
+    type: Literal["mcp.server.upsert"] = "mcp.server.upsert"
+    server: dict
+
+
+class McpServerDelete(Envelope):
+    type: Literal["mcp.server.delete"] = "mcp.server.delete"
+    id: str
+
+
+class McpServerToggle(Envelope):
+    type: Literal["mcp.server.toggle"] = "mcp.server.toggle"
+    id: str
+    enabled: bool
+
+
+class McpServerReconnect(Envelope):
+    type: Literal["mcp.server.reconnect"] = "mcp.server.reconnect"
+    id: str
+
+
+class McpServersRefresh(Envelope):
+    """请求重发 MCP 服务器列表与工具清单（插件页「刷新」）。"""
+
+    type: Literal["mcp.server.refresh"] = "mcp.server.refresh"
+
+
+class GateRespond(Envelope):
+    """用户对关卡确认卡片的响应（allow/deny）。"""
+
+    type: Literal["gate.respond"] = "gate.respond"
+    call_id: str
+    decision: Literal["allow", "deny"]
+
+
 class PersonaExported(Envelope):
     type: Literal["persona.export.result"] = "persona.export.result"
     persona_id: str
@@ -514,6 +555,73 @@ class PersonaImported(Envelope):
     persona_id: str | None = None
     name: str = ""
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# MCP + 工具调用事件（v0.0.3）
+# ---------------------------------------------------------------------------
+class McpServerList(Envelope):
+    """MCP 服务器列表（推给插件页）。"""
+
+    type: Literal["mcp.server.list"] = "mcp.server.list"
+    servers: list[dict] = Field(default_factory=list)
+
+
+class McpServerStatus(Envelope):
+    type: Literal["mcp.server.status"] = "mcp.server.status"
+    id: str
+    state: str = "stopped"
+    tools: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ToolList(Envelope):
+    """已注册工具列表（插件页展示）。"""
+
+    type: Literal["tool.list"] = "tool.list"
+    tools: list[dict] = Field(default_factory=list)
+
+
+class ToolCall(Envelope):
+    """模型发起工具调用（落 events.jsonl + 推 UI 聊天流）。"""
+
+    type: Literal["tool.call"] = "tool.call"
+    call_id: str
+    name: str
+    args: dict = Field(default_factory=dict)
+    permission: str = "confirm"
+
+
+class ToolResult(Envelope):
+    """工具执行结果（落 events.jsonl + 推 UI 聊天流）。"""
+
+    type: Literal["tool.result"] = "tool.result"
+    call_id: str
+    ok: bool = True
+    output: str | None = None
+    output_ref: str | None = None
+    usage: dict | None = None
+    duration_ms: int = 0
+    error: dict | None = None
+
+
+class GateRequest(Envelope):
+    """关卡确认请求（推 UI 确认卡片；含参数原文供用户审视）。"""
+
+    type: Literal["gate.request"] = "gate.request"
+    call_id: str
+    name: str
+    args: dict = Field(default_factory=dict)
+    permission: str = "confirm"
+
+
+class GateResult(Envelope):
+    """关卡确认结果（落 events.jsonl）。"""
+
+    type: Literal["gate.result"] = "gate.result"
+    call_id: str
+    decision: str = "deny"
+    decider: str = "policy"
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +657,12 @@ Request = Annotated[
         PersonaSwitch,
         PersonaExport,
         PersonaImport,
+        McpServerUpsert,
+        McpServerDelete,
+        McpServerToggle,
+        McpServerReconnect,
+        McpServersRefresh,
+        GateRespond,
     ],
     Field(discriminator="type"),
 ]
@@ -574,6 +688,13 @@ Event = Annotated[
         PersonaList,
         PersonaExported,
         PersonaImported,
+        McpServerList,
+        McpServerStatus,
+        ToolList,
+        ToolCall,
+        ToolResult,
+        GateRequest,
+        GateResult,
     ],
     Field(discriminator="type"),
 ]

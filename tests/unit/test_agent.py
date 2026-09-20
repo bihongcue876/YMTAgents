@@ -79,6 +79,8 @@ class FakeGateway:
         on_delta,
         on_reasoning=None,
         params=None,
+        tools=None,
+        on_tool_calls=None,
     ):
         self.last_params = params
         self.last_messages = [dict(m) for m in messages]
@@ -525,6 +527,8 @@ def test_final_usage_carries_timing_for_tps(tmp_path):
             on_delta,
             on_reasoning=None,
             params=None,
+            tools=None,
+            on_tool_calls=None,
         ):
             on_delta("答")
             return Usage(
@@ -568,6 +572,8 @@ class MemoryGateway(FakeGateway):
         on_delta,
         on_reasoning=None,
         params=None,
+        tools=None,
+        on_tool_calls=None,
     ):
         self.last_messages = [dict(m) for m in messages]
         self.last_system = messages[0]["content"] if messages else ""
@@ -686,7 +692,7 @@ def test_compress_memory_gateway_failure_keeps_state(tmp_path):
     meta = store.create(None, None)
 
     class BrokenGateway(MemoryGateway):
-        def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None):
+        def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None, tools=None, on_tool_calls=None):
             if "记忆整理器" in (messages[0]["content"] if messages else ""):
                 raise GatewayError("上游拒绝", code="protocol_error")
             return super().stream_chat(
@@ -714,7 +720,7 @@ def test_compress_memory_failure_message_is_redacted(tmp_path):
     meta = store.create(None, None)
 
     class KeyLeakGateway(MemoryGateway):
-        def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None):
+        def stream_chat(self, session_id, turn_seq, model_id, messages, cancel_token, on_delta, on_reasoning=None, params=None, tools=None, on_tool_calls=None):
             if "记忆整理器" in (messages[0]["content"] if messages else ""):
                 raise GatewayError("认证失败 api_key=sk-deadbeefcafe1234", code="auth_error")
             return super().stream_chat(
@@ -777,6 +783,8 @@ def test_compress_memory_cancel_writes_nothing(tmp_path):
             on_delta,
             on_reasoning=None,
             params=None,
+            tools=None,
+            on_tool_calls=None,
         ):
             if "记忆整理器" in (messages[0]["content"] if messages else ""):
                 holder["loop"].cancel(session_id)

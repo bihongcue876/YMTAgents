@@ -125,6 +125,71 @@ def test_stream_chat_usage(tmp_path):
     assert gateway.meter.total.total_tokens == 12
 
 
+class _BadRequestError(Exception):
+    """类名含 BadRequest → 网关判定为「端点不接受 tools」的 400。"""
+
+
+class _ToolsRejectingCompletions:
+    """首次带 tools 即抛 400，撤工具后正常返回流（模拟不支持 FC 的端点）。"""
+
+    def __init__(self, chunks) -> None:
+        self._chunks = chunks
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("tools"):
+            raise _BadRequestError("tools unsupported")
+        return iter(self._chunks)
+
+
+class _ToolsRejectingClient:
+    def __init__(self, completions) -> None:
+        self.chat = types.SimpleNamespace(completions=completions)
+
+
+def test_stream_chat_falls_back_when_tools_rejected(tmp_path):
+    """端点因 tools 返回 400：撤工具重试一次并落盘 tools_unsupported（rev42 完善）。"""
+    chunks = [_Chunk("好"), _Chunk(usage=_Usage(5, 1))]
+    completions = _ToolsRejectingCompletions(chunks)
+    store = ConfigStore(tmp_path)
+    store.ensure_defaults()
+    seed_store(store)
+    gateway = ModelGateway(
+        store,
+        secrets=make_vault(),
+        client_factory=lambda base_url, api_key: _ToolsRejectingClient(completions),
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "mcp.a.t",
+                "description": "d",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    out: list[str] = []
+    usage = gateway.stream_chat(
+        "sess_1", 0, "m1", [{"role": "user", "content": "hi"}], None, out.append, tools=tools
+    )
+    assert "".join(out) == "好"
+    assert usage.total_tokens == 6
+    assert completions.calls[0].get("tools")  # 第一次带工具
+    assert completions.calls[1].get("tools") is None  # 撤工具重试
+    models = ConfigStore(tmp_path).load("models")
+    model = next(m for p in models.providers for m in p.models if m.id == "m1")
+    assert model.tools_unsupported is True
+
+    # 已标记：后续调用直接不带工具（不再触发一次 400）
+    completions.calls.clear()
+    gateway.stream_chat(
+        "sess_1", 0, "m1", [{"role": "user", "content": "hi"}], None, out.append, tools=tools
+    )
+    assert completions.calls and completions.calls[0].get("tools") is None
+
+
 def test_stream_chat_blocked(tmp_path):
     gateway = make_gateway(tmp_path, [], whitelist=False)
     with pytest.raises(GatewayBlocked):

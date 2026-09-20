@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -46,6 +47,7 @@ from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
 from core.agent.persona import PersonaStore
 from core.memory.cascade import read_cascade
+from core.registry.executor import IToolExecutor, ToolContext
 from core.store.config_store import ConfigStore
 
 log = logging.getLogger(__name__)
@@ -61,6 +63,9 @@ _FILE_CAP = 65536
 #: `effective_*` 的「配置下限」占位（对未知窗口仍是稳定默认），不再暴露到设置页。
 _DEFAULT_RESERVE = 4096
 _DEFAULT_FILE = 8192
+
+#: rev42：ReAct 工具循环迭代上限（docs 06 §3）。达到上限后撤工具、强制模型收束作答。
+MAX_TOOL_ITERATIONS = 15
 
 
 def effective_reserve(configured: int, window: int) -> int:
@@ -115,6 +120,27 @@ def _code_of(exc: Exception) -> str:
     return mapped.value if mapped else ErrorCode.INTERNAL.value
 
 
+def _add_usage(a: Usage, b: Usage | None) -> Usage:
+    """ReAct 多迭代用量累加（rev42）。"""
+    if b is None:
+        return a
+    return Usage(
+        prompt_tokens=a.prompt_tokens + b.prompt_tokens,
+        completion_tokens=a.completion_tokens + b.completion_tokens,
+        total_tokens=a.total_tokens + b.total_tokens,
+        elapsed_ms=a.elapsed_ms + b.elapsed_ms,
+        first_token_ms=a.first_token_ms or b.first_token_ms,
+    )
+
+
+def _tool_content(result: object) -> str:
+    """工具结果 → 回注给模型的 tool 消息内容（失败时给出原因，docs 09 P5）。"""
+    if getattr(result, "ok", False):
+        return getattr(result, "output", None) or ""
+    err = getattr(result, "error", None) or {}
+    return err.get("message") or err.get("code") or "工具执行失败"
+
+
 class AgentLoop(IAgentLoop):
     def __init__(
         self,
@@ -125,6 +151,7 @@ class AgentLoop(IAgentLoop):
         config_store: ConfigStore | None = None,
         assembler: ContextAssembler | None = None,
         personas: "PersonaStore | None" = None,
+        executor: IToolExecutor | None = None,
     ) -> None:
         self.store = store
         self.gateway = gateway
@@ -134,6 +161,8 @@ class AgentLoop(IAgentLoop):
         self.assembler = assembler or ContextAssembler()
         # rev23：角色内容解析（None 时回退默认提示词 —— 兼容既有测试的构造方式）
         self.personas = personas
+        # rev42：工具执行器（None = 无工具，行为与首期一致）
+        self.executor = executor
         self._active: dict[str, CancelToken] = {}
         # v0.0.1：最近一次装配用量（供阈值自动压缩判定「占用」）
         self._usage_by_session: dict[str, ContextUsage] = {}
@@ -420,51 +449,58 @@ class AgentLoop(IAgentLoop):
             )
             return
 
-        messages = self._prepare_context(session_id, turn_seq, model_id, meta)
+        payloads = self._tool_payloads()
+        messages = self._prepare_context(session_id, turn_seq, model_id, meta, payloads)
         if messages is None:
             return  # 超窗：_prepare_context 内已上报 context_overflow
 
         self._probe_reasoning(turn_seq, model_id)
 
-        self.emit(TurnStatus(turn_seq=turn_seq, state="calling"))
         token = CancelToken()
         self._active[session_id] = token
-        parts: list[str] = []
-        reasoning_parts: list[str] = []
+        total_usage = Usage()
+        final_content = ""
+        final_reasoning = ""
         try:
-            result = self.gateway.stream_chat(
-                session_id,
-                turn_seq,
-                model_id,
-                messages,
-                token,
-                lambda delta: self._on_delta(session_id, turn_seq, delta, parts),
-                on_reasoning=lambda delta: self._on_reasoning(
-                    session_id, turn_seq, delta, reasoning_parts
-                ),
-                params=meta.params,
-            )
+            # rev42：ReAct 工具循环（docs 06 §3）。无工具时循环一次即结束（等价首期行为）。
+            for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
+                active = None if iteration >= MAX_TOOL_ITERATIONS else (payloads or None)
+                self.emit(TurnStatus(turn_seq=turn_seq, state="calling"))
+                parts: list[str] = []
+                reasoning_parts: list[str] = []
+                tool_calls: list[dict] = []
+                result = self.gateway.stream_chat(
+                    session_id,
+                    turn_seq,
+                    model_id,
+                    messages,
+                    token,
+                    lambda delta: self._on_delta(session_id, turn_seq, delta, parts),
+                    on_reasoning=lambda delta: self._on_reasoning(
+                        session_id, turn_seq, delta, reasoning_parts
+                    ),
+                    params=meta.params,
+                    tools=active,
+                    on_tool_calls=lambda calls: tool_calls.extend(calls),
+                )
+                total_usage = _add_usage(total_usage, result)
+                final_content = "".join(parts)
+                final_reasoning = "".join(reasoning_parts)
+                if token.is_cancelled() or not tool_calls:
+                    break
+                self.emit(TurnStatus(turn_seq=turn_seq, state="executing"))
+                self._run_tools(session_id, turn_seq, tool_calls, messages, token)
+                if token.is_cancelled():
+                    break
         except GatewayError as exc:
             self._active.pop(session_id, None)
-            self._finish(
-                session_id,
-                turn_seq,
-                "".join(parts),
-                interrupted=False,
-                reasoning="".join(reasoning_parts),
-            )
+            self._finish(session_id, turn_seq, final_content, interrupted=False, reasoning=final_reasoning)
             self._fail(session_id, turn_seq, _code_of(exc), str(exc))
             return
         except Exception:  # noqa: BLE001
             log.exception("回合异常")
             self._active.pop(session_id, None)
-            self._finish(
-                session_id,
-                turn_seq,
-                "".join(parts),
-                interrupted=False,
-                reasoning="".join(reasoning_parts),
-            )
+            self._finish(session_id, turn_seq, final_content, interrupted=False, reasoning=final_reasoning)
             self._fail(session_id, turn_seq, ErrorCode.INTERNAL.value, "内部错误")
             return
 
@@ -473,10 +509,10 @@ class AgentLoop(IAgentLoop):
         self._finish(
             session_id,
             turn_seq,
-            "".join(parts),
+            final_content,
             interrupted=interrupted,
-            usage=result,
-            reasoning="".join(reasoning_parts),
+            usage=total_usage,
+            reasoning=final_reasoning,
         )
         if interrupted:
             self.store.append(session_id, "user", "interrupt", {"initiator": "user"})
@@ -485,13 +521,55 @@ class AgentLoop(IAgentLoop):
             # v0.0.1：回合正常结束后，按阈值自动压缩记忆（默认关；见 _maybe_auto_compress）。
             self._maybe_auto_compress(session_id, meta)
 
+    def _tool_payloads(self) -> list[dict]:
+        """当前可见工具的 function calling 定义（无执行器则返回空，行为同首期）。"""
+        if self.executor is None:
+            return []
+        return self.executor.tool_payloads()
+
+    def _run_tools(
+        self,
+        session_id: str,
+        turn_seq: int,
+        tool_calls: list[dict],
+        messages: list[dict],
+        token: CancelToken,
+    ) -> None:
+        """执行一批工具调用，并把 `assistant.tool_calls` + `tool` 结果回注本次 messages。"""
+        assistant_calls = []
+        for call in tool_calls:
+            fn = call.get("function", {}) or {}
+            assistant_calls.append(
+                {
+                    "id": call.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", "{}"),
+                    },
+                }
+            )
+        messages.append({"role": "assistant", "content": "", "tool_calls": assistant_calls})
+        ctx = ToolContext(session_id=session_id, turn_seq=turn_seq)
+        for call in tool_calls:
+            if token.is_cancelled():
+                break
+            fn = call.get("function", {}) or {}
+            call_id = call.get("id", "")
+            name = fn.get("name", "")
+            result = self.executor.execute_raw(call_id, name, fn.get("arguments"), ctx)
+            messages.append(
+                {"role": "tool", "tool_call_id": call_id, "content": _tool_content(result)}
+            )
+
     def _prepare_context(
-        self, session_id: str, turn_seq: int, model_id: str, meta
+        self, session_id: str, turn_seq: int, model_id: str, meta, payloads: list[dict] | None = None
     ) -> list[dict] | None:
         """按会话策略组装回合上下文；超窗时上报并返回 None（rev22 抽取 / rev24 改策略）。
 
         rev24：上下文策略随会话走 —— 生效窗口 = 会话 `max_context`，未设则用模型窗口；
         reserve/文件上限纯由窗口派生；不再有全局 `settings.context`，也不再固定轮数。
+        rev42：`payloads` 非空时，把工具名写进环境陈述、工具定义 token 单列预算段。
         """
         window = meta.max_context or self._ctx_window(model_id)
         # rev23：system 首段 = 会话所用角色的 prompt.md；任何失败回退 YMT 预置（persona 侧保证）
@@ -511,7 +589,8 @@ class AgentLoop(IAgentLoop):
             file_truncate=effective_file_cap(_DEFAULT_FILE, window),
             window=window,
             main_model=model_id,
-            tool_names=[],
+            tool_names=[p.get("function", {}).get("name", "") for p in (payloads or [])],
+            tools_tokens=(self.executor.tools_tokens() if (payloads and self.executor) else 0),
         )
         budget = config.window - config.reserve if config.window else _UNBOUNDED
         snapshot = self.store.resume(session_id)

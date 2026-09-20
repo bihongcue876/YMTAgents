@@ -51,6 +51,7 @@ class Sidebar(QWidget):
     detail_session = Signal(str)  # rev24：右键「详情」→ 唤起右侧面板
     open_models = Signal()
     open_personas = Signal()
+    open_plugins = Signal()
     open_settings = Signal()
     toggle_requested = Signal()  # 折叠/展开请求（宽度由 MainWindow 的 QSplitter 落实）
 
@@ -88,6 +89,13 @@ class Sidebar(QWidget):
         self._settings_btn.setCursor(Qt.PointingHandCursor)
         self._settings_btn.clicked.connect(self.open_settings.emit)
 
+        self._plugins_btn = QPushButton("🔌 插件")
+        self._plugins_btn.setObjectName("railButton")
+        self._plugins_btn.setToolTip("MCP 插件与工具")
+        self._plugins_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
+        self._plugins_btn.setCursor(Qt.PointingHandCursor)
+        self._plugins_btn.clicked.connect(self.open_plugins.emit)
+
         rail = QVBoxLayout()
         rail.setContentsMargins(0, 0, 0, 0)
         rail.setSpacing(4)
@@ -95,6 +103,7 @@ class Sidebar(QWidget):
         rail.addStretch(1)
         rail.addWidget(self._models_btn)
         rail.addWidget(self._personas_btn)
+        rail.addWidget(self._plugins_btn)
         rail.addWidget(self._settings_btn)
 
         # -- 会话面板（可折叠） ----------------------------------------------

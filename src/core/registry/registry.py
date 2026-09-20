@@ -35,6 +35,10 @@ class Registry:
             raise ValueError(f"工具注册冲突：{spec.name}（禁止静默覆盖）")
         self._tools[spec.name] = (spec, handler)
 
+    def unregister(self, name: str) -> None:
+        """按名注销工具（幂等）；server 停止时供宿主回收其工具。"""
+        self._tools.pop(name, None)
+
     def snapshot(self) -> list[ToolSpec]:
         return [spec for spec, _ in self._tools.values()]
 

@@ -22,6 +22,7 @@ class MockGateway(IModelGateway):
         fail: Exception | None = None,
         test_result: tuple[bool, int | None, str | None] = (True, 12, None),
         remote_models: tuple[bool, list[str], str | None] = (True, ["mock-model"], None),
+        tool_call_rounds: list[list[dict]] | None = None,
     ) -> None:
         self._chunks = list(chunks)
         self._slots = slots if slots is not None else {"main": model_id}
@@ -32,6 +33,9 @@ class MockGateway(IModelGateway):
         self._fail = fail
         self._test_result = test_result
         self._remote_models = remote_models
+        #: rev42：按轮次脚本的 tool_calls（每项形如 {"id","name","arguments"}）。
+        self._tool_call_rounds = [list(r) for r in (tool_call_rounds or [])]
+        self._tool_round_index = 0
         self.calls: list[dict] = []
         self._providers: list[ProviderSpec] = []
 
@@ -94,14 +98,41 @@ class MockGateway(IModelGateway):
         on_delta,
         on_reasoning=None,
         params=None,
+        tools=None,
+        on_tool_calls=None,
     ) -> Usage:
         self.calls.append(
-            {"model_id": model_id, "messages": messages, "turn_seq": turn_seq, "params": params}
+            {
+                "model_id": model_id,
+                "messages": messages,
+                "turn_seq": turn_seq,
+                "params": params,
+                "tools": tools,
+            }
         )
         if self._timeout:
             raise GatewayTimeout("mock 静默超时")
         if self._fail is not None:
             raise self._fail
+        # rev42：按轮次脚本返回一次 tool_calls（不再吐正文）。
+        if self._tool_round_index < len(self._tool_call_rounds):
+            script = self._tool_call_rounds[self._tool_round_index]
+            self._tool_round_index += 1
+            if on_tool_calls is not None:
+                on_tool_calls(
+                    [
+                        {
+                            "id": item.get("id", f"call_{self._tool_round_index}"),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": item.get("arguments", "{}"),
+                            },
+                        }
+                        for item in script
+                    ]
+                )
+            return Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6)
         for i, chunk in enumerate(self._chunks):
             if on_reasoning is not None and isinstance(chunk, tuple):
                 text, reasoning = chunk

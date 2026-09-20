@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -50,6 +51,8 @@ class ConfigSnapshot:
     window: int = 0
     main_model: str | None = None
     tool_names: list[str] = field(default_factory=list)
+    #: v0.0.3：工具定义（function calling）占用的输入侧 token 估算；单列预算段，不可淘汰。
+    tools_tokens: int = 0
 
 
 def _env_statement(config: ConfigSnapshot) -> str:
@@ -66,14 +69,55 @@ def _env_statement(config: ConfigSnapshot) -> str:
 
 
 def _history_messages(events: list[dict]) -> list[dict]:
+    """把落盘事件还原为 OpenAI 兼容消息序列（v0.0.3 扩展工具调用）。
+
+    - `tool.call`（可连续多条）聚合为一条 `assistant` 消息的 `tool_calls`（内容为空）；
+      OpenAI 要求 `tool_calls` 的 assistant 消息**紧邻**其 `tool` 结果，故遇到其它事件即先落盘。
+    - `tool.result` → `{"role": "tool", "tool_call_id": ..., "content": ...}`。
+    - 失败结果取其 `error.message` 作为内容（模型须看到失败原因，docs 09 P5）。
+    """
     msgs: list[dict] = []
+    pending: list[dict] = []
+
+    def flush() -> None:
+        if pending:
+            msgs.append({"role": "assistant", "content": "", "tool_calls": list(pending)})
+            pending.clear()
+
     for event in events:
         t = event.get("type")
         payload = event.get("payload", {})
         if t == "msg.user":
+            flush()
             msgs.append({"role": "user", "content": payload.get("text", "")})
         elif t == "msg.assistant.final":
+            flush()
             msgs.append({"role": "assistant", "content": payload.get("content", "")})
+        elif t == "tool.call":
+            pending.append(
+                {
+                    "id": payload.get("call_id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": payload.get("name", ""),
+                        "arguments": json.dumps(payload.get("args", {}), ensure_ascii=False),
+                    },
+                }
+            )
+        elif t == "tool.result":
+            flush()
+            content = payload.get("output")
+            if content is None:
+                err = payload.get("error") or {}
+                content = err.get("message") or err.get("code") or ""
+            msgs.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": payload.get("call_id", ""),
+                    "content": content or "",
+                }
+            )
+    flush()
     return msgs
 
 
@@ -145,6 +189,7 @@ class ContextAssembler(IContextAssembler):
             - estimate_tokens(system_text)
             - estimate_tokens(session_memory_text)
             - estimate_tokens(env)
+            - config.tools_tokens
         )
         if estimate_tokens(files_block) > headroom:
             files_block = _truncate_to_tokens(files_block, max(headroom, 0))
@@ -162,6 +207,7 @@ class ContextAssembler(IContextAssembler):
                 + estimate_tokens(session_memory_text)
                 + estimate_tokens(env)
                 + estimate_tokens(files_block)
+                + config.tools_tokens
                 + hist_tokens()
             )
 
@@ -189,6 +235,7 @@ class ContextAssembler(IContextAssembler):
                 "env": estimate_tokens(env),
                 "files": estimate_tokens(files_block),
                 "retrieve": 0,
+                "tools": config.tools_tokens,
                 "history": hist_tokens(),
                 "reserve": config.reserve,
             },

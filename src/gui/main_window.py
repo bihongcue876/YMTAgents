@@ -46,6 +46,12 @@ from shared.envelope import (
     SwitchModel,
     TestConnection,
     UnarchiveSession,
+    McpServerDelete,
+    McpServerReconnect,
+    McpServerToggle,
+    McpServerUpsert,
+    McpServersRefresh,
+    GateRespond,
 )
 
 from core.bus.bridge import BusBridge
@@ -55,6 +61,7 @@ from gui.chat.session_panel import SessionPanel
 from gui.chat.view import ChatView
 from gui.pages.models import ModelsPage
 from gui.pages.personas import PersonasPage
+from gui.pages.plugins import GateDialog, PluginsPage
 from gui.pages.settings import SettingsPage
 from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX, Sidebar
 
@@ -84,6 +91,7 @@ class MainWindow(QMainWindow):
         self.chat = ChatView()
         self.models = ModelsPage()
         self.personas_page = PersonasPage()
+        self.plugins_page = PluginsPage()
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
         self._font_size: str | None = None
@@ -94,6 +102,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.chat)
         self.stack.addWidget(self.models)
         self.stack.addWidget(self.personas_page)
+        self.stack.addWidget(self.plugins_page)
         self.stack.addWidget(self.settings)
 
         # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
@@ -177,6 +186,7 @@ class MainWindow(QMainWindow):
         s.detail_session.connect(self._open_detail)
         s.open_models.connect(lambda: self.stack.setCurrentWidget(self.models))
         s.open_personas.connect(lambda: self.stack.setCurrentWidget(self.personas_page))
+        s.open_plugins.connect(lambda: self.stack.setCurrentWidget(self.plugins_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
 
         c = self.chat
@@ -221,6 +231,15 @@ class MainWindow(QMainWindow):
             lambda pid, path: self.bus.submit(PersonaExport(persona_id=pid, path=path))
         )
         p.import_requested.connect(lambda path: self.bus.submit(PersonaImport(path=path)))
+
+        pl = self.plugins_page
+        pl.upsert_requested.connect(lambda server: self.bus.submit(McpServerUpsert(server=server)))
+        pl.delete_requested.connect(lambda sid: self.bus.submit(McpServerDelete(id=sid)))
+        pl.toggle_requested.connect(
+            lambda sid, enabled: self.bus.submit(McpServerToggle(id=sid, enabled=enabled))
+        )
+        pl.reconnect_requested.connect(lambda sid: self.bus.submit(McpServerReconnect(id=sid)))
+        pl.refresh_requested.connect(lambda: self.bus.submit(McpServersRefresh()))
 
         self.settings.settings_update.connect(
             lambda section, data: self.bus.submit(SettingsUpdate(section=section, data=data))
@@ -418,6 +437,10 @@ class MainWindow(QMainWindow):
             self.chat.on_final(event)
         elif t == "turn.status":
             self.chat.on_status(event)
+        elif t == "tool.call":
+            self.chat.on_tool_call(event)
+        elif t == "tool.result":
+            self.chat.on_tool_result(event)
         elif t == "error":
             self.chat.on_error(event)
         elif t == "provider.list":
@@ -466,3 +489,19 @@ class MainWindow(QMainWindow):
             # rev24：关闭 stage-1 遗留缺口 —— 用量事件被消费；面板可见时刷新详情
             if self.detail.isVisible() and self._current_session_id:
                 self.bus.submit(SessionDetail(session_id=self._current_session_id))
+        elif t == "mcp.server.list":
+            self.plugins_page.update_servers(event.servers)
+        elif t == "tool.list":
+            self.plugins_page.update_tools(event.tools)
+        elif t == "mcp.server.status":
+            self.plugins_page.update_status(event.id, event.state, event.tools, event.error)
+        elif t == "gate.request":
+            self._on_gate_request(event)
+
+    def _on_gate_request(self, event) -> None:
+        """工具调用关卡：弹出确认卡片，用户裁决后回发 GateRespond（core 侧正泵取队列等待）。"""
+        dialog = GateDialog(event, self)
+        dialog.exec()
+        self.bus.submit(
+            GateRespond(call_id=event.call_id, decision="allow" if dialog.decision() else "deny")
+        )

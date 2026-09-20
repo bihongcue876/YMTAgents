@@ -33,6 +33,13 @@ class ErrorCode(str, Enum):
     SESSION_NOT_FOUND = "session_not_found"
     STORAGE_ERROR = "storage_error"
     INTERNAL = "internal"
+    # v0.0.3：工具调用六码（docs 09 §3）；一码一义，按真实原因归码
+    TOOL_DENIED = "tool_denied"
+    TOOL_TIMEOUT = "tool_timeout"
+    TOOL_CANCELLED = "tool_cancelled"
+    TOOL_UNAVAILABLE = "tool_unavailable"
+    TOOL_INVALID_ARGS = "tool_invalid_args"
+    TOOL_BACKEND_ERROR = "tool_backend_error"
 
 
 class ErrorScope(str, Enum):
@@ -62,6 +69,12 @@ ERROR_TEXT: dict[str, str] = {
     ErrorCode.SESSION_NOT_FOUND.value: "会话不存在",
     ErrorCode.STORAGE_ERROR.value: "数据读写异常",
     ErrorCode.INTERNAL.value: "内部错误",
+    ErrorCode.TOOL_DENIED.value: "工具调用被拒绝（权限不足或用户拒绝）",
+    ErrorCode.TOOL_TIMEOUT.value: "工具调用超时",
+    ErrorCode.TOOL_CANCELLED.value: "工具调用被取消",
+    ErrorCode.TOOL_UNAVAILABLE.value: "工具不可用（未注册或服务器未就绪）",
+    ErrorCode.TOOL_INVALID_ARGS.value: "工具参数无效",
+    ErrorCode.TOOL_BACKEND_ERROR.value: "工具后端错误",
 }
 
 
