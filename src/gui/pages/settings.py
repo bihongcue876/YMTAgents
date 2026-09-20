@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from gui import theme
 from gui.widgets import text_fit
 
-VERSION = "0.0.1"
+VERSION = "0.0.2"
 
 
 class SettingsPage(QWidget):
