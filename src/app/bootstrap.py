@@ -28,6 +28,7 @@ from core.registry.registry import Registry
 from core.security.dpapi import DpapiBox
 from core.security.legacy import LegacyKeyring, migrate_keyring_to_vault
 from core.security.vault import ISecretStore, Vault
+from core.skills.manager import SkillManager
 from core.store.config_store import ConfigStore
 from core.store.migrate import migrate_all
 
@@ -50,6 +51,7 @@ class AppContext:
     secrets: ISecretStore
     mcp_manager: McpManager
     executor: ToolExecutor
+    skill_manager: SkillManager
 
 
 def bootstrap(
@@ -80,6 +82,15 @@ def bootstrap(
     supervisor = ModuleSupervisor()
     registry = Registry()
     personas = PersonaStore(root / "personas")
+    # v0.0.4：Skills 宿主（预置复制 + 注册启用技能；无启用技能时零影响）。
+    skill_manager = SkillManager(
+        config_store,
+        registry,
+        root / "skills",
+        audit=sink.append_audit,
+        presets_dir=Path(__file__).resolve().parent.parent / "core" / "skills" / "presets",
+    )
+    skill_manager.reload()
     # rev41/rev43/rev44：MCP 宿主 + 工具执行器（无启用的 server 时宿主为 disabled，零影响）。
     mcp_manager = McpManager(
         registry, config_store, secret_store, audit=sink.append_audit, emit=bridge.emit_event
@@ -95,6 +106,7 @@ def bootstrap(
     controller = CoreController(
         bridge, session_store, gateway, agent, supervisor, registry, config_store, root,
         personas=personas, executor=executor, mcp_manager=mcp_manager,
+        skill_manager=skill_manager,
     )
     # 启用的 server 在此启动；连接失败只落 server 状态（不阻断启动）。
     mcp_manager.start_all()
@@ -117,4 +129,5 @@ def bootstrap(
         secrets=secret_store,
         mcp_manager=mcp_manager,
         executor=executor,
+        skill_manager=skill_manager,
     )

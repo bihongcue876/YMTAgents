@@ -61,6 +61,8 @@ from shared.envelope import (
     PersonaImported,
     McpServerList,
     McpServerStatus,
+    SkillImported,
+    SkillList,
     ToolList,
 )
 from shared.schema import (
@@ -103,6 +105,7 @@ class CoreController:
         personas: PersonaStore | None = None,
         executor: ToolExecutor | None = None,
         mcp_manager: McpManager | None = None,
+        skill_manager=None,
     ) -> None:
         self.bridge = bridge
         self.store = store
@@ -115,6 +118,7 @@ class CoreController:
         self.personas = personas
         self.executor = executor
         self.mcp_manager = mcp_manager
+        self.skill_manager = skill_manager
         self.current_session_id: str | None = None
         # rev43：confirm 关卡裁决登记（泵取队列时命中；正常分派路径亦可投递）。
         self._gate_decisions: dict[str, bool] = {}
@@ -194,6 +198,7 @@ class CoreController:
         self._emit_health()
         self._emit_personas()
         self._emit_mcp()
+        self._emit_skills()
 
     # -- Persona（阶段 2 · spec rev23） --------------------------------------
     def _emit_personas(self) -> None:
@@ -381,6 +386,79 @@ class CoreController:
         # 正常路径下 gate.respond 多被 _gate_handler 泵取命中；此处登记以兜底竞态。
         self._gate_decisions[request.call_id] = request.decision == "allow"
 
+    # -- Skills（v0.0.4） -----------------------------------------------------
+    def _emit_skills(self) -> None:
+        if self.skill_manager is None:
+            return
+        self.emit(SkillList(skills=self.skill_manager.list_status()))
+
+    def _on_skill_toggle(self, request) -> None:
+        if self.skill_manager is None:
+            return
+        try:
+            self.skill_manager.toggle(request.id, request.enabled)
+        except ValueError as exc:
+            self._report("config", ErrorCode.INVALID_REQUEST.value, str(exc))
+            return
+        self._emit_skills()
+
+    def _on_skill_import(self, request) -> None:
+        if self.skill_manager is None:
+            return
+        try:
+            metas = self.skill_manager.import_skill(request.source)
+        except ValueError as exc:
+            self.emit(SkillImported(ok=False, source=request.source, error=str(exc)))
+            return
+        except Exception:  # noqa: BLE001 - 边界收口，明细只进日志
+            log.exception("技能导入失败")
+            self.emit(SkillImported(ok=False, source=request.source, error="导入失败：磁盘写入异常。"))
+            return
+        self.emit(
+            SkillImported(
+                ok=True,
+                source=request.source,
+                skill_ids=[m.id for m in metas],
+                names=[m.name for m in metas],
+            )
+        )
+        self._emit_skills()
+
+    def _on_skill_update(self, request) -> None:
+        if self.skill_manager is None:
+            return
+        try:
+            meta = self.skill_manager.update_skill(request.id)
+        except ValueError as exc:
+            self.emit(SkillImported(ok=False, source=request.id, updated=True, error=str(exc)))
+            return
+        except Exception:  # noqa: BLE001 - 边界收口
+            log.exception("技能更新失败")
+            self.emit(SkillImported(ok=False, source=request.id, updated=True, error="更新失败：磁盘写入异常。"))
+            return
+        self.emit(SkillImported(ok=True, source=request.id, skill_ids=[meta.id], names=[meta.name], updated=True))
+        self._emit_skills()
+
+    def _on_skill_delete(self, request) -> None:
+        if self.skill_manager is None:
+            return
+        try:
+            self.skill_manager.delete(request.id)
+        except ValueError as exc:
+            self._report("config", ErrorCode.INVALID_REQUEST.value, str(exc))
+            return
+        self._emit_skills()
+
+    def _on_skill_permission(self, request) -> None:
+        if self.skill_manager is None:
+            return
+        try:
+            self.skill_manager.set_permission(request.id, request.permission)
+        except ValueError as exc:
+            self._report("config", ErrorCode.INVALID_REQUEST.value, str(exc))
+            return
+        self._emit_skills()
+
     def _gate_handler(self, call_id: str, name: str, args: dict, permission: str) -> bool:
         """confirm 关卡：泵取请求队列直到收到本次 call_id 的 gate.respond。
 
@@ -484,6 +562,18 @@ class CoreController:
             self._on_mcp_reconnect(request)
         elif t == "mcp.server.refresh":
             self._emit_mcp()
+        elif t == "skill.toggle":
+            self._on_skill_toggle(request)
+        elif t == "skill.import":
+            self._on_skill_import(request)
+        elif t == "skill.update":
+            self._on_skill_update(request)
+        elif t == "skill.delete":
+            self._on_skill_delete(request)
+        elif t == "skill.permission":
+            self._on_skill_permission(request)
+        elif t == "skill.refresh":
+            self._emit_skills()
         elif t == "gate.respond":
             self._on_gate_respond(request)
         else:
