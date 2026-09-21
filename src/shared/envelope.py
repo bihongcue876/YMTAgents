@@ -539,6 +539,49 @@ class GateRespond(Envelope):
     decision: Literal["allow", "deny"]
 
 
+# ---------------------------------------------------------------------------
+# Skills（v0.0.4）：Skill = 带元数据的纯提示词指令包（docs 07 §4.2）
+# ---------------------------------------------------------------------------
+class SkillToggle(Envelope):
+    type: Literal["skill.toggle"] = "skill.toggle"
+    id: str
+    enabled: bool
+
+
+class SkillImport(Envelope):
+    """导入技能：目录（含 SKILL.md，Claude skill 风格连 resources/ 复制）、
+    SKILL.md 文件路径、git 仓库 URL 或本地 git 目录（多技能仓库逐个发现导入）。"""
+
+    type: Literal["skill.import"] = "skill.import"
+    source: str
+
+
+class SkillUpdate(Envelope):
+    """按 skill.origin.json 记录的来源重新拉取覆盖（保 id 与启用态）。"""
+
+    type: Literal["skill.update"] = "skill.update"
+    id: str
+
+
+class SkillDelete(Envelope):
+    type: Literal["skill.delete"] = "skill.delete"
+    id: str
+
+
+class SkillPermission(Envelope):
+    """逐技能权限档覆盖（落 plugins.json + audit；降权随时，提权=落盘显式）。"""
+
+    type: Literal["skill.permission"] = "skill.permission"
+    id: str
+    permission: Literal["safe", "confirm", "restricted"]
+
+
+class SkillsRefresh(Envelope):
+    """请求重发技能列表（技能页「刷新」）。"""
+
+    type: Literal["skill.refresh"] = "skill.refresh"
+
+
 class PersonaExported(Envelope):
     type: Literal["persona.export.result"] = "persona.export.result"
     persona_id: str
@@ -625,6 +668,28 @@ class GateResult(Envelope):
 
 
 # ---------------------------------------------------------------------------
+# Skills 事件（v0.0.4）
+# ---------------------------------------------------------------------------
+class SkillList(Envelope):
+    """技能列表（推给技能页）。"""
+
+    type: Literal["skill.list"] = "skill.list"
+    skills: list[dict] = Field(default_factory=list)
+
+
+class SkillImported(Envelope):
+    """导入/更新结果回执（skill.update 复用本事件，updated=True）。"""
+
+    type: Literal["skill.import.result"] = "skill.import.result"
+    ok: bool
+    source: str = ""
+    skill_ids: list[str] = Field(default_factory=list)
+    names: list[str] = Field(default_factory=list)
+    updated: bool = False
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # 联合类型 + 校验器
 # ---------------------------------------------------------------------------
 Request = Annotated[
@@ -663,6 +728,12 @@ Request = Annotated[
         McpServerReconnect,
         McpServersRefresh,
         GateRespond,
+        SkillToggle,
+        SkillImport,
+        SkillUpdate,
+        SkillDelete,
+        SkillPermission,
+        SkillsRefresh,
     ],
     Field(discriminator="type"),
 ]
@@ -695,6 +766,8 @@ Event = Annotated[
         ToolResult,
         GateRequest,
         GateResult,
+        SkillList,
+        SkillImported,
     ],
     Field(discriminator="type"),
 ]

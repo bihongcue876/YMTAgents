@@ -211,8 +211,19 @@ class BuiltinToolConfig(BaseModel):
 
 
 class SkillsConfig(BaseModel):
+    """Skills 注册数据面（docs 03 §3.4 / 07 §5）。
+
+    - `installed`：已安装技能 id（启动时与 skills/ 目录扫描调和，目录为准）。
+    - `enabled`：期望态开关（唯一来源）。
+    - `permissions`：逐技能权限档覆盖（v0.0.4；键=技能 id；缺省=SKILL.md frontmatter，
+      缺省缺省档 safe）。降权随时可配；提权=落盘显式 + audit（docs 09 §2）。
+    """
+
     installed: list[str] = Field(default_factory=list)
     enabled: list[str] = Field(default_factory=list)
+    permissions: dict[str, Literal["safe", "confirm", "restricted"]] = Field(
+        default_factory=dict
+    )
 
 
 class PluginsConfig(BaseModel):
