@@ -196,7 +196,7 @@ class ToolExecutor(IToolExecutor):
             )
         if not result.duration_ms:
             result = result.model_copy(update={"duration_ms": int((time.monotonic() - started) * 1000)})
-        result = self._externalize(call_id, result, ctx)
+        result = self._externalize(name, call_id, result, ctx)
 
         self._persist_result(call_id, result, ctx)
         self.audit(
@@ -225,13 +225,19 @@ class ToolExecutor(IToolExecutor):
         return allow
 
     # -- 落盘 --------------------------------------------------------------
-    def _externalize(self, call_id: str, result: ToolResult, ctx: ToolContext | None) -> ToolResult:
+    def _externalize(self, name: str, call_id: str, result: ToolResult,
+                     ctx: ToolContext | None) -> ToolResult:
         """超大输出外置：全文写入会话 outputs/<call_id>.txt，事件流只留预览 + output_ref。
+
+        `skill.*` 豁免（v0.0.4）：技能正文是渐进披露的**一等输入**而非工具输出，
+        外置成预览会让模型读不到指令——其体量上限在加载期收口（20K 字符 fail-closed）。
 
         外置失败不阻断工具结果（仅记日志）；无 store/无会话上下文时保持内联。
         """
         output = result.output
         if not output or len(output) <= INLINE_OUTPUT_CHARS or ctx is None:
+            return result
+        if name.startswith("skill."):
             return result
         writer = getattr(self.store, "write_output", None)
         if writer is None:
