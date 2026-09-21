@@ -51,6 +51,12 @@ from shared.envelope import (
     McpServerToggle,
     McpServerUpsert,
     McpServersRefresh,
+    SkillDelete,
+    SkillImport,
+    SkillPermission,
+    SkillToggle,
+    SkillUpdate,
+    SkillsRefresh,
     GateRespond,
 )
 
@@ -63,6 +69,7 @@ from gui.pages.models import ModelsPage
 from gui.pages.personas import PersonasPage
 from gui.pages.plugins import GateDialog, PluginsPage
 from gui.pages.settings import SettingsPage
+from gui.pages.skills import SkillsPage
 from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX, Sidebar
 
 
@@ -92,6 +99,8 @@ class MainWindow(QMainWindow):
         self.models = ModelsPage()
         self.personas_page = PersonasPage()
         self.plugins_page = PluginsPage()
+        self.skills_page = SkillsPage()
+        self.skills_page.set_data_root(data_root)
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
         self._font_size: str | None = None
@@ -103,6 +112,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.models)
         self.stack.addWidget(self.personas_page)
         self.stack.addWidget(self.plugins_page)
+        self.stack.addWidget(self.skills_page)
         self.stack.addWidget(self.settings)
 
         # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
@@ -186,6 +196,7 @@ class MainWindow(QMainWindow):
         s.detail_session.connect(self._open_detail)
         s.open_models.connect(lambda: self.stack.setCurrentWidget(self.models))
         s.open_personas.connect(lambda: self.stack.setCurrentWidget(self.personas_page))
+        s.open_skills.connect(lambda: self.stack.setCurrentWidget(self.skills_page))
         s.open_plugins.connect(lambda: self.stack.setCurrentWidget(self.plugins_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
 
@@ -240,6 +251,18 @@ class MainWindow(QMainWindow):
         )
         pl.reconnect_requested.connect(lambda sid: self.bus.submit(McpServerReconnect(id=sid)))
         pl.refresh_requested.connect(lambda: self.bus.submit(McpServersRefresh()))
+
+        sk = self.skills_page
+        sk.toggle_requested.connect(
+            lambda sid, enabled: self.bus.submit(SkillToggle(id=sid, enabled=enabled))
+        )
+        sk.import_requested.connect(lambda source: self.bus.submit(SkillImport(source=source)))
+        sk.update_requested.connect(lambda sid: self.bus.submit(SkillUpdate(id=sid)))
+        sk.delete_requested.connect(lambda sid: self.bus.submit(SkillDelete(id=sid)))
+        sk.permission_requested.connect(
+            lambda sid, perm: self.bus.submit(SkillPermission(id=sid, permission=perm))
+        )
+        sk.refresh_requested.connect(lambda: self.bus.submit(SkillsRefresh()))
 
         self.settings.settings_update.connect(
             lambda section, data: self.bus.submit(SettingsUpdate(section=section, data=data))
@@ -495,6 +518,18 @@ class MainWindow(QMainWindow):
             self.plugins_page.update_tools(event.tools)
         elif t == "mcp.server.status":
             self.plugins_page.update_status(event.id, event.state, event.tools, event.error)
+        elif t == "skill.list":
+            self.skills_page.update_skills(event.skills)
+        elif t == "skill.import.result":
+            if event.ok:
+                if event.updated:
+                    QMessageBox.information(self, "更新完成", f"技能「{event.names[0] if event.names else ''}」已更新。")
+                else:
+                    names = "、".join(event.names)
+                    QMessageBox.information(self, "导入完成", f"已导入技能：{names}（默认停用，请在列表中启用）。")
+            else:
+                title = "更新失败" if event.updated else "导入失败"
+                QMessageBox.warning(self, title, event.error or "操作失败。")
         elif t == "gate.request":
             self._on_gate_request(event)
 

@@ -51,6 +51,7 @@ class Sidebar(QWidget):
     detail_session = Signal(str)  # rev24：右键「详情」→ 唤起右侧面板
     open_models = Signal()
     open_personas = Signal()
+    open_skills = Signal()
     open_plugins = Signal()
     open_settings = Signal()
     toggle_requested = Signal()  # 折叠/展开请求（宽度由 MainWindow 的 QSplitter 落实）
@@ -96,6 +97,13 @@ class Sidebar(QWidget):
         self._plugins_btn.setCursor(Qt.PointingHandCursor)
         self._plugins_btn.clicked.connect(self.open_plugins.emit)
 
+        self._skills_btn = QPushButton("🧩 技能")
+        self._skills_btn.setObjectName("railButton")
+        self._skills_btn.setToolTip("技能（提示词指令包）")
+        self._skills_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
+        self._skills_btn.setCursor(Qt.PointingHandCursor)
+        self._skills_btn.clicked.connect(self.open_skills.emit)
+
         rail = QVBoxLayout()
         rail.setContentsMargins(0, 0, 0, 0)
         rail.setSpacing(4)
@@ -103,6 +111,7 @@ class Sidebar(QWidget):
         rail.addStretch(1)
         rail.addWidget(self._models_btn)
         rail.addWidget(self._personas_btn)
+        rail.addWidget(self._skills_btn)
         rail.addWidget(self._plugins_btn)
         rail.addWidget(self._settings_btn)
 
