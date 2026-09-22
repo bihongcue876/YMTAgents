@@ -319,16 +319,3 @@ def ansi_to_html(
 ) -> str:
     """极简 ANSI SGR 解析（颜色 / 加粗 / 重置）；解析本体见 `_ansi_spans`。"""
     return _page(theme, f"<pre>{_ansi_spans(text, theme)}</pre>", "", font_size)
-
-
-def render_to_html(
-    kind: str,
-    text: str,
-    theme: str | None = DEFAULT_THEME,
-    font_size: str | None = DEFAULT_FONT_SIZE,
-) -> str:
-    if kind == "markdown":
-        return markdown_to_html(text, theme, font_size)
-    if kind == "ansi":
-        return ansi_to_html(text, theme, font_size)
-    return plain_to_html(text, theme, font_size)

@@ -69,7 +69,6 @@ class WorkspaceDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("编辑工作区" if info else "新建工作区")
         self._editing = bool(info)
-        self._builtin = bool(info and info.get("builtin"))
 
         self._name = QLineEdit((info or {}).get("name", ""))
         self._name.setPlaceholderText("例如：前端重构、论文实验")
@@ -200,7 +199,6 @@ class WorkspacesPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(holder)
-        self._scroll = scroll
 
         self._files_title = QLabel("文件")
         self._files_title.setObjectName("mutedLabel")
@@ -346,9 +344,8 @@ class WorkspacesPage(QWidget):
         open_dir = QPushButton("打开目录")
         open_dir.setEnabled(bool(info.get("root")) and not info.get("missing"))
         open_dir.setToolTip("在文件管理器中打开该工作区目录")
-        open_dir.clicked.connect(
-            lambda _=False, path=info.get("root") or "": self.open_dir_requested.emit(path)
-        )
+        root = info.get("root") or ""
+        open_dir.clicked.connect(lambda _=False, path=root: self.open_dir_requested.emit(path))
         actions.addWidget(open_dir)
         edit = QPushButton("编辑")
         edit.clicked.connect(lambda _=False, item=info: self._on_edit(item))

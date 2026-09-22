@@ -368,6 +368,7 @@ class Sidebar(QWidget):
 
     # -- 交互 --------------------------------------------------------------
     def select(self, session_id: str) -> None:
+        """按会话 id 选中列表项（分组改造的回归锚点，见 test_gui_workspaces）。"""
         for lst in self.findChildren(QListWidget):
             for i in range(lst.count()):
                 item = lst.item(i)

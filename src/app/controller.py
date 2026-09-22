@@ -42,7 +42,6 @@ from shared.envelope import (
     RevertSession,
     SwitchBranch,
     SessionBranches,
-    BranchInfo,
     SetSlot,
     SettingsState,
     SettingsUpdate,
@@ -60,7 +59,6 @@ from shared.envelope import (
     PersonaImport,
     PersonaImported,
     McpServerList,
-    McpServerStatus,
     SkillImported,
     SkillList,
     ShellList,
@@ -98,7 +96,6 @@ from core.store.config_store import ConfigStore
 from core.workspace.layout import WorkspaceDenied, WorkspacePathError
 
 from app import logging_setup
-from shared.errors import error_text
 from shared.ids import WS_DEFAULT
 
 log = logging.getLogger(__name__)

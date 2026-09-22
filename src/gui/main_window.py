@@ -25,8 +25,6 @@ from shared.envelope import (
     NewSession,
     PersonaDelete,
     PersonaExport,
-    PersonaExported,
-    PersonaImported,
     PersonaImport,
     PersonaSave,
     PersonaSetDefault,

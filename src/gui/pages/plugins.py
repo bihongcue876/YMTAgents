@@ -249,7 +249,8 @@ class PluginsPage(QWidget):
         reconnect.clicked.connect(lambda: self.reconnect_requested.emit(server.get("id", "")))
         enabled = QCheckBox("启用")
         enabled.setChecked(bool(server.get("enabled")))
-        enabled.toggled.connect(lambda checked, sid=server.get("id", ""): self._on_toggle(sid, checked))
+        sid = server.get("id", "")
+        enabled.toggled.connect(lambda checked, sid=sid: self._on_toggle(sid, checked))
 
         head = QHBoxLayout()
         head.addWidget(name)

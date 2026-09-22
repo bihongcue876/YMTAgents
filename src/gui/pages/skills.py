@@ -125,8 +125,9 @@ class SkillsPage(QWidget):
         actions = QHBoxLayout()
         toggle = QPushButton("停用" if info.get("enabled") else "启用")
         toggle.setEnabled(not info.get("error"))  # 解析失败的技能不可启用
+        enabled = not info.get("enabled")
         toggle.clicked.connect(
-            lambda _=False, sid=info["id"], en=not info.get("enabled"): self.toggle_requested.emit(sid, en)
+            lambda _=False, sid=info["id"], en=enabled: self.toggle_requested.emit(sid, en)
         )
         actions.addWidget(toggle)
         if info.get("updateable"):

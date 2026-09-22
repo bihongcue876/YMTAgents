@@ -55,7 +55,6 @@ class ChatView(QWidget):
         self.empty.add_model.connect(self.add_model.emit)
         self.empty.start_chat.connect(self.input.focus)
         self._current_model: str | None = None
-        self._current_persona: str | None = None
         self._refresh_empty()
 
     def _refresh_empty(self) -> None:
@@ -75,7 +74,6 @@ class ChatView(QWidget):
 
     def set_personas(self, personas, current: str | None) -> None:
         """角色下拉（rev23）：current = 当前会话所用角色（None → 全局默认）。"""
-        self._current_persona = current
         self.header.set_personas(personas, current)
 
     def set_title(self, title: str) -> None:
