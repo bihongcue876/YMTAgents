@@ -47,13 +47,6 @@ class ErrorCode(str, Enum):
     WORKSPACE_DENIED = "workspace_denied"
 
 
-class ErrorScope(str, Enum):
-    SESSION = "session"
-    CONFIG = "config"
-    GATEWAY = "gateway"
-    SYSTEM = "system"
-
-
 # 码 → 前端中文提示（单一来源）。具体场景可在 message 中补充对象与操作指引。
 ERROR_TEXT: dict[str, str] = {
     ErrorCode.INVALID_REQUEST.value: "请求格式不合法",

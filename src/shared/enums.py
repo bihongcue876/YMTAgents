@@ -24,19 +24,3 @@ class Permission(str, Enum):
     SAFE = "safe"
     CONFIRM = "confirm"
     RESTRICTED = "restricted"
-
-
-class Slot(str, Enum):
-    """模型槽位（spec §1.1）。"""
-
-    MAIN = "main"
-    THINKING = "thinking"
-    FAST = "fast"
-    EMBEDDING = "embedding"
-
-
-class SessionState(str, Enum):
-    """会话状态（docs 03 §8）。"""
-
-    ACTIVE = "active"
-    ARCHIVED = "archived"
