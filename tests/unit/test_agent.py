@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 
 from shared.envelope import AssistantFinal, ModelSpec, ProviderSpec, SendMessage, Usage
+from shared.tokens import estimate_tokens
 from core.agent.context import (
     DEFAULT_SYSTEM_PROMPT,
     TRUNCATION_MARK,
     ConfigSnapshot,
     ContextAssembler,
     _truncate_to_tokens,
-    estimate_tokens,
 )
 from core.agent.loop import AgentLoop
 from core.agent.session import SessionStore

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 import pytest
@@ -36,7 +37,5 @@ def _reap_core_workers(monkeypatch):
     monkeypatch.setattr(CoreWorker, "__init__", tracking_init)
     yield
     for worker in created:
-        try:
+        with contextlib.suppress(Exception):  # 回收失败不得掩盖真实断言失败
             worker.stop()
-        except Exception:  # noqa: BLE001 - 回收失败不得掩盖真实断言失败
-            pass

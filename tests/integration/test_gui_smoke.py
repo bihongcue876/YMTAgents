@@ -512,7 +512,7 @@ def test_empty_state_toggles_cta_and_switches_page(tmp_path, monkeypatch, qapp):
     list_providers = ctx.gateway.list_providers
     try:
         # 无供应商：CTA = 添加模型
-        monkeypatch.setattr(ctx.gateway, "list_providers", lambda: [])
+        monkeypatch.setattr(ctx.gateway, "list_providers", list)
         ctx.controller.push_initial_state()
         qapp.processEvents()
         assert window.chat._stack.currentWidget() is window.chat.empty
@@ -633,7 +633,7 @@ def test_session_panel_memory_controls(qapp):
     assert panel._memory_compress.checkState() == Qt.PartiallyChecked
     assert panel._memory_auto.checkState() == Qt.PartiallyChecked
     # rev35：三态文字带状态后缀并按态着色（勾选与否一眼可辨）
-    assert "使用记忆（跟随默认）" == panel._memory_use.text()
+    assert panel._memory_use.text() == "使用记忆（跟随默认）"
     assert panel._memory_use.property("tri") == "default"
     assert "推荐范围" in panel._recommended.text()
     assert panel._threshold_auto.isChecked()

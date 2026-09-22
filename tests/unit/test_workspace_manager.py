@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,16 @@ from core.workspace import layout
 from core.workspace.manager import IWorkspaceManager, WorkspaceManager
 from core.workspace.layout import WorkspaceDenied, WorkspacePathError
 from shared.ids import WS_DEFAULT
+
+
+def _strip_skeleton_and_remove(ext: Path) -> None:
+    """移除 D3 骨架后删掉外部目录，模拟「用户删/移走了整个工作区目录」。
+
+    create（用户裁决 D3）会在工作区**之中**建 `.ymtdata` 骨架 —— 直接 `ext.rmdir()`
+    会报「目录不是空的」。测试关心的是目录消失后的 missing 信号，不是骨架。
+    """
+    shutil.rmtree(ext / ".ymtdata")
+    ext.rmdir()
 
 
 def _manager(tmp_path):
@@ -196,7 +207,7 @@ def test_list_status_marks_missing_root(tmp_path):
     ext = tmp_path / "proj"
     ext.mkdir()
     wid = manager.create("项目", root_kind="external", root=str(ext))
-    ext.rmdir()
+    _strip_skeleton_and_remove(ext)
     status = {item["id"]: item for item in manager.list_status()}
     assert status[wid]["missing"] is True
 
@@ -207,7 +218,7 @@ def test_external_root_is_not_recreated_when_missing(tmp_path):
     ext = tmp_path / "proj"
     ext.mkdir()
     wid = manager.create("项目", root_kind="external", root=str(ext))
-    ext.rmdir()
+    _strip_skeleton_and_remove(ext)
 
     manager.update(wid, name="改名了")
 
@@ -483,7 +494,7 @@ def test_detail_reports_missing_root(tmp_path):
     ext = tmp_path / "proj"
     ext.mkdir()
     wid = manager.create("项目", root_kind="external", root=str(ext))
-    ext.rmdir()
+    _strip_skeleton_and_remove(ext)
     result = manager.detail(wid)
     assert result["error"] and "不存在" in result["error"]
 
