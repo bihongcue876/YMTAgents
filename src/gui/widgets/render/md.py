@@ -49,6 +49,47 @@ def _highlight(code: str, lang: str, _attrs: str = "") -> str:
 
 _MD = MarkdownIt("commonmark", {"highlight": _highlight}).enable("table").enable("strikethrough")
 
+#: ANSI SGR 序列（颜色 / 加粗 / 重置）。
+_ANSI_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def _ansi_spans(text: str, theme: str | None) -> str:
+    """ANSI SGR → 带色 HTML 片段（颜色经 `theme.ansi_colors` 主题感知，暗色重映射黑白两端）。
+
+    统一的 ANSI 解析只此一处：聊天流的工具卡输出与终端页监视区共用（docs 05 §3 统一渲染管线）。
+    """
+    colors = ansi_colors(theme)
+    out: list[str] = []
+    open_span = False
+    pos = 0
+    for match in _ANSI_RE.finditer(text or ""):
+        out.append(_html.escape(text[pos : match.start()]))
+        pos = match.end()
+        code = match.group(1)
+        if code in colors:
+            if open_span:
+                out.append("</span>")
+            out.append(f'<span style="color:{colors[code]}">')
+            open_span = True
+        elif code in ("", "0"):
+            if open_span:
+                out.append("</span>")
+                open_span = False
+        elif code == "1":
+            if open_span:
+                out.append("</span>")
+            out.append('<span style="font-weight:bold">')
+            open_span = True
+    out.append(_html.escape(text[pos:]))
+    if open_span:
+        out.append("</span>")
+    return "".join(out)
+
+
+def has_ansi(text: str) -> bool:
+    """文本是否含 ANSI 转义（决定是否走 ANSI 渲染）。"""
+    return bool(text) and _ANSI_RE.search(text) is not None
+
 # 结构性排版（与主题无关）放在页面骨架里，只装载一次；
 # 主题色与字号（随外观变化）放进 #stream 内的 <style>，随 innerHTML 局部更新（rev19）。
 _BASE_CSS = """body { font-family: system-ui, "Segoe UI", sans-serif; line-height: 1.6;
@@ -74,7 +115,9 @@ blockquote { border-left: 3px solid; margin: 0; padding-left: 10px; }
 .tool details { border: 1px solid rgba(128,128,128,0.35); border-radius: 6px; padding: 4px 10px; }
 .tool summary { cursor: pointer; opacity: 0.85; }
 .tool pre { margin: 6px 0 2px; }
-.tool .tool-label { opacity: 0.7; }"""
+.tool .tool-label { opacity: 0.7; }
+/* 终端监视区（v0.0.5）：等宽、不换行截断（横向滚动），上下留白归零 */
+pre.term { margin: 0; padding: 6px 8px; min-height: 100%; }"""
 
 _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -155,10 +198,12 @@ def _block_error(message: str, detail: str | None, index: int = 0) -> str:
     return f'<div class="msg error" id="m{index}">{text}</div>'
 
 
-def _block_tool(message: dict, index: int = 0) -> str:
-    """工具调用块（v0.0.3 完善）：折叠展示入参与结果；结果未到前显示「进行中」。
+def _block_tool(message: dict, index: int = 0, theme: str | None = DEFAULT_THEME) -> str:
+    """工具调用块（v0.0.3 完善；v0.0.5 输出支持 ANSI）：折叠展示入参与结果。
 
     用原生 `<details>`（CSP 禁脚本），默认折叠，点击展开。
+    **输出的渲染规则是客观的**：含 ANSI 转义 → 主题感知的带色渲染（shell 输出即此类）；
+    否则原样转义 —— 不按工具名写特例。
     """
     name = _html.escape(str(message.get("name") or "tool"))
     permission = _html.escape(str(message.get("permission") or "confirm"))
@@ -176,7 +221,9 @@ def _block_tool(message: dict, index: int = 0) -> str:
         )
     output = message.get("output")
     if output:
-        parts.append(f'<div class="tool-label">输出</div><pre>{_html.escape(str(output))}</pre>')
+        text = str(output)
+        rendered = _ansi_spans(text, theme) if has_ansi(text) else _html.escape(text)
+        parts.append(f'<div class="tool-label">输出</div><pre>{rendered}</pre>')
     error = message.get("error")
     if error:
         code = _html.escape(str(error.get("code", "")))
@@ -189,7 +236,7 @@ def _block_tool(message: dict, index: int = 0) -> str:
     return "".join(parts)
 
 
-def _messages_body(messages: list[dict]) -> str:
+def _messages_body(messages: list[dict], theme: str | None = DEFAULT_THEME) -> str:
     # rev24：每个消息带 `id="m{i}"` 锚点 —— 右侧问题列表点击后 scrollIntoView 跳转。
     parts: list[str] = []
     for i, m in enumerate(messages):
@@ -209,7 +256,7 @@ def _messages_body(messages: list[dict]) -> str:
         elif role == "error":
             parts.append(_block_error(m.get("content", ""), m.get("detail"), i))
         elif role == "tool":
-            parts.append(_block_tool(m, i))
+            parts.append(_block_tool(m, i, theme))
     return "\n".join(parts)
 
 
@@ -219,7 +266,21 @@ def messages_inner(
     font_size: str | None = DEFAULT_FONT_SIZE,
 ) -> str:
     """消息流 → innerHTML 片段（rev19：WebEngine 局部更新的载荷）。"""
-    return _inner(theme, _messages_body(messages), _pygments_css(theme), font_size)
+    return _inner(theme, _messages_body(messages, theme), _pygments_css(theme), font_size)
+
+
+def ansi_inner(
+    text: str,
+    theme: str | None = DEFAULT_THEME,
+    font_size: str | None = DEFAULT_FONT_SIZE,
+    klass: str = "",
+) -> str:
+    """ANSI 文本 → innerHTML 片段（终端页监视区与工具卡共用同一解析）。
+
+    `klass` 给 `<pre>` 附加结构类（如 `.term`）—— 只放结构性排版，颜色仍由主题 CSS 提供。
+    """
+    attr = f' class="{klass}"' if klass else ""
+    return _inner(theme, f"<pre{attr}>{_ansi_spans(text, theme)}</pre>", "", font_size)
 
 
 def markdown_inner(
@@ -256,33 +317,8 @@ def plain_to_html(
 def ansi_to_html(
     text: str, theme: str | None = DEFAULT_THEME, font_size: str | None = DEFAULT_FONT_SIZE
 ) -> str:
-    """极简 ANSI SGR 解析（颜色 / 加粗 / 重置）。"""
-    colors = ansi_colors(theme)
-    out: list[str] = []
-    open_span = False
-    pos = 0
-    for match in _ANSI_RE.finditer(text or ""):
-        out.append(_html.escape(text[pos : match.start()]))
-        pos = match.end()
-        code = match.group(1)
-        if code in colors:
-            if open_span:
-                out.append("</span>")
-            out.append(f'<span style="color:{colors[code]}">')
-            open_span = True
-        elif code in ("", "0"):
-            if open_span:
-                out.append("</span>")
-                open_span = False
-        elif code == "1":
-            if open_span:
-                out.append("</span>")
-            out.append('<span style="font-weight:bold">')
-            open_span = True
-    out.append(_html.escape(text[pos:]))
-    if open_span:
-        out.append("</span>")
-    return _page(theme, f"<pre>{''.join(out)}</pre>", "", font_size)
+    """极简 ANSI SGR 解析（颜色 / 加粗 / 重置）；解析本体见 `_ansi_spans`。"""
+    return _page(theme, f"<pre>{_ansi_spans(text, theme)}</pre>", "", font_size)
 
 
 def render_to_html(

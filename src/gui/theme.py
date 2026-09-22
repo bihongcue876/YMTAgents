@@ -244,6 +244,14 @@ QLabel#fetchResult[fetchOk="false"] {{ color: {p.danger}; }}
 /* 三态开关（会话记忆）：态由属性驱动（rev35），勾选与否一眼可辨 */
 QCheckBox[tri="on"] {{ color: {p.ok}; }}
 QCheckBox[tri="off"] {{ color: {p.muted}; }}
+
+/* 终端页状态徽标（v0.0.5）：态由属性驱动，主题切换即整体换色。
+   独立 objectName —— 不与 MCP 页既有徽标抢样式 */
+QLabel#shellBadge {{ color: {p.muted}; }}
+QLabel#shellBadge[shellState="starting"] {{ color: {p.accent}; }}
+QLabel#shellBadge[shellState="ready"] {{ color: {p.ok}; }}
+QLabel#shellBadge[shellState="busy"] {{ color: {p.warn}; }}
+QLabel#shellBadge[shellState="dead"] {{ color: {p.danger}; }}
 """
 
 

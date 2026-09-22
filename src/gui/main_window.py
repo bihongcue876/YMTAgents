@@ -58,6 +58,10 @@ from shared.envelope import (
     SkillUpdate,
     SkillsRefresh,
     GateRespond,
+    ShellClose,
+    ShellInput,
+    ShellRefresh,
+    ShellSpawn,
 )
 
 from core.bus.bridge import BusBridge
@@ -70,6 +74,7 @@ from gui.pages.personas import PersonasPage
 from gui.pages.plugins import GateDialog, PluginsPage
 from gui.pages.settings import SettingsPage
 from gui.pages.skills import SkillsPage
+from gui.pages.terminal import TerminalPage
 from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX, Sidebar
 
 
@@ -101,6 +106,7 @@ class MainWindow(QMainWindow):
         self.plugins_page = PluginsPage()
         self.skills_page = SkillsPage()
         self.skills_page.set_data_root(data_root)
+        self.terminal_page = TerminalPage()
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
         self._font_size: str | None = None
@@ -113,6 +119,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.personas_page)
         self.stack.addWidget(self.plugins_page)
         self.stack.addWidget(self.skills_page)
+        self.stack.addWidget(self.terminal_page)
         self.stack.addWidget(self.settings)
 
         # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
@@ -198,6 +205,7 @@ class MainWindow(QMainWindow):
         s.open_personas.connect(lambda: self.stack.setCurrentWidget(self.personas_page))
         s.open_skills.connect(lambda: self.stack.setCurrentWidget(self.skills_page))
         s.open_plugins.connect(lambda: self.stack.setCurrentWidget(self.plugins_page))
+        s.open_terminal.connect(lambda: self.stack.setCurrentWidget(self.terminal_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
 
         c = self.chat
@@ -263,6 +271,14 @@ class MainWindow(QMainWindow):
             lambda sid, perm: self.bus.submit(SkillPermission(id=sid, permission=perm))
         )
         sk.refresh_requested.connect(lambda: self.bus.submit(SkillsRefresh()))
+
+        tm = self.terminal_page
+        tm.spawn_requested.connect(lambda: self.bus.submit(ShellSpawn()))
+        tm.close_requested.connect(lambda sid: self.bus.submit(ShellClose(id=sid)))
+        tm.input_requested.connect(
+            lambda sid, cmd: self.bus.submit(ShellInput(id=sid, command=cmd))
+        )
+        tm.refresh_requested.connect(lambda: self.bus.submit(ShellRefresh()))
 
         self.settings.settings_update.connect(
             lambda section, data: self.bus.submit(SettingsUpdate(section=section, data=data))
@@ -422,6 +438,8 @@ class MainWindow(QMainWindow):
         self.models.refresh_metrics(used_font)
         self.settings.refresh_metrics(used_font)
         self.models.set_theme(used)
+        # 终端监视区是自渲染内容 → 整帧重渲染（颜色/字号经 theme 注入，模板不写死）
+        self.terminal_page.set_theme(used, used_font)
 
     # -- 事件分发 ----------------------------------------------------------
     def on_event(self, event) -> None:
@@ -431,6 +449,7 @@ class MainWindow(QMainWindow):
             self._session_models = {m.id: m.main_model for m in event.sessions}
             self._session_personas = {m.id: m.persona_id for m in event.sessions}
             self.sidebar.update_sessions(event.sessions)
+            self.terminal_page.set_session_titles(self._session_titles)
             self._sync_model_dropdown()
             self._sync_persona_dropdown()
             if self._current_session_id in self._session_titles:
@@ -532,6 +551,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, title, event.error or "操作失败。")
         elif t == "gate.request":
             self._on_gate_request(event)
+        elif t == "shell.list":
+            self.terminal_page.update_shells(
+                event.shells, event.max_shells, event.permission, event.allow_restricted
+            )
+        elif t == "shell.output":
+            self.terminal_page.on_output(event.id, event.chunk)
 
     def _on_gate_request(self, event) -> None:
         """工具调用关卡：弹出确认卡片，用户裁决后回发 GateRespond（core 侧正泵取队列等待）。"""

@@ -53,6 +53,7 @@ class Sidebar(QWidget):
     open_personas = Signal()
     open_skills = Signal()
     open_plugins = Signal()
+    open_terminal = Signal()
     open_settings = Signal()
     toggle_requested = Signal()  # 折叠/展开请求（宽度由 MainWindow 的 QSplitter 落实）
 
@@ -104,6 +105,13 @@ class Sidebar(QWidget):
         self._skills_btn.setCursor(Qt.PointingHandCursor)
         self._skills_btn.clicked.connect(self.open_skills.emit)
 
+        self._terminal_btn = QPushButton("⌨ 终端")
+        self._terminal_btn.setObjectName("railButton")
+        self._terminal_btn.setToolTip("本机终端（shell 会话与监视）")
+        self._terminal_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
+        self._terminal_btn.setCursor(Qt.PointingHandCursor)
+        self._terminal_btn.clicked.connect(self.open_terminal.emit)
+
         rail = QVBoxLayout()
         rail.setContentsMargins(0, 0, 0, 0)
         rail.setSpacing(4)
@@ -113,6 +121,7 @@ class Sidebar(QWidget):
         rail.addWidget(self._personas_btn)
         rail.addWidget(self._skills_btn)
         rail.addWidget(self._plugins_btn)
+        rail.addWidget(self._terminal_btn)
         rail.addWidget(self._settings_btn)
 
         # -- 会话面板（可折叠） ----------------------------------------------
