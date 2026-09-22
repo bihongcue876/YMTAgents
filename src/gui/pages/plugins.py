@@ -283,23 +283,22 @@ class PluginsPage(QWidget):
         return card
 
     # -- 交互 --------------------------------------------------------------
+    def _prompt_server(self, server: dict | None) -> None:
+        """新增/编辑共用的对话框流程；校验失败或取消则不发请求。"""
+        dialog = ServerDialog(server, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        config = dialog.config()
+        if not config["id"]:
+            QMessageBox.warning(self, "缺少标识", "请填写服务器标识（唯一）。")
+            return
+        self.upsert_requested.emit(config)
+
     def _on_add(self) -> None:
-        dialog = ServerDialog(parent=self)
-        if dialog.exec() == QDialog.Accepted:
-            config = dialog.config()
-            if not config["id"]:
-                QMessageBox.warning(self, "缺少标识", "请填写服务器标识（唯一）。")
-                return
-            self.upsert_requested.emit(config)
+        self._prompt_server(None)
 
     def _on_edit(self, server: dict) -> None:
-        dialog = ServerDialog(server, parent=self)
-        if dialog.exec() == QDialog.Accepted:
-            config = dialog.config()
-            if not config["id"]:
-                QMessageBox.warning(self, "缺少标识", "请填写服务器标识（唯一）。")
-                return
-            self.upsert_requested.emit(config)
+        self._prompt_server(server)
 
     def _on_delete(self, server: dict) -> None:
         if QMessageBox.question(self, "删除服务器", f"确定删除「{server.get('name', '')}」？") == QMessageBox.Yes:

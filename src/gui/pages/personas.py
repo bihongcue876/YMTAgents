@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.widgets import section_label
+from gui.widgets import key_badge, section_label
 
 
 class PersonaDialog(QDialog):
@@ -119,11 +119,11 @@ class PersonasPage(QWidget):
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{p.name}</b>"))
         if p.is_default:
-            header.addWidget(self._badge("默认", True))
+            header.addWidget(key_badge("默认", True))
         if p.in_session:
-            header.addWidget(self._badge("使用中", True))
+            header.addWidget(key_badge("使用中", True))
         if p.builtin:
-            header.addWidget(self._badge("预置", None))
+            header.addWidget(key_badge("预置", None))
         header.addStretch(1)
         layout.addLayout(header)
 
@@ -150,14 +150,6 @@ class PersonasPage(QWidget):
         actions.addStretch(1)
         layout.addLayout(actions)
         return card
-
-    @staticmethod
-    def _badge(text: str, ok: bool | None) -> QLabel:
-        badge = QLabel(text)
-        badge.setObjectName("keyBadge")
-        if ok is not None:
-            badge.setProperty("keyStored", ok)
-        return badge
 
     # -- 动作 --------------------------------------------------------------
     def _on_add(self) -> None:

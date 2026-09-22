@@ -14,3 +14,12 @@ def section_label(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("sectionLabel")
     return label
+
+
+def key_badge(text: str, ok: bool | None = None) -> QLabel:
+    """状态徽章（`keyBadge`）：ok 三态 —— True/False 着色，None 中性。"""
+    badge = QLabel(text)
+    badge.setObjectName("keyBadge")
+    if ok is not None:
+        badge.setProperty("keyStored", ok)
+    return badge

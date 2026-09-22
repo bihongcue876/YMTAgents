@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui.widgets import key_badge
+
 PERMISSIONS = ("safe", "confirm", "restricted")
 _PERM_TEXT = {"safe": "自动", "confirm": "确认", "restricted": "禁用"}
 
@@ -100,11 +102,11 @@ class SkillsPage(QWidget):
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{info.get('name', info['id'])}</b>"))
         if info.get("builtin"):
-            header.addWidget(self._badge("预置"))
+            header.addWidget(key_badge("预置"))
         if info.get("enabled"):
-            header.addWidget(self._badge("已启用", ok=True))
+            header.addWidget(key_badge("已启用", ok=True))
         if info.get("error"):
-            header.addWidget(self._badge("异常", ok=False))
+            header.addWidget(key_badge("异常", ok=False))
         header.addStretch(1)
         layout.addLayout(header)
 
@@ -159,14 +161,6 @@ class SkillsPage(QWidget):
         actions.addStretch(1)
         layout.addLayout(actions)
         return card
-
-    @staticmethod
-    def _badge(text: str, ok: bool | None = None) -> QLabel:
-        badge = QLabel(text)
-        badge.setObjectName("keyBadge")
-        if ok is not None:
-            badge.setProperty("keyStored", ok)
-        return badge
 
     # -- 动作 --------------------------------------------------------------
     def _on_import_dir(self) -> None:
