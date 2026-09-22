@@ -527,6 +527,26 @@ class AgentLoop(IAgentLoop):
             return []
         return self.executor.tool_payloads()
 
+    @staticmethod
+    def _tool_lines(payloads: list[dict] | None) -> list[str]:
+        """把可见工具定义折成环境陈述行（`名字 — 一句话`）。
+
+        描述取自快照（即 `ToolSpec.description`），逐条约 200 字截断以约束 token 成本；
+        这是「系统提示词指导模型使用工具」的唯一改动点（spec v0.0.5 §4）——
+        不新增机制、不抄 JSON Schema（FC `tools` 已下发）。
+        """
+        lines: list[str] = []
+        for payload in payloads or []:
+            fn = payload.get("function", {}) or {}
+            name = str(fn.get("name") or "").strip()
+            if not name:
+                continue
+            desc = " ".join(str(fn.get("description") or "").split())
+            if len(desc) > 200:
+                desc = desc[:200] + "…"
+            lines.append(f"{name} — {desc}" if desc else name)
+        return lines
+
     def _run_tools(
         self,
         session_id: str,
@@ -550,7 +570,8 @@ class AgentLoop(IAgentLoop):
                 }
             )
         messages.append({"role": "assistant", "content": "", "tool_calls": assistant_calls})
-        ctx = ToolContext(session_id=session_id, turn_seq=turn_seq)
+        # v0.0.5：把回合的取消令牌一并交给工具 —— 工具执行中也能响应中断（docs 04 §2/06 §9）。
+        ctx = ToolContext(session_id=session_id, turn_seq=turn_seq, cancel=token)
         for call in tool_calls:
             if token.is_cancelled():
                 break
@@ -589,7 +610,7 @@ class AgentLoop(IAgentLoop):
             file_truncate=effective_file_cap(_DEFAULT_FILE, window),
             window=window,
             main_model=model_id,
-            tool_names=[p.get("function", {}).get("name", "") for p in (payloads or [])],
+            tool_lines=self._tool_lines(payloads),
             tools_tokens=(self.executor.tools_tokens() if (payloads and self.executor) else 0),
         )
         budget = config.window - config.reserve if config.window else _UNBOUNDED

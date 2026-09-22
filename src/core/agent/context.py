@@ -50,13 +50,19 @@ class ConfigSnapshot:
     file_truncate: int = 8192
     window: int = 0
     main_model: str | None = None
-    tool_names: list[str] = field(default_factory=list)
+    #: v0.0.5：可用工具的**环境陈述行**（`名字 — 一句话`），由可见工具快照派生。
+    #: 之前只列工具名，模型看不出 shell 该用哪种语法、状态是否持续 —— 而 `ToolSpec.description`
+    #: 本就是为环境陈述写的（docs 07 §2.1）。描述来自快照，能力 ⊆ 快照不破（docs 09 B2）。
+    tool_lines: list[str] = field(default_factory=list)
     #: v0.0.3：工具定义（function calling）占用的输入侧 token 估算；单列预算段，不可淘汰。
     tools_tokens: int = 0
 
 
 def _env_statement(config: ConfigSnapshot) -> str:
-    tools = "、".join(config.tool_names) if config.tool_names else "无"
+    if config.tool_lines:
+        tools = "\n" + "\n".join(f"  · {line}" for line in config.tool_lines)
+    else:
+        tools = "　无"
     files = "、".join(name for name, _ in config.files) if config.files else "无"
     model = config.main_model or "未指定"
     return (

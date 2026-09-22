@@ -4,9 +4,12 @@
 
 安全铁律（docs 09）：
 - 有效权限 = 逐工具显式覆盖 ⊕ 缺省（无通配、运行期不可提权）；覆盖在注册时已落进 `ToolSpec.permission`。
+- 调用前策略检查（`ToolSpec.precheck`，v0.0.5）：按**参数**判定的高危档在关卡**之前**收口 ——
+  高危命令不该先打扰用户再被后端拒绝；命中 `deny` 即策略拒绝并留痕，命中 `warn` 则关卡卡片按高危档展示。
 - confirm 工具逐次关卡：登记 `GateRequest`，由用户裁决；超时/中断在途确认一律**拒绝**（fail-closed）。
 - restricted 工具默认关：策略直接拒绝并留痕。
-- `tool.call` / `tool.result` / `gate.result` 均为**一等落盘事件**（审计 append-only）。
+- 拒绝返回**理由字符串**（回给模型，docs 09 §5）；`tool.call` / `tool.result` / `gate.result`
+  均为**一等落盘事件**（审计 append-only）。
 - 出口文本（错误 detail）一律过 `redact`。
 """
 
@@ -54,10 +57,15 @@ def _estimate_tokens(text: str) -> int:
 
 @dataclass
 class ToolContext:
-    """执行上下文（会话/回合标识），用于把 tool.* 事件落进正确会话。"""
+    """执行上下文（会话/回合标识），用于把 tool.* 事件落进正确会话。
+
+    `cancel`（v0.0.5）：回合的协作式取消令牌（docs 04 §2「工具执行中 → 工具取消路径」）。
+    用具名弱接口传（只要求有 `is_cancelled()`），避免 `core.registry` 反向依赖 `core.agent`。
+    """
 
     session_id: str
     turn_seq: int = 0
+    cancel: object | None = None
 
 
 class IToolExecutor(ABC):
@@ -176,8 +184,9 @@ class ToolExecutor(IToolExecutor):
         permission = _perm_value(spec.permission)
         self._persist_call(call_id, name, args, permission, ctx)
 
-        if not self._authorize(call_id, name, args, permission, ctx):
-            result = self._error(ErrorCode.TOOL_DENIED)
+        denial = self._authorize(call_id, name, args, permission, ctx, spec)
+        if denial is not None:
+            result = self._error(ErrorCode.TOOL_DENIED, denial)
             self._persist_result(call_id, result, ctx)
             self.audit("tool.invoke", tool=name, permission=permission, ok=False, code=ErrorCode.TOOL_DENIED.value)
             return result
@@ -209,20 +218,47 @@ class ToolExecutor(IToolExecutor):
         return result
 
     def _authorize(self, call_id: str, name: str, args: dict, permission: str,
-                   ctx: ToolContext | None) -> bool:
-        """权限判定。safe 直放；restricted 拒绝；confirm 走用户关卡。"""
+                   ctx: ToolContext | None, spec: ToolSpec) -> str | None:
+        """权限判定。返回 `None` = 放行；否则返回**拒绝理由**（回给模型，docs 09 §5）。
+
+        顺序（docs 07 §3 步骤 3）：
+        0. 调用前策略检查（`ToolSpec.precheck`）：`deny` → 策略直接拒绝（**不打扰用户**），
+           `warn` → 继续走关卡，但卡片按高危档展示；
+        1. safe 直放；2. restricted 策略拒绝；3. confirm 走用户关卡。
+        检查器自身异常一律按拒绝处理（P6 安全默认）。
+        """
+        warn = ""
+        precheck = getattr(spec, "precheck", None)
+        if callable(precheck):
+            try:
+                verdict = precheck(args or {})
+            except Exception:  # noqa: BLE001 - 策略检查异常必须 fail-closed
+                log.exception("工具调用前策略检查异常：%s", name)
+                self._persist_gate(call_id, "deny", "policy", ctx)
+                self.audit("gate.decision", tool=name, decision="deny", decider="policy")
+                return error_text(ErrorCode.TOOL_DENIED.value)
+            if verdict:
+                kind, reason = verdict[0], str(verdict[1] or "")
+                if kind == "deny":
+                    self._persist_gate(call_id, "deny", "policy", ctx)
+                    self.audit("gate.decision", tool=name, decision="deny", decider="policy")
+                    return reason or error_text(ErrorCode.TOOL_DENIED.value)
+                warn = reason
+
         if permission == Permission.SAFE.value:
-            return True
+            return None
         if permission == Permission.RESTRICTED.value:
             self._persist_gate(call_id, "deny", "policy", ctx)
             self.audit("gate.decision", tool=name, decision="deny", decider="policy")
-            return False
+            return error_text(ErrorCode.TOOL_DENIED.value)
         # confirm：向 UI 请求确认（含参数原文），等待用户裁决；无裁决通道时 fail-closed。
-        self.emit(GateRequest(call_id=call_id, name=name, args=args, permission=permission))
+        # `warn` 非空 = 按参数判定的高危：卡片以 restricted 档呈现，用户一眼可见。
+        label = Permission.RESTRICTED.value if warn else permission
+        self.emit(GateRequest(call_id=call_id, name=name, args=args, permission=label))
         allow = bool(self._gate(call_id, name, args, permission)) if self._gate is not None else False
         self._persist_gate(call_id, "allow" if allow else "deny", "user", ctx)
         self.audit("gate.decision", tool=name, decision="allow" if allow else "deny", decider="user")
-        return allow
+        return None if allow else error_text(ErrorCode.TOOL_DENIED.value)
 
     # -- 落盘 --------------------------------------------------------------
     def _externalize(self, name: str, call_id: str, result: ToolResult,
@@ -252,8 +288,10 @@ class ToolExecutor(IToolExecutor):
         preview = output[:INLINE_OUTPUT_CHARS] + f"\n…（输出已外置，完整内容见 {ref}）"
         return result.model_copy(update={"output": preview, "output_ref": ref})
 
-    def _error(self, code: ErrorCode) -> ToolResult:
-        return ToolResult(ok=False, error={"code": code.value, "message": error_text(code.value)})
+    def _error(self, code: ErrorCode, message: str | None = None) -> ToolResult:
+        return ToolResult(
+            ok=False, error={"code": code.value, "message": message or error_text(code.value)}
+        )
 
     def _persist(self, call_id: str, name: str, args: dict, permission: str, result: ToolResult,
                  ctx: ToolContext | None) -> None:
