@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from locale import getpreferredencoding
 from typing import Callable
 

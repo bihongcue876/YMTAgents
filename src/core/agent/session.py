@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -237,10 +238,6 @@ class ISessionStore(ABC):
     def write_output(self, session_id: str, call_id: str, text: str) -> str:
         """外置超大工具输出到会话目录，返回会话内相对引用（v0.0.3 完善 output_ref）。"""
 
-    @abstractmethod
-    def read_output(self, session_id: str, ref: str) -> str:
-        """按相对引用读取外置工具输出；不存在返回空串。"""
-
 
 class SessionStore(ISessionStore):
     def __init__(self, root: Path, sink: EventSink | None = None) -> None:
@@ -257,8 +254,6 @@ class SessionStore(ISessionStore):
         return self.sessions_dir / "index.json"
 
     def _load_index(self) -> list[dict]:
-        import json
-
         if not self.index_path.exists():
             return []
         try:
@@ -284,8 +279,6 @@ class SessionStore(ISessionStore):
         return self.session_dir(session_id) / "meta.json"
 
     def _read_meta(self, session_id: str) -> SessionMeta:
-        import json
-
         path = self._meta_path(session_id)
         if not path.exists():
             raise KeyError(f"session_not_found: {session_id}")
@@ -299,8 +292,6 @@ class SessionStore(ISessionStore):
         return self.session_dir(session_id) / "graph.json"
 
     def _load_graph(self, session_id: str) -> SessionGraph:
-        import json
-
         path = self._graph_path(session_id)
         if path.exists():
             try:
@@ -492,8 +483,6 @@ class SessionStore(ISessionStore):
         return paths
 
     def _read_memory_at(self, session_id: str, branch_id: str) -> SessionMemory | None:
-        import json
-
         path = self._memory_json_path(session_id, branch_id)
         if not path.exists():
             for legacy in self._legacy_memory_paths(session_id, branch_id, ".json"):
@@ -742,11 +731,3 @@ class SessionStore(ISessionStore):
         safe = "".join(ch for ch in str(call_id) if ch.isalnum() or ch in "-_") or "output"
         atomic_write_text(directory / f"{safe}.txt", text)
         return f"outputs/{safe}.txt"
-
-    def read_output(self, session_id: str, ref: str) -> str:
-        if not ref:
-            return ""
-        try:
-            return (self.session_dir(session_id) / ref).read_text(encoding="utf-8")
-        except OSError:
-            return ""

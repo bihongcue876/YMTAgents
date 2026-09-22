@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -40,6 +41,8 @@ META_CAPABILITIES_KEY = "io.modelcontextprotocol/clientCapabilities"
 CLIENT_INFO = {"name": "YMTAgents", "version": "0.0.3"}
 
 VAULT_PREFIX = "vault://"
+
+log = logging.getLogger(__name__)
 
 _PYTHON_COMMANDS = {"python", "pythonw", "python3", "pythonw3", "py"}
 
@@ -97,10 +100,6 @@ class MCPClient(ABC):
         self._protocol_version = ""
         self._req_id = 0
         self.last_error = ""
-
-    @property
-    def connected(self) -> bool:
-        return self._connected
 
     @property
     def protocol_version(self) -> str:
@@ -184,8 +183,8 @@ class MCPClient(ABC):
             if not self._is_modern():
                 try:
                     self._send(self._build_notification("notifications/initialized"))
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - 尽力通知，失败不阻断握手
+                    log.debug("initialized 通知发送失败（忽略）", exc_info=True)
             return True
         except Exception as e:  # noqa: BLE001 - 连接失败一律降级为 False + last_error
             self._connected = False
@@ -371,22 +370,23 @@ class StdioMCPClient(MCPClient):
             return
         try:
             proc.terminate()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - 清理路径尽力而为
+            log.debug("MCP 子进程 terminate 失败（忽略）", exc_info=True)
         try:
             proc.wait(timeout=3)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 超时或已退出，升级为 kill
+            log.debug("MCP 子进程 wait 超时，尝试 kill", exc_info=True)
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                log.debug("MCP 子进程 kill 失败（忽略）", exc_info=True)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is None:
                 continue
             try:
                 stream.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                log.debug("MCP 管道关闭失败（忽略）", exc_info=True)
 
     def _send(self, message: dict) -> dict | None:
         if self._process is None or self._process.stdin is None or self._process.stdout is None:

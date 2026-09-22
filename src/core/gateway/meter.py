@@ -19,6 +19,3 @@ class Meter:
         self.total.completion_tokens += usage.completion_tokens
         self.total.total_tokens += usage.total_tokens
         return self.total
-
-    def reset(self) -> None:
-        self.total = Usage()

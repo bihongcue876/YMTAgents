@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -469,19 +468,21 @@ class AgentLoop(IAgentLoop):
                 parts: list[str] = []
                 reasoning_parts: list[str] = []
                 tool_calls: list[dict] = []
+                # 回调在本轮 stream_chat 内同步消费；用默认参数显式绑定本轮缓冲，
+                # 防止未来改为异步/延迟消费时闭包读到下一轮的列表（B023）。
                 result = self.gateway.stream_chat(
                     session_id,
                     turn_seq,
                     model_id,
                     messages,
                     token,
-                    lambda delta: self._on_delta(session_id, turn_seq, delta, parts),
-                    on_reasoning=lambda delta: self._on_reasoning(
-                        session_id, turn_seq, delta, reasoning_parts
+                    lambda delta, buf=parts: self._on_delta(session_id, turn_seq, delta, buf),
+                    on_reasoning=lambda delta, buf=reasoning_parts: self._on_reasoning(
+                        session_id, turn_seq, delta, buf
                     ),
                     params=meta.params,
                     tools=active,
-                    on_tool_calls=lambda calls: tool_calls.extend(calls),
+                    on_tool_calls=lambda calls, sink=tool_calls: sink.extend(calls),
                 )
                 total_usage = _add_usage(total_usage, result)
                 final_content = "".join(parts)

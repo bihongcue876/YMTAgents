@@ -27,9 +27,6 @@ from core.skills.loader import SkillMeta, parse_skill_md
 
 log = logging.getLogger(__name__)
 
-#: 预置技能 id 前缀（类比 prs_ymt）：不可删除、可停用。
-PRESET_PREFIX = "skl_ymt"
-
 _ORIGIN_FILE = "skill.origin.json"
 
 

@@ -9,6 +9,7 @@ server/tool/ok/code，不记参数（参数原文只在关卡卡片呈现给用�
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from typing import Any, Callable
@@ -25,6 +26,8 @@ from core.registry.toolspec import ToolSpec
 
 MCP_TOOL_TIMEOUT_MS = 60000
 MAX_OUTPUT_CHARS = 64000
+
+log = logging.getLogger(__name__)
 
 _INVALID_CHARS = re.compile(r"[^a-z0-9_]")
 
@@ -91,9 +94,6 @@ class McpManager:
         modules.mcp.servers = list(self._configs.values())
         self._config_store.save("modules", modules)
 
-    def get_config(self, server_id: str) -> McpServerConfig | None:
-        return self._configs.get(server_id)
-
     # ---------- 生命周期 ----------
     def start_all(self) -> None:
         for cid, cfg in self._configs.items():
@@ -138,8 +138,8 @@ class McpManager:
         if client is not None:
             try:
                 client.disconnect()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - 停止路径尽力断开，失败不阻断注销
+                log.debug("MCP 断开失败（忽略）", exc_info=True)
         self._unregister_server(server_id)
         self._states[server_id] = STATE_STOPPED
         self._errors[server_id] = ""

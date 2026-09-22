@@ -44,7 +44,6 @@ TOOL_EXEC = "shell.exec"
 #: 默认最大 shell 数（用户要求：一个 Agent 最多唤醒 5 个）。
 DEFAULT_MAX_SHELLS = 5
 
-STATE_DISABLED = ModuleState.DISABLED.value
 STATE_READY = ModuleState.READY.value
 STATE_DEGRADED = ModuleState.DEGRADED.value
 STATE_ERROR = ModuleState.ERROR.value

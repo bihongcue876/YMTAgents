@@ -49,7 +49,7 @@ class ConfigStore:
     def ensure_defaults(self) -> None:
         """创建缺失的配置文件与用户级记忆文件（不覆盖已存在的）。"""
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        for kind, (filename, model_cls) in CONFIG_FILES.items():
+        for _kind, (filename, model_cls) in CONFIG_FILES.items():
             path = self.config_dir / filename
             if not path.exists():
                 atomic_write_json(path, model_cls().model_dump(mode="json"))
