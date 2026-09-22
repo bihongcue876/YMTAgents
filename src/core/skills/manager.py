@@ -38,12 +38,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def _is_git_source(source: str) -> bool:
     lowered = source.lower()
-    return (
-        lowered.startswith("git@")
-        or lowered.startswith("http://")
-        or lowered.startswith("https://")
-        or lowered.endswith(".git")
-    )
+    return lowered.startswith(("git@", "http://", "https://")) or lowered.endswith(".git")
 
 
 class SkillManager:

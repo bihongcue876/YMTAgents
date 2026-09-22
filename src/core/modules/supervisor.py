@@ -27,7 +27,7 @@ class IModuleSupervisor(ABC):
 class ModuleSupervisor(IModuleSupervisor):
     def __init__(self) -> None:
         # 首期仅 mcp 有宿主实现（rev41/rev44）；其余仍 disabled。
-        self._states: dict[str, str] = {name: ModuleState.DISABLED.value for name in MODULE_NAMES}
+        self._states: dict[str, str] = dict.fromkeys(MODULE_NAMES, ModuleState.DISABLED.value)
 
     def get_states(self) -> dict[str, str]:
         return dict(self._states)

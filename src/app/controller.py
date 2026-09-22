@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from pathlib import Path
@@ -949,24 +950,18 @@ class CoreController:
         self._emit_detail(request.session_id)
 
     def _on_archive(self, request: ArchiveSession) -> None:
-        try:
+        with contextlib.suppress(KeyError):  # 已不存在：静默幂等
             self.store.archive(request.session_id)
-        except KeyError:
-            pass
         self._emit_index()
 
     def _on_unarchive(self, request: UnarchiveSession) -> None:
-        try:
+        with contextlib.suppress(KeyError):
             self.store.unarchive(request.session_id)
-        except KeyError:
-            pass
         self._emit_index()
 
     def _on_rename(self, request: RenameSession) -> None:
-        try:
+        with contextlib.suppress(KeyError):
             self.store.rename(request.session_id, request.title)
-        except KeyError:
-            pass
         self._emit_index()
 
     def _on_delete(self, request: DeleteSession) -> None:

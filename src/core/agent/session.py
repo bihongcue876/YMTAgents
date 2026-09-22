@@ -28,6 +28,16 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _read_text_opt(path: Path) -> str:
+    """读文本文件；不存在/不可读返回空串（旁路读取，fail-open 不涉密钥）。"""
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 @dataclass
 class SessionSnapshot:
     meta: SessionMeta
@@ -503,12 +513,7 @@ class SessionStore(ISessionStore):
                 if legacy.exists():
                     path = legacy
                     break
-        if not path.exists():
-            return ""
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError:
-            return ""
+        return _read_text_opt(path)
 
     def read_memory(self, session_id: str) -> SessionMemory | None:
         bid = self._active_branch(self._load_graph(session_id)).id
@@ -563,13 +568,7 @@ class SessionStore(ISessionStore):
 
     def read_memory_history(self, session_id: str, revision: int) -> str:
         bid = self._active_branch(self._load_graph(session_id)).id
-        path = self._memory_history_dir(session_id, bid) / f"{int(revision)}.md"
-        if not path.exists():
-            return ""
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError:
-            return ""
+        return _read_text_opt(self._memory_history_dir(session_id, bid) / f"{int(revision)}.md")
 
     def _copy_memory(self, session_id: str, parent_id: str, child_id: str, fork_seq: int) -> None:
         """分叉时把父分支记忆快照给子分支（rev31）；父记忆若已覆盖分叉点之后的内容则不继承。"""

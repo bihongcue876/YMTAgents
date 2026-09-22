@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,18 +49,14 @@ def load_memory_prompt(root: Path, ensure: bool = True) -> str:
     """读取专用记忆提示词；缺失时落内置默认（`ensure=True`）并返回。"""
     path = memory_prompt_path(root)
     if path.exists():
-        try:
+        with contextlib.suppress(OSError):
             text = path.read_text(encoding="utf-8")
             if text.strip():
                 return text
-        except OSError:
-            pass
     if ensure:
-        try:
+        with contextlib.suppress(OSError):
             # 配置资源同样走原子写（docs 03 §10），避免半写文件。
             atomic_write_text(path, DEFAULT_MEMORY_PROMPT)
-        except OSError:
-            pass
     return DEFAULT_MEMORY_PROMPT
 
 

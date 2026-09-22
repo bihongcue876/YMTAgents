@@ -25,13 +25,13 @@ from shared.envelope import (
 )
 from shared.errors import GATEWAY_EXCEPTION_CODE, ErrorCode, error_text
 from shared.redact import redact
+from shared.tokens import estimate_tokens
 
 from core.agent.cancel import CancelToken
 from core.agent.context import (
     DEFAULT_SYSTEM_PROMPT,
     ConfigSnapshot,
     ContextAssembler,
-    estimate_tokens,
 )
 from core.agent.memory import (
     effective_switches,

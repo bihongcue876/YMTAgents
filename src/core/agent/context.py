@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from shared.envelope import ContextUsage
+from shared.tokens import estimate_tokens
 
 from core.agent.session import SessionSnapshot
 
@@ -27,15 +28,6 @@ DEFAULT_SYSTEM_PROMPT = "使用简体中文回答。对不确定的内容如实�
 #: 挂载文件被截断时追加的标记。没有它，模型会以为读到的是全文，
 #: 进而基于不完整内容作答（spec rev9 §5）。
 TRUNCATION_MARK = "\n\n…[内容已截断]"
-
-
-def estimate_tokens(text: str) -> int:
-    """粗略估算 token 数：CJK 每字 1，其余约每 4 字符 1。"""
-    if not text:
-        return 0
-    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
-    other = len(text) - cjk
-    return cjk + (other + 3) // 4
 
 
 @dataclass

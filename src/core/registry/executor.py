@@ -26,6 +26,7 @@ from shared.enums import Permission
 from shared.envelope import GateRequest, GateResult, ToolCall, ToolResult as ToolResultEvent
 from shared.errors import ErrorCode, error_text
 from shared.redact import redact
+from shared.tokens import estimate_tokens
 
 from core.registry.registry import Registry, ToolResult
 from core.registry.toolspec import ToolSpec
@@ -40,19 +41,6 @@ INLINE_OUTPUT_CHARS = 8000
 
 #: 关卡裁决回调：入参 (call_id, name, args, permission)，返回是否放行（False = 拒绝/超时）。
 GateHandler = Callable[[str, str, dict, str], bool]
-
-
-def _estimate_tokens(text: str) -> int:
-    """粗略估算 token 数（CJK 1/字，其余约 4 字符 1）。口径与 agent.context 一致。
-
-    在此本地实现而非 import `core.agent`：`core.registry` 是更底层包，
-    不得依赖 `core.agent`（依赖单向门禁）。
-    """
-    if not text:
-        return 0
-    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
-    other = len(text) - cjk
-    return cjk + (other + 3) // 4
 
 
 @dataclass
@@ -147,7 +135,7 @@ class ToolExecutor(IToolExecutor):
         # 粗略估算：工具名 + 描述 + 入参 schema 的字符量。
         total = 0
         for payload in self.tool_payloads():
-            total += _estimate_tokens(json.dumps(payload, ensure_ascii=False))
+            total += estimate_tokens(json.dumps(payload, ensure_ascii=False))
         return total
 
     # -- 执行 --------------------------------------------------------------

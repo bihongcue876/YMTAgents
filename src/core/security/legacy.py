@@ -12,8 +12,8 @@ import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
 
+from core.security.audit import AuditFn, safe_audit
 from core.security.errors import SecretError
 from core.security.vault import ISecretStore, key_ref_for, secret_name
 from core.store.config_store import ConfigStore
@@ -21,8 +21,6 @@ from core.store.config_store import ConfigStore
 log = logging.getLogger(__name__)
 
 SERVICE = "ymt"
-
-AuditFn = Callable[..., None]
 
 
 class LegacyKeyring:
@@ -55,15 +53,6 @@ class LegacyKeyring:
             return False
 
 
-def _audit(audit: AuditFn | None, action: str, **fields: Any) -> None:
-    if audit is None:
-        return
-    try:
-        audit(action, **fields)
-    except Exception:  # noqa: BLE001 - 审计失败不得影响主流程
-        pass
-
-
 def migrate_keyring_to_vault(
     store: ConfigStore,
     secrets: ISecretStore,
@@ -91,7 +80,7 @@ def migrate_keyring_to_vault(
         key = legacy.get_key(pc.id)
         if not key:
             counts["skipped"] += 1
-            _audit(audit, "vault_migration_skipped", provider_id=pc.id)
+            safe_audit(audit, "vault_migration_skipped", provider_id=pc.id)
             continue
         name = secret_name(pc.id)
         try:
@@ -100,15 +89,15 @@ def migrate_keyring_to_vault(
                 raise SecretError("secret_write_failed", "回读校验不一致")
         except SecretError as exc:
             counts["failed"] += 1
-            _audit(audit, "vault_migration_failed", provider_id=pc.id, code=exc.code)
+            safe_audit(audit, "vault_migration_failed", provider_id=pc.id, code=exc.code)
             continue
         pc.key_ref = key_ref_for(pc.id)  # 3) 改配置（此时新旧都可用）
         changed = True
         counts["migrated"] += 1
-        _audit(audit, "vault_migrated", provider_id=pc.id)
+        safe_audit(audit, "vault_migrated", provider_id=pc.id)
         if not legacy.delete_key(pc.id):  # 4) 最后删旧
             counts["old_left"] += 1
-            _audit(audit, "vault_migration_old_entry_left", provider_id=pc.id)
+            safe_audit(audit, "vault_migration_old_entry_left", provider_id=pc.id)
 
     if changed:
         store.save("models", models)
@@ -129,5 +118,5 @@ def _backup_models(store: ConfigStore, audit: AuditFn | None) -> Path | None:
         return dest
     except OSError as exc:
         log.warning("迁移前置备份失败：%s", type(exc).__name__)
-        _audit(audit, "vault_migration_backup_failed", code=type(exc).__name__)
+        safe_audit(audit, "vault_migration_backup_failed", code=type(exc).__name__)
         return None

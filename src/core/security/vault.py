@@ -12,13 +12,12 @@ import json
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
+from core.security.audit import AuditFn, safe_audit
 from core.security.dpapi import ENTROPY_VAULT
 from core.security.errors import SecretError, SecretUnavailable
 from core.store.atomic import atomic_write_text
-
-AuditFn = Callable[..., None]
 
 _API_KEY_PREFIX = "api_key/"
 
@@ -87,11 +86,7 @@ class Vault(ISecretStore):
         return entries
 
     def _notify(self, action: str, **fields: Any) -> None:
-        if self._audit is not None:
-            try:
-                self._audit(action, **fields)
-            except Exception:  # noqa: BLE001 - 审计失败不得影响主流程
-                pass
+        safe_audit(self._audit, action, **fields)
 
     # -- 接口 ---------------------------------------------------------------
     def status(self, name: str) -> Literal["stored", "missing", "error"]:
