@@ -28,6 +28,7 @@ ALLOWED: dict[str, set[str] | None] = {
     "core.shell": {"shared", "core.registry"},
     "core.skills": {"shared", "core.registry"},
     "core.memory": {"shared", "core.bus"},
+    "core.workspace": {"shared", "core.store"},
     "core.agent": {
         "shared",
         "core.bus",

@@ -94,6 +94,8 @@ class SessionMeta(BaseModel):
     memory_compress: bool | None = None
     memory_auto: bool | None = None
     memory_threshold: int | None = None
+    # v0.0.6：本会话所属工作区；None = 默认工作区（存量会话**零迁移** —— 缺字段即 None）
+    workspace_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +135,8 @@ class NewSession(Envelope):
     type: Literal["session.new"] = "session.new"
     title: str | None = None
     persona_id: str | None = None  # rev23：None = 全局默认角色
+    #: v0.0.6：指定所属工作区（None = 当前工作区；当前为默认工作区时记 None 不记 id）
+    workspace_id: str | None = None
 
 
 class ResumeSession(Envelope):
@@ -619,6 +623,82 @@ class ShellRefresh(Envelope):
     type: Literal["shell.refresh"] = "shell.refresh"
 
 
+# ---------------------------------------------------------------------------
+# 工作区（v0.0.6）：默认工作区 + 可折叠的自建工作区（spec v0.0.6）
+# ---------------------------------------------------------------------------
+class WorkspaceCreate(Envelope):
+    """新建工作区。
+
+    - `root_kind="managed"`：留空 `root`，由宿主在 `ymtdata/workspaces/<id>/` 下分配；
+    - `root_kind="external"`：`root` 必填为**已存在的绝对目录**（用户显式选择 + 知情确认）。
+    """
+
+    type: Literal["workspace.create"] = "workspace.create"
+    name: str
+    root_kind: Literal["managed", "external"] = "managed"
+    root: str | None = None
+    #: None = 用 `settings.json → workspace.default_data_home_kind`（出厂默认 `inline`）
+    data_home_kind: Literal["inline", "managed", "custom"] | None = None
+    data_home: str | None = None
+    #: 构建命令（切片 4 才执行，本期只保存与展示）。**建时就要能填** ——
+    #: 界面已经提供了输入框，契约若不收就会被静默丢掉。
+    build_cmd: str = ""
+    note: str | None = None
+
+
+class WorkspaceUpdate(Envelope):
+    """整态更新工作区（同 `session.update` 先例：面板提交**完整**期望状态）。
+
+    `root` / `data_home_kind` / `data_home` 为 None = **不变**。更换目录与落点是不可逆的
+    用户动作，必须由界面显式提交新值，不因「整态提交」被意外清空。
+    """
+
+    type: Literal["workspace.update"] = "workspace.update"
+    id: str
+    name: str
+    note: str = ""
+    build_cmd: str = ""
+    root: str | None = None
+    data_home_kind: Literal["inline", "managed", "custom"] | None = None
+    data_home: str | None = None
+
+
+class WorkspaceDelete(Envelope):
+    """移除工作区登记（**不删磁盘上的任何文件**，spec v0.0.6 §3.13 R2）。"""
+
+    type: Literal["workspace.delete"] = "workspace.delete"
+    id: str
+
+
+class WorkspaceSwitch(Envelope):
+    """切换当前工作区（运行态，不落盘）：新会话默认进它。"""
+
+    type: Literal["workspace.switch"] = "workspace.switch"
+    id: str
+
+
+class WorkspaceRefresh(Envelope):
+    """重读登记表（文件即配置：手工编辑 `workspaces/index.json` 后刷新即生效）。"""
+
+    type: Literal["workspace.refresh"] = "workspace.refresh"
+
+
+class WorkspaceDetail(Envelope):
+    """取单个工作区的详情（含**有界**的文件列表）；`path` 为相对 root 的子路径。"""
+
+    type: Literal["workspace.detail"] = "workspace.detail"
+    id: str
+    path: str = ""
+
+
+class MoveSession(Envelope):
+    """把会话挪到另一工作区（`workspace_id=None` = 默认工作区）。"""
+
+    type: Literal["session.move"] = "session.move"
+    session_id: str
+    workspace_id: str | None = None
+
+
 class PersonaExported(Envelope):
     type: Literal["persona.export.result"] = "persona.export.result"
     persona_id: str
@@ -751,6 +831,62 @@ class ShellOutput(Envelope):
     chunk: str = ""
 
 
+# ---------------------------------------------------------------------------
+# 工作区事件（v0.0.6）
+# ---------------------------------------------------------------------------
+class WorkspaceInfo(BaseModel):
+    """工作区的**下发视图**（展示用）。
+
+    与落盘形态 `WorkspaceRecord` 的区别：`root` / `data_home` 已解析为**物理绝对路径**，
+    并附上派生的三个事实徽标 —— `migratable`（是否随数据根迁移）、`missing`（root 是否已消失）、
+    `builtin`（是否默认工作区）。派生量在宿主侧算，界面不重复推导（单一来源）。
+    """
+
+    id: str
+    name: str
+    builtin: bool = False
+    current: bool = False
+    root_kind: Literal["managed", "external"] = "managed"
+    data_home_kind: Literal["inline", "managed", "custom"] = "inline"
+    root: str = ""
+    data_home: str = ""
+    migratable: bool = False
+    missing: bool = False
+    sessions: int = 0
+    build_cmd: str = ""
+    note: str | None = None
+
+
+class WorkspaceList(Envelope):
+    """工作区登记表快照 + 当前工作区 + 侧栏折叠态。
+
+    `current` 与 `collapsed` 都是**运行态/UI 偏好**：前者不落盘，后者落 `settings.ui`。
+    一帧带全，省去界面自行推导的往返。
+    """
+
+    type: Literal["workspace.list"] = "workspace.list"
+    workspaces: list[WorkspaceInfo] = Field(default_factory=list)
+    current: str = "ws_default"
+    collapsed: list[str] = Field(default_factory=list)
+
+
+class WorkspaceDetailResult(Envelope):
+    """单个工作区的详情：有界文件列表 + 解析后的路径。
+
+    `entries` 为 `{name, dir, size}` 三元组列表（相对 `path` 的一层）；超 `file_limit`
+    时 `truncated=True`（**不静默截断**，界面据此提示）。
+    """
+
+    type: Literal["workspace.detail.result"] = "workspace.detail.result"
+    id: str
+    path: str = ""
+    root: str = ""
+    data_home: str = ""
+    entries: list[dict] = Field(default_factory=list)
+    truncated: bool = False
+    error: str | None = None
+
+
 
 # ---------------------------------------------------------------------------
 # 联合类型 + 校验器
@@ -801,6 +937,13 @@ Request = Annotated[
         ShellClose,
         ShellInput,
         ShellRefresh,
+        WorkspaceCreate,
+        WorkspaceUpdate,
+        WorkspaceDelete,
+        WorkspaceSwitch,
+        WorkspaceRefresh,
+        WorkspaceDetail,
+        MoveSession,
     ],
     Field(discriminator="type"),
 ]
@@ -837,6 +980,8 @@ Event = Annotated[
         SkillImported,
         ShellList,
         ShellOutput,
+        WorkspaceList,
+        WorkspaceDetailResult,
     ],
     Field(discriminator="type"),
 ]

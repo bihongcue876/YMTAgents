@@ -13,6 +13,9 @@ PRS = "prs"
 LIB = "lib"
 SKL = "skl"
 PRV = "prv"
+#: v0.0.6：工作区。默认工作区用固定值 `WS_DEFAULT`（不是 uuid，以便登记表可读、可手编）。
+WS = "ws"
+WS_DEFAULT = "ws_default"
 
 
 def new_uuid7() -> uuid.UUID:

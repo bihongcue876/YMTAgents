@@ -65,6 +65,16 @@ from shared.envelope import (
     SkillList,
     ShellList,
     ToolList,
+    WorkspaceCreate,
+    WorkspaceDelete,
+    WorkspaceDetail,
+    WorkspaceDetailResult,
+    WorkspaceInfo,
+    WorkspaceList,
+    WorkspaceRefresh,
+    WorkspaceSwitch,
+    WorkspaceUpdate,
+    MoveSession,
 )
 from shared.schema import (
     LoggingSettings,
@@ -85,9 +95,11 @@ from core.modules.supervisor import ModuleSupervisor
 from core.registry.executor import GATE_TIMEOUT_S, ToolExecutor
 from core.registry.registry import Registry
 from core.store.config_store import ConfigStore
+from core.workspace.layout import WorkspaceDenied, WorkspacePathError
 
 from app import logging_setup
 from shared.errors import error_text
+from shared.ids import WS_DEFAULT
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +120,7 @@ class CoreController:
         mcp_manager: McpManager | None = None,
         skill_manager=None,
         shell_manager=None,
+        workspace_manager=None,
     ) -> None:
         self.bridge = bridge
         self.store = store
@@ -122,6 +135,7 @@ class CoreController:
         self.mcp_manager = mcp_manager
         self.skill_manager = skill_manager
         self.shell_manager = shell_manager
+        self.workspace_manager = workspace_manager
         self.current_session_id: str | None = None
         # rev43：confirm 关卡裁决登记（泵取队列时命中；正常分派路径亦可投递）。
         self._gate_decisions: dict[str, bool] = {}
@@ -205,6 +219,174 @@ class CoreController:
         self._emit_mcp()
         self._emit_skills()
         self._emit_shell()
+        self._emit_workspaces()
+
+    # -- 工作区（v0.0.6） -----------------------------------------------------
+    def _session_counts(self) -> dict[str, int]:
+        """按工作区统计会话数（含归档）。
+
+        计数在**这里**算而非宿主里：`core.workspace` 不依赖 `core.agent`
+        （会话存储），反向依赖就此掐断 —— 宿主只收一张 `{workspace_id: n}` 表。
+        """
+        counts: dict[str, int] = {}
+        try:
+            metas = self.store.list(include_archived=True)
+        except Exception:  # noqa: BLE001 - 计数失败不该让工作区列表整体失败
+            log.exception("统计会话数失败")
+            return counts
+        for meta in metas:
+            key = meta.workspace_id or WS_DEFAULT
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def _emit_workspaces(self) -> None:
+        """推送工作区快照（登记表 + 当前 + 折叠态）。"""
+        if self.workspace_manager is None:
+            return
+        infos = [
+            WorkspaceInfo(**item)
+            for item in self.workspace_manager.list_status(self._session_counts())
+        ]
+        self.emit(
+            WorkspaceList(
+                workspaces=infos,
+                current=self.workspace_manager.current(),
+                collapsed=self.workspace_manager.collapsed(),
+            )
+        )
+
+    def _workspace_failure(self, exc: Exception, action: str, message: str) -> None:
+        """工作区操作的失败回报：**按真实原因归码**（一码一义），文案一律可读。"""
+        if isinstance(exc, WorkspaceDenied):
+            self._report("config", ErrorCode.WORKSPACE_DENIED.value, str(exc) or message)
+        elif isinstance(exc, WorkspacePathError):
+            self._report("config", ErrorCode.INVALID_REQUEST.value, str(exc) or message)
+        elif isinstance(exc, KeyError):
+            self._report("config", ErrorCode.INVALID_REQUEST.value, "工作区不存在（可能已被移除）。")
+        else:
+            log.exception("%s 失败", action)
+            self._report("config", ErrorCode.STORAGE_ERROR.value, message, type(exc).__name__)
+
+    def _on_workspace_create(self, request: WorkspaceCreate) -> None:
+        if self.workspace_manager is None:
+            return
+        try:
+            workspace_id = self.workspace_manager.create(
+                request.name,
+                root_kind=request.root_kind,
+                root=request.root,
+                data_home_kind=request.data_home_kind,
+                data_home=request.data_home,
+                build_cmd=request.build_cmd,
+                note=request.note,
+            )
+        except Exception as exc:  # noqa: BLE001 - 边界收口，按原因归码
+            self._workspace_failure(exc, "workspace.create", "创建工作区失败。")
+            self._emit_workspaces()
+            return
+        # 新建即切为当前：用户刚建工作区，下一步几乎必然是在其中干活
+        try:
+            self.workspace_manager.switch(workspace_id)
+        except KeyError:
+            log.warning("新建工作区后切换失败：%s", workspace_id)
+        self._emit_workspaces()
+
+    def _on_workspace_update(self, request: WorkspaceUpdate) -> None:
+        if self.workspace_manager is None:
+            return
+        try:
+            self.workspace_manager.update(
+                request.id,
+                name=request.name,
+                note=request.note,
+                build_cmd=request.build_cmd,
+                root=request.root,
+                data_home_kind=request.data_home_kind,
+                data_home=request.data_home,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._workspace_failure(exc, "workspace.update", "保存工作区失败。")
+        self._emit_workspaces()
+
+    def _on_workspace_delete(self, request: WorkspaceDelete) -> None:
+        """移除登记 —— **不删磁盘上的任何文件**（宿主层保证，见 §3.13 R2）。
+
+        归属该工作区的会话**回落到默认工作区**（`docs/03` §7「引用即警告」的同族口径：
+        删掉被引用的对象时，受影响方回退到默认，而非留下悬空引用）。
+        """
+        if self.workspace_manager is None:
+            return
+        try:
+            self.workspace_manager.delete(request.id)
+        except Exception as exc:  # noqa: BLE001
+            self._workspace_failure(exc, "workspace.delete", "移除工作区失败。")
+            self._emit_workspaces()
+            return
+        self._release_sessions(request.id)
+        self._emit_workspaces()
+        self._emit_index()  # 归属变了 → 侧栏分组要跟着变
+
+    def _release_sessions(self, workspace_id: str) -> None:
+        """把仍指向 `workspace_id` 的会话回落到默认工作区（只改归属，不动事件流）。"""
+        try:
+            metas = self.store.list(include_archived=True)
+        except Exception:  # noqa: BLE001 - 回落失败不该让移除动作整体失败
+            log.exception("回落会话归属失败")
+            return
+        for meta in metas:
+            if meta.workspace_id != workspace_id:
+                continue
+            try:
+                self.store.move_session(meta.id, None)
+            except KeyError:
+                continue
+
+    def _on_workspace_switch(self, request: WorkspaceSwitch) -> None:
+        if self.workspace_manager is None:
+            return
+        try:
+            self.workspace_manager.switch(request.id)
+        except Exception as exc:  # noqa: BLE001
+            self._workspace_failure(exc, "workspace.switch", "切换工作区失败。")
+        self._emit_workspaces()
+
+    def _on_workspace_refresh(self, request: WorkspaceRefresh) -> None:
+        """重读登记表（文件即配置：手工编辑 `workspaces/index.json` 后刷新即生效）。"""
+        if self.workspace_manager is None:
+            return
+        self.workspace_manager.load()
+        self._emit_workspaces()
+
+    def _on_workspace_detail(self, request: WorkspaceDetail) -> None:
+        if self.workspace_manager is None:
+            return
+        try:
+            result = self.workspace_manager.detail(request.id, request.path)
+        except Exception as exc:  # noqa: BLE001
+            self._workspace_failure(exc, "workspace.detail", "读取工作区文件列表失败。")
+            return
+        self.emit(WorkspaceDetailResult(**result))
+
+    def _on_move_session(self, request: MoveSession) -> None:
+        """把会话挪到另一工作区：归属变更只改 meta，事件流不动（`events.jsonl` 只增不改）。"""
+        if (
+            self.workspace_manager is not None
+            and request.workspace_id
+            and not self.workspace_manager.exists(request.workspace_id)
+        ):
+            self._report(
+                "config",
+                ErrorCode.INVALID_REQUEST.value,
+                "目标工作区不存在（可能已被移除）。",
+            )
+            return
+        try:
+            self.store.move_session(request.session_id, request.workspace_id)
+        except KeyError:
+            self._report("session", ErrorCode.SESSION_NOT_FOUND.value, "会话不存在。")
+            return
+        self._emit_index()
+        self._emit_workspaces()
 
     # -- Persona（阶段 2 · spec rev23） --------------------------------------
     def _emit_personas(self) -> None:
@@ -626,6 +808,20 @@ class CoreController:
             self._on_shell_input(request)
         elif t == "shell.refresh":
             self._on_shell_refresh(request)
+        elif t == "workspace.create":
+            self._on_workspace_create(request)
+        elif t == "workspace.update":
+            self._on_workspace_update(request)
+        elif t == "workspace.delete":
+            self._on_workspace_delete(request)
+        elif t == "workspace.switch":
+            self._on_workspace_switch(request)
+        elif t == "workspace.refresh":
+            self._on_workspace_refresh(request)
+        elif t == "workspace.detail":
+            self._on_workspace_detail(request)
+        elif t == "session.move":
+            self._on_move_session(request)
         elif t == "skill.toggle":
             self._on_skill_toggle(request)
         elif t == "skill.import":
@@ -654,12 +850,23 @@ class CoreController:
     def _ensure_session(self) -> str:
         if self.current_session_id is None:
             persona_id = self.personas.current_default() if self.personas else None
-            meta = self.store.create(None, persona_id)
+            meta = self.store.create(
+                None, persona_id, workspace_id=self._current_workspace()
+            )
             self.current_session_id = meta.id
             self.emit(SessionCreated(session_id=meta.id, title=meta.title, created_at=meta.created_at))
             self._emit_index()
             self._emit_personas()
+            self._emit_workspaces()
         return self.current_session_id
+
+    def _current_workspace(self) -> str | None:
+        """新会话默认归属的工作区。**默认工作区记 `None`** —— 与存量会话（缺字段）同态，
+        避免「新会话记 ws_default、老会话记 None」两套表示法（`docs/03` §7 引用即警告的反面）。"""
+        if self.workspace_manager is None:
+            return None
+        current = self.workspace_manager.current()
+        return None if current == WS_DEFAULT else current
 
     def _on_send(self, request: SendMessage) -> None:
         session_id = self._ensure_session()
@@ -720,11 +927,14 @@ class CoreController:
         persona_id = request.persona_id or (
             self.personas.current_default() if self.personas else None
         )
-        meta = self.store.create(request.title, persona_id)
+        # v0.0.6：显式指定优先，否则进**当前工作区**（默认工作区记 None）
+        workspace_id = request.workspace_id or self._current_workspace()
+        meta = self.store.create(request.title, persona_id, workspace_id=workspace_id)
         self.current_session_id = meta.id
         self.emit(SessionCreated(session_id=meta.id, title=meta.title, created_at=meta.created_at))
         self._emit_index()
         self._emit_personas()  # 新会话的 in_session 标记变了
+        self._emit_workspaces()  # 侧栏分组计数变了
         self._emit_branches(meta.id)
         self._emit_detail(meta.id)
 
@@ -1014,6 +1224,10 @@ class CoreController:
             logging_setup.apply_level(settings.logging.level)
         self.gateway.reload_settings()
         self._emit_settings()
+        if request.section == "ui":
+            # v0.0.6：折叠态住在 settings.ui —— 落盘后要把工作区快照重发一次，
+            # 否则界面上的 `collapsed` 会停在旧值（单一来源在配置，不在界面缓存）。
+            self._emit_workspaces()
 
     # -- 退出收口 ----------------------------------------------------------
     def shutdown(self) -> None:

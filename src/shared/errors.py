@@ -40,6 +40,11 @@ class ErrorCode(str, Enum):
     TOOL_UNAVAILABLE = "tool_unavailable"
     TOOL_INVALID_ARGS = "tool_invalid_args"
     TOOL_BACKEND_ERROR = "tool_backend_error"
+    # v0.0.6：工作区策略拒绝（禁设位置、默认工作区不可动）。
+    # 为什么不复用既有码：`tool_denied` 是**工具管线**的码（docs 09 §5），
+    # `whitelist_blocked` 是**网络出口**的码 —— 两者语义都不是「工作区位置不许」。
+    # 按真实原因新开一码，胜过把「格式不合法」的 `invalid_request` 挪作他用（一码一义）。
+    WORKSPACE_DENIED = "workspace_denied"
 
 
 class ErrorScope(str, Enum):
@@ -75,6 +80,7 @@ ERROR_TEXT: dict[str, str] = {
     ErrorCode.TOOL_UNAVAILABLE.value: "工具不可用（未注册或服务器未就绪）",
     ErrorCode.TOOL_INVALID_ARGS.value: "工具参数无效",
     ErrorCode.TOOL_BACKEND_ERROR.value: "工具后端错误",
+    ErrorCode.WORKSPACE_DENIED.value: "该位置不可作为工作区",
 }
 
 

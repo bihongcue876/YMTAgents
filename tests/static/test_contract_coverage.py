@@ -24,6 +24,7 @@ COLLABORATORS: dict[str, tuple[str, str] | None] = {
     "agent": ("core.agent.loop", "IAgentLoop"),
     "supervisor": ("core.modules.supervisor", "IModuleSupervisor"),
     "shell_manager": ("core.shell.manager", "IShellManager"),
+    "workspace_manager": ("core.workspace.manager", "IWorkspaceManager"),
     "registry": None,
     "config_store": None,
     "bridge": None,

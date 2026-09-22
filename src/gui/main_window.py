@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -62,7 +63,16 @@ from shared.envelope import (
     ShellInput,
     ShellRefresh,
     ShellSpawn,
+    MoveSession,
+    WorkspaceCreate,
+    WorkspaceDelete,
+    WorkspaceDetail,
+    WorkspaceRefresh,
+    WorkspaceSwitch,
+    WorkspaceUpdate,
 )
+
+from shared.ids import WS_DEFAULT
 
 from core.bus.bridge import BusBridge
 
@@ -75,6 +85,7 @@ from gui.pages.plugins import GateDialog, PluginsPage
 from gui.pages.settings import SettingsPage
 from gui.pages.skills import SkillsPage
 from gui.pages.terminal import TerminalPage
+from gui.pages.workspaces import WorkspacesPage
 from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX, Sidebar
 
 
@@ -98,6 +109,10 @@ class MainWindow(QMainWindow):
         self._slots_cache: dict = {}
         self._personas_cache: list = []
         self._default_persona: str | None = None
+        # v0.0.6：工作区缓存（分组由 Sidebar 负责，此处只留一份供重绘与查询）
+        self._workspaces_cache: list = []
+        self._current_workspace: str = WS_DEFAULT
+        self._collapsed_cache: list[str] = []
 
         self.sidebar = Sidebar()
         self.chat = ChatView()
@@ -107,6 +122,7 @@ class MainWindow(QMainWindow):
         self.skills_page = SkillsPage()
         self.skills_page.set_data_root(data_root)
         self.terminal_page = TerminalPage()
+        self.workspaces_page = WorkspacesPage()
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
         self._font_size: str | None = None
@@ -120,6 +136,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.plugins_page)
         self.stack.addWidget(self.skills_page)
         self.stack.addWidget(self.terminal_page)
+        self.stack.addWidget(self.workspaces_page)
         self.stack.addWidget(self.settings)
 
         # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
@@ -206,6 +223,7 @@ class MainWindow(QMainWindow):
         s.open_skills.connect(lambda: self.stack.setCurrentWidget(self.skills_page))
         s.open_plugins.connect(lambda: self.stack.setCurrentWidget(self.plugins_page))
         s.open_terminal.connect(lambda: self.stack.setCurrentWidget(self.terminal_page))
+        s.open_workspaces.connect(lambda: self.stack.setCurrentWidget(self.workspaces_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
 
         c = self.chat
@@ -279,6 +297,47 @@ class MainWindow(QMainWindow):
             lambda sid, cmd: self.bus.submit(ShellInput(id=sid, command=cmd))
         )
         tm.refresh_requested.connect(lambda: self.bus.submit(ShellRefresh()))
+
+        # v0.0.6：工作区（侧栏分组 → 请求；页面 → 请求）
+        s.switch_workspace.connect(lambda wid: self.bus.submit(WorkspaceSwitch(id=wid)))
+        s.collapse_workspace.connect(self._on_collapse_workspace)
+        s.new_session_in.connect(lambda wid: self.bus.submit(NewSession(workspace_id=wid)))
+        s.rename_workspace.connect(self._on_rename_workspace)
+        s.open_workspace_dir.connect(self._open_path)
+        s.delete_workspace.connect(lambda wid: self.bus.submit(WorkspaceDelete(id=wid)))
+        s.move_session.connect(
+            lambda sid, wid: self.bus.submit(MoveSession(session_id=sid, workspace_id=wid or None))
+        )
+        wp = self.workspaces_page
+        wp.create_requested.connect(
+            lambda data: self.bus.submit(
+                WorkspaceCreate(
+                    name=data["name"],
+                    root_kind=data["root_kind"],
+                    root=data["root"],
+                    data_home_kind=data["data_home_kind"],
+                    build_cmd=data.get("build_cmd") or "",
+                    note=data["note"],
+                )
+            )
+        )
+        wp.update_requested.connect(
+            lambda data: self.bus.submit(
+                WorkspaceUpdate(
+                    id=data["id"],
+                    name=data["name"],
+                    note=data.get("note") or "",
+                    build_cmd=data.get("build_cmd") or "",
+                )
+            )
+        )
+        wp.delete_requested.connect(lambda wid: self.bus.submit(WorkspaceDelete(id=wid)))
+        wp.switch_requested.connect(lambda wid: self.bus.submit(WorkspaceSwitch(id=wid)))
+        wp.refresh_requested.connect(lambda: self.bus.submit(WorkspaceRefresh()))
+        wp.detail_requested.connect(
+            lambda wid, path: self.bus.submit(WorkspaceDetail(id=wid, path=path))
+        )
+        wp.open_dir_requested.connect(self._open_path)
 
         self.settings.settings_update.connect(
             lambda section, data: self.bus.submit(SettingsUpdate(section=section, data=data))
@@ -440,6 +499,9 @@ class MainWindow(QMainWindow):
         self.models.set_theme(used)
         # 终端监视区是自渲染内容 → 整帧重渲染（颜色/字号经 theme 注入，模板不写死）
         self.terminal_page.set_theme(used, used_font)
+        # 侧栏分组与工作区页把行高渲染成固定值 → 字号变了必须重算（样式表字号不参与 sizeHint）
+        self.sidebar.rebuild()
+        self.workspaces_page.refresh_metrics()
 
     # -- 事件分发 ----------------------------------------------------------
     def on_event(self, event) -> None:
@@ -498,6 +560,9 @@ class MainWindow(QMainWindow):
             ui = event.data.get("ui", {})
             self._apply_appearance(ui.get("theme"), ui.get("font_size"))
             self.settings.load_settings(event.data)
+            self.workspaces_page.set_default_managed_kind(
+                (event.data.get("workspace") or {}).get("default_data_home_kind", "inline")
+            )
         elif t == "persona.list":
             self._personas_cache = list(event.personas)
             self._default_persona = next(
@@ -557,6 +622,54 @@ class MainWindow(QMainWindow):
             )
         elif t == "shell.output":
             self.terminal_page.on_output(event.id, event.chunk)
+        elif t == "workspace.list":
+            # 信封里是 WorkspaceInfo 模型（强类型契约）；到视图层统一转成 dict ——
+            # 侧栏与工作区页只需「读几个字段」，不必各自依赖 shared 的类型（也不该绑死）。
+            items = [w.model_dump() for w in event.workspaces]
+            self._workspaces_cache = items
+            self._current_workspace = event.current
+            self._collapsed_cache = list(event.collapsed)
+            self.sidebar.update_workspaces(items, event.current, event.collapsed)
+            self.workspaces_page.update_workspaces(items, event.current)
+        elif t == "workspace.detail.result":
+            self.workspaces_page.on_detail(event)
+
+    # -- 工作区（v0.0.6） --------------------------------------------------
+    def _on_collapse_workspace(self, workspace_id: str, collapsed: bool) -> None:
+        """折叠工作区分组 = 改 UI 偏好 → 落 `settings.ui.collapsed_workspaces`。
+
+        **不新增请求/事件类型**（沿既有 `settings.update(section="ui")`，与主题/字号同族）；
+        就地更新本地折叠态并重绘，界面不必等落盘往返。
+        """
+        ids = [w for w in self._collapsed_cache if w != workspace_id]
+        if collapsed:
+            ids.append(workspace_id)
+        self._collapsed_cache = ids
+        self.sidebar.update_workspaces(self._workspaces_cache, self._current_workspace, ids)
+        self.bus.submit(SettingsUpdate(section="ui", data={"collapsed_workspaces": ids}))
+
+    def _on_rename_workspace(self, workspace_id: str) -> None:
+        info = next((w for w in self._workspaces_cache if w.get("id") == workspace_id), None)
+        if info is None:
+            return
+        name, ok = QInputDialog.getText(self, "重命名工作区", "名称：", text=info.get("name", ""))
+        if not ok or not name.strip():
+            return
+        self.bus.submit(
+            WorkspaceUpdate(
+                id=workspace_id,
+                name=name.strip(),
+                note=info.get("note") or "",
+                build_cmd=info.get("build_cmd") or "",
+            )
+        )
+
+    def _open_path(self, path: str) -> None:
+        """在系统文件管理器中打开目录（GUI 侧动作，不经 shell —— 不让便利功能变成命令执行面）。"""
+        if path and Path(path).is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        else:
+            QMessageBox.information(self, "目录不存在", f"该目录不存在或不可访问：\n{path}")
 
     def _on_gate_request(self, event) -> None:
         """工具调用关卡：弹出确认卡片，用户裁决后回发 GateRespond（core 侧正泵取队列等待）。"""

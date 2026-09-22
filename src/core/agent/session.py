@@ -112,7 +112,13 @@ def wire_to_line(event) -> tuple[str, str, dict] | None:
 
 class ISessionStore(ABC):
     @abstractmethod
-    def create(self, title: str | None, persona_id: str | None) -> SessionMeta: ...
+    def create(
+        self, title: str | None, persona_id: str | None, workspace_id: str | None = None
+    ) -> SessionMeta: ...
+
+    @abstractmethod
+    def move_session(self, session_id: str, workspace_id: str | None) -> SessionMeta:
+        """把会话挪到另一工作区（v0.0.6）；`None` = 默认工作区。只改归属，不动事件流。"""
 
     @abstractmethod
     def resume(self, session_id: str) -> SessionSnapshot: ...
@@ -369,7 +375,9 @@ class SessionStore(ISessionStore):
         return sum(1 for e in self.replay(session_id) if e.get("type") == "msg.user")
 
     # -- 生命周期 ----------------------------------------------------------
-    def create(self, title: str | None, persona_id: str | None) -> SessionMeta:
+    def create(
+        self, title: str | None, persona_id: str | None, workspace_id: str | None = None
+    ) -> SessionMeta:
         session_id = new_id(SESS)
         now = _utcnow()
         meta = SessionMeta(
@@ -381,11 +389,29 @@ class SessionStore(ISessionStore):
             updated_at=now,
             state="active",
             main_model=None,
+            workspace_id=workspace_id,  # v0.0.6：所属工作区（None = 默认工作区）
         )
         (self.session_dir(session_id) / "artifacts").mkdir(parents=True, exist_ok=True)
         self._write_meta(meta)
-        self.append(session_id, "agent", "session.start", {"title": meta.title, "persona_id": persona_id})
+        self.append(
+            session_id,
+            "agent",
+            "session.start",
+            {"title": meta.title, "persona_id": persona_id, "workspace_id": workspace_id},
+        )
         self._upsert_index(meta)
+        return meta
+
+    def move_session(self, session_id: str, workspace_id: str | None) -> SessionMeta:
+        """会话级工作区归属切换（v0.0.6）：**只改归属**，事件流与记忆文件都不动。
+
+        与 `set_persona` 同族 —— 变更落一条 `meta.update` 事件，使历史能自解释
+        「这轮为什么换了工作区」；`events.jsonl` 仍只增不改。
+        """
+        meta = self._read_meta(session_id)
+        meta.workspace_id = workspace_id
+        self._touch(meta)
+        self.append(session_id, "user", "meta.update", {"workspace_id": workspace_id})
         return meta
 
     def set_persona(self, session_id: str, persona_id: str | None) -> SessionMeta:

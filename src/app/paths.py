@@ -40,8 +40,13 @@ def ensure_skeleton() -> Path:
         "sessions",
         "secrets",
         "libraries",
+        "workspaces",  # v0.0.6：工作区登记表所在（index.json）
         "workspace",
         "workspace/files",
+        # v0.0.6：默认工作区（ws_default）的 root 与 data_home **重合**于 workspace/，
+        # 故其文档与产物目录就落在这里 —— 与 v0.0.5 及以前的形状完全一致。
+        "workspace/documents",
+        "workspace/artifacts",
         "skills",
         "backup",
         "logs",

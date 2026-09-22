@@ -70,6 +70,29 @@ class UISettings(BaseModel):
 
     theme: Literal["light", "dark"] = "light"
     font_size: Literal["small", "normal", "large", "xlarge"] = "normal"
+    #: v0.0.6：已折叠的工作区分组 id（侧栏 accordion 的折叠态）。
+    #: 属 UI 偏好，与 theme/font_size 同族 —— 走既有 `settings.update(section="ui")`，
+    #: **不新增请求/事件类型**；每一项是工作区 id（非名称，名称不参与任何状态键）。
+    collapsed_workspaces: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# settings.json → workspace（v0.0.6：工作区的出厂默认；登记表在 workspaces/index.json）
+# ---------------------------------------------------------------------------
+class WorkspaceSettings(BaseModel):
+    """工作区的全局出厂默认与展示边界。
+
+    - `default_data_home_kind`：新建工作区的**默认**数据落点。用户裁决（2026-09-22 D3）：
+      默认在工作区之中建 `.ymtdata` 这类私有数据目录 → 故为 `inline`。
+    - `file_depth` / `file_limit`：文件列表的**有界**遍历（深度/条数），防越界遍历与卡死。
+
+    `build_timeout_ms` 不在此处 —— 构建（切片 4）尚未落地，**不留无消费者的配置项**
+    （项目纪律：零调用的配置值与零发射的错误码同属最有效的巡检线索）。
+    """
+
+    default_data_home_kind: Literal["inline", "managed", "custom"] = "inline"
+    file_depth: int = 2
+    file_limit: int = 500
 
 
 class SettingsConfig(BaseModel):
@@ -77,6 +100,53 @@ class SettingsConfig(BaseModel):
     network: NetworkSettings = Field(default_factory=NetworkSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     ui: UISettings = Field(default_factory=UISettings)
+    workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
+
+
+# ---------------------------------------------------------------------------
+# workspaces/index.json（v0.0.6：工作区登记表 —— 唯一事实源，可读、可 diff、可手编）
+# ---------------------------------------------------------------------------
+class WorkspaceRecord(BaseModel):
+    """一个工作区的登记项。
+
+    三个概念**正交**，互不混叠（spec v0.0.6 §3.1）：
+    - `root`：真实目录 —— shell 的 cwd、文件列表的根、构建的执行位置；
+    - `data_home`：该工作区私有的 `ymtdata` —— 记忆 `AGENTS.md`、文档 `documents/`、产物 `artifacts/`；
+    - 本记录：`index.json` 里的一行。
+
+    路径编码（`root` / `data_home` 两个字段，按各自的 `*_kind` 解释）：
+
+    | kind | 字段含义 |
+    |---|---|
+    | `managed`（root）/ `managed`（data_home） | **相对数据根**的相对路径（可随数据根整体迁移） |
+    | `external`（root）/ `custom`（data_home） | **绝对路径**（不可迁移，诚实标注） |
+    | `inline`（data_home） | 固定 `.ymtdata`，相对 `root` 解析 |
+
+    `name` **不参与任何路径构造**（id 才是路径）→ 名称里的 `..` / `/` / `:` 无注入面。
+    """
+
+    schema_version: Literal[1] = 1
+    id: str
+    name: str
+    root_kind: Literal["managed", "external"] = "managed"
+    root: str
+    data_home_kind: Literal["inline", "managed", "custom"] = "inline"
+    data_home: str = ".ymtdata"
+    created_at: datetime
+    build_cmd: str | None = None
+    note: str | None = None
+
+
+class WorkspaceIndex(BaseModel):
+    """工作区登记表（`ymtdata/workspaces/index.json`）。
+
+    `current` **不落盘** —— 它是运行态（与「运行态不入盘」纪律一致），
+    此处不设字段；当前工作区由 `WorkspaceManager` 在内存中持有。
+    """
+
+    schema_version: Literal[1] = 1
+    workspaces: list[WorkspaceRecord] = Field(default_factory=list)
+
 
 
 # ---------------------------------------------------------------------------

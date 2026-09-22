@@ -252,6 +252,20 @@ QLabel#shellBadge[shellState="starting"] {{ color: {p.accent}; }}
 QLabel#shellBadge[shellState="ready"] {{ color: {p.ok}; }}
 QLabel#shellBadge[shellState="busy"] {{ color: {p.warn}; }}
 QLabel#shellBadge[shellState="dead"] {{ color: {p.danger}; }}
+
+/* 侧栏工作区分组头与工作区页徽标（v0.0.6）：态由属性驱动，主题切换即整体换色。
+   分组头是扁平可点行（不带按钮外框），折叠箭头由文本给出 —— 复用 QPushButton 的
+   点击语义，但不与通用按钮样式抢版面 */
+QPushButton#wsGroupHeader {{
+    background: transparent; color: {p.muted};
+    border: none; border-radius: 6px; text-align: left; padding: 2px 6px;
+}}
+QPushButton#wsGroupHeader:hover {{ background: {p.surface}; color: {p.fg}; }}
+
+QLabel#wsBadge {{ color: {p.muted}; }}
+QLabel#wsBadge[wsState="current"] {{ color: {p.ok}; }}
+QLabel#wsBadge[wsState="missing"] {{ color: {p.danger}; }}
+QLabel#wsBadge[wsState="external"] {{ color: {p.warn}; }}
 """
 
 

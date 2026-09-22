@@ -32,6 +32,7 @@ from core.shell.manager import ShellManager
 from core.skills.manager import SkillManager
 from core.store.config_store import ConfigStore
 from core.store.migrate import migrate_all
+from core.workspace.manager import WorkspaceManager
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class AppContext:
     executor: ToolExecutor
     skill_manager: SkillManager
     shell_manager: ShellManager
+    workspace_manager: WorkspaceManager
 
 
 def bootstrap(
@@ -84,6 +86,10 @@ def bootstrap(
     supervisor = ModuleSupervisor()
     registry = Registry()
     personas = PersonaStore(root / "personas")
+    # v0.0.6：工作区宿主。启动成本 = 读一次 index.json（缺失则生成默认工作区），
+    # 零子进程、零网络；登记表不可读时按空表加载并留可读提示（不阻断启动）。
+    workspace_manager = WorkspaceManager(root, config_store, audit=sink.append_audit)
+    workspace_manager.load()
     # v0.0.4：Skills 宿主（预置复制 + 注册启用技能；无启用技能时零影响）。
     skill_manager = SkillManager(
         config_store,
@@ -115,6 +121,7 @@ def bootstrap(
         bridge, session_store, gateway, agent, supervisor, registry, config_store, root,
         personas=personas, executor=executor, mcp_manager=mcp_manager,
         skill_manager=skill_manager, shell_manager=shell_manager,
+        workspace_manager=workspace_manager,
     )
     # 启用的 server 在此启动；连接失败只落 server 状态（不阻断启动）。
     mcp_manager.start_all()
@@ -139,4 +146,5 @@ def bootstrap(
         executor=executor,
         skill_manager=skill_manager,
         shell_manager=shell_manager,
+        workspace_manager=workspace_manager,
     )
