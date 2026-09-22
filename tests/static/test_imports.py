@@ -25,6 +25,7 @@ ALLOWED: dict[str, set[str] | None] = {
     "core.gateway": {"shared", "core.bus", "core.store", "core.security"},
     "core.registry": {"shared", "core.bus"},
     "core.mcp": {"shared", "core.registry"},
+    "core.shell": {"shared", "core.registry"},
     "core.skills": {"shared", "core.registry"},
     "core.memory": {"shared", "core.bus"},
     "core.agent": {

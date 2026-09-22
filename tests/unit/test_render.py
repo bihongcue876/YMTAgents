@@ -179,3 +179,79 @@ def test_render_template_has_no_hardcoded_font_size():
     assert f"font-size: {theme.font_px('body', 'normal')}px" in html
     assert "font-size: 12px" not in html  # 旧小字基准
     assert "font-size: 13px" not in html  # 旧代码基准
+
+
+# -- shell 输出的 ANSI 渲染（v0.0.5）------------------------------------------
+
+
+def test_ansi_inner_is_a_fragment_with_term_class():
+    """终端监视区用 innerHTML 片段（rev19 局部更新），主题与字号随片段走。"""
+    from gui.widgets.render.md import ansi_inner
+
+    inner = ansi_inner("\x1b[32mok\x1b[0m", "dark", "large", klass="term")
+    assert "<style>" in inner
+    assert '<pre class="term">' in inner
+    assert f"font-size: {theme.font_px('body', 'large')}px" in inner
+    assert "<!DOCTYPE html>" not in inner  # 片段而非整文档
+
+
+def test_ansi_colors_follow_theme():
+    """暗色必须重映射黑白两端，否则近黑前景在深底上不可见（gui/theme.ansi_colors）。"""
+    light = theme.ansi_colors("light")
+    dark = theme.ansi_colors("dark")
+    assert light["30"] != dark["30"]
+    assert dark["30"] == theme.palette("dark").fg  # 暗色下「黑」= 亮色前景
+    assert theme.ansi_colors("unknown-theme") == light  # 未知主题安全回退
+
+
+def test_tool_output_with_ansi_becomes_colored_spans():
+    """shell 输出走统一渲染管线：ANSI → 主题感知的带色 span（不是转义成一坨字符）。"""
+    html = messages_to_html(
+        [
+            {
+                "role": "tool",
+                "name": "shell.exec",
+                "permission": "confirm",
+                "ok": True,
+                "output": "shell=s1 kind=bash exit=0\n---\n\x1b[31mfailed\x1b[0m",
+            }
+        ],
+        "light",
+    )
+    assert '<span style="color:#DC2626">failed</span>' in html
+    assert "\x1b[31m" not in html  # 转义序列必须被消费掉
+
+
+def test_tool_output_without_ansi_is_escaped():
+    """客观规则：无 ANSI 就原样转义 —— 不按工具名写特例，也不放过 HTML 注入。"""
+    html = messages_to_html(
+        [
+            {
+                "role": "tool",
+                "name": "shell.exec",
+                "permission": "confirm",
+                "ok": True,
+                "output": "<script>alert(1)</script>",
+            }
+        ]
+    )
+    assert "&lt;script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
+
+
+def test_ansi_text_is_escaped_too():
+    """带 ANSI 的输出同样要转义 HTML：上色不是绕过转义的理由。"""
+    from gui.widgets.render.md import ansi_inner
+
+    inner = ansi_inner("\x1b[1m<b>bold</b>\x1b[0m", "light")
+    assert "&lt;b&gt;bold&lt;/b&gt;" in inner
+    assert "<b>bold</b>" not in inner
+
+
+def test_terminal_pre_style_is_structural_only():
+    """终端页 `<pre class="term">` 只承载结构性排版，颜色仍由主题 CSS 提供（取色单源纪律）。"""
+    from gui.widgets.render.md import stub_doc
+
+    doc = stub_doc()
+    assert "pre.term" in doc
+    assert "pre.term { margin: 0" in doc

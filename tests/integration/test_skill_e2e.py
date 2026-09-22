@@ -28,6 +28,15 @@ def _collect(ctx):
     return events
 
 
+def _skill_tools(ctx) -> list[str]:
+    """当前下发工具里的技能工具名（技能面的断言不受其它工具载体的影响）。"""
+    return [
+        p["function"]["name"]
+        for p in ctx.executor.tool_payloads()
+        if p["function"]["name"].startswith("skill.")
+    ]
+
+
 SKILL_TEXT = """---
 name: 集成技能
 description: 集成测试用技能。
@@ -54,7 +63,9 @@ def test_presets_pushed_and_registry_empty_on_boot(tmp_path, monkeypatch, qapp):
         ids = [s["id"] for s in skill_list.skills]
         assert ids == ["skl_ymt_plan", "skl_ymt_review"]  # 预置可选：安装、未启用
         assert all(s["builtin"] and not s["enabled"] for s in skill_list.skills)
-        assert ctx.executor.tool_payloads() == []  # 未启用 → 不下发工具
+        # 未启用 → 不下发该技能的工具。注意：断言的是**没有 skill.\* 工具**，
+        # 不是「注册表为空」—— v0.0.5 起 shell.exec 默认可用（本机有解释器时）。
+        assert _skill_tools(ctx) == []
     finally:
         ctx.worker.stop()
 
@@ -92,7 +103,7 @@ def test_full_skill_lifecycle(tmp_path, monkeypatch, qapp):
         # 5. 删除 → 注销 + 目录移除
         ctx.controller.handle(SkillDelete(id=sid))
         assert not (ctx.root / "skills" / sid).exists()
-        assert ctx.executor.tool_payloads() == []
+        assert _skill_tools(ctx) == []  # 该技能已下线（shell.exec 不属本测试关注面）
         # 6. 刷新 → 列表回发
         events.clear()
         ctx.controller.handle(SkillsRefresh())
