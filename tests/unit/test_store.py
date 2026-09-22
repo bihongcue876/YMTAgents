@@ -72,3 +72,45 @@ def test_migrate_guard(tmp_path):
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(migrate.SchemaTooNewError):
         migrate.migrate_all(tmp_path)
+
+
+def test_atomic_write_retries_transient_lock(tmp_path, monkeypatch):
+    """os.replace 撞 Windows 瞬时文件锁（WinError 5）时有界重试（rev55 实测的偶发）。"""
+    import os as os_mod
+
+    from core.store import atomic
+
+    path = tmp_path / "a.json"
+    real_replace = os_mod.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(5, "拒绝访问")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(atomic.os, "replace", flaky_replace)
+    monkeypatch.setattr(atomic.time, "sleep", lambda _s: None)
+    atomic.atomic_write_json(path, {"x": 1})
+    assert calls["n"] == 2
+    assert json.loads(path.read_text(encoding="utf-8")) == {"x": 1}
+
+
+def test_atomic_write_raises_after_retries_exhausted(tmp_path, monkeypatch):
+    """锁不释放：重试耗尽后照原样抛 —— fail-closed 不变，目标文件不出现半写。"""
+    from core.store import atomic
+
+    path = tmp_path / "a.json"
+    calls = {"n": 0}
+
+    def locked_replace(src, dst):
+        calls["n"] += 1
+        raise PermissionError(5, "拒绝访问")
+
+    monkeypatch.setattr(atomic.os, "replace", locked_replace)
+    monkeypatch.setattr(atomic.time, "sleep", lambda _s: None)
+    with pytest.raises(PermissionError):
+        atomic.atomic_write_json(path, {"x": 1})
+    assert calls["n"] == atomic._REPLACE_RETRIES + 1
+    assert not path.exists()

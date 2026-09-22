@@ -9,8 +9,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
+
+#: `os.replace` 撞 Windows 瞬时文件锁（杀软/索引器扫描刚落盘的 .tmp）时的有界重试。
+#: 实测形态：WinError 5「拒绝访问」，毫秒级自行恢复（rev55 全量回归 3 例偶发）；
+#: 毫秒退避重试 3 次，耗尽后照原样抛 —— fail-closed 不变。
+_REPLACE_RETRIES = 3
+_REPLACE_DELAYS = (0.05, 0.10, 0.20)
 
 
 def _tmp_path(path: Path) -> Path:
@@ -22,7 +29,14 @@ def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _tmp_path(path)
     tmp.write_text(text, encoding="utf-8", newline="\n")
-    os.replace(tmp, path)
+    for attempt in range(_REPLACE_RETRIES + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt >= _REPLACE_RETRIES:
+                raise
+            time.sleep(_REPLACE_DELAYS[attempt])
 
 
 def atomic_write_json(path: Path, obj: Any) -> None:
