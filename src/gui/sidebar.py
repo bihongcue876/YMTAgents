@@ -87,78 +87,58 @@ class Sidebar(QWidget):
         self._archived_open = False
 
         # -- 图标栏（折叠后仍保留；rev18：图标右侧带文字，只看图标猜不出功能） --
-        self._toggle = QPushButton("☰ 会话")
-        self._toggle.setObjectName("railButton")
-        self._toggle.setToolTip("折叠 / 展开会话")
-        self._toggle.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._toggle.setCursor(Qt.PointingHandCursor)
+        # rev55：rail 收进 #railHost（surface 底 + 右分隔线），导航按钮带 checked 态
+        def _rail_button(text: str, tooltip: str) -> QPushButton:
+            button = QPushButton(text)
+            button.setObjectName("railButton")
+            button.setToolTip(tooltip)
+            button.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
+            button.setCursor(Qt.PointingHandCursor)
+            return button
+
+        self._toggle = _rail_button("☰ 会话", "折叠 / 展开会话")
         self._toggle.clicked.connect(self.toggle_requested.emit)
 
-        self._models_btn = QPushButton("⚙ 模型")
-        self._models_btn.setObjectName("railButton")
-        self._models_btn.setToolTip("模型配置")
-        self._models_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._models_btn.setCursor(Qt.PointingHandCursor)
-        self._models_btn.clicked.connect(self.open_models.emit)
+        self._workspaces_btn = _rail_button("🗂 工作区", "工作区（目录 · 记忆落点 · 文件）")
+        self._models_btn = _rail_button("⚙ 模型", "模型配置")
+        self._personas_btn = _rail_button("🎭 角色", "角色配置（Persona）")
+        self._skills_btn = _rail_button("🧩 技能", "技能（提示词指令包）")
+        self._plugins_btn = _rail_button("🔌 插件", "MCP 插件与工具")
+        self._terminal_btn = _rail_button("⌨ 终端", "本机终端（shell 会话与监视）")
+        self._settings_btn = _rail_button("🛠 设置", "系统设置")
 
-        self._personas_btn = QPushButton("🎭 角色")
-        self._personas_btn.setObjectName("railButton")
-        self._personas_btn.setToolTip("角色配置（Persona）")
-        self._personas_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._personas_btn.setCursor(Qt.PointingHandCursor)
-        self._personas_btn.clicked.connect(self.open_personas.emit)
-
-        self._settings_btn = QPushButton("🛠 设置")
-        self._settings_btn.setObjectName("railButton")
-        self._settings_btn.setToolTip("系统设置")
-        self._settings_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._settings_btn.setCursor(Qt.PointingHandCursor)
-        self._settings_btn.clicked.connect(self.open_settings.emit)
-
-        self._plugins_btn = QPushButton("🔌 插件")
-        self._plugins_btn.setObjectName("railButton")
-        self._plugins_btn.setToolTip("MCP 插件与工具")
-        self._plugins_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._plugins_btn.setCursor(Qt.PointingHandCursor)
-        self._plugins_btn.clicked.connect(self.open_plugins.emit)
-
-        self._skills_btn = QPushButton("🧩 技能")
-        self._skills_btn.setObjectName("railButton")
-        self._skills_btn.setToolTip("技能（提示词指令包）")
-        self._skills_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._skills_btn.setCursor(Qt.PointingHandCursor)
-        self._skills_btn.clicked.connect(self.open_skills.emit)
-
-        self._terminal_btn = QPushButton("⌨ 终端")
-        self._terminal_btn.setObjectName("railButton")
-        self._terminal_btn.setToolTip("本机终端（shell 会话与监视）")
-        self._terminal_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._terminal_btn.setCursor(Qt.PointingHandCursor)
-        self._terminal_btn.clicked.connect(self.open_terminal.emit)
-
-        # v0.0.6：工作区（docs 05 §2 导航「工作区」组，置于「能力」组之上）
-        self._workspaces_btn = QPushButton("🗂 工作区")
-        self._workspaces_btn.setObjectName("railButton")
-        self._workspaces_btn.setToolTip("工作区（目录 · 记忆落点 · 文件）")
-        self._workspaces_btn.setFixedSize(RAIL_BTN_W, RAIL_BTN_H)
-        self._workspaces_btn.setCursor(Qt.PointingHandCursor)
-        self._workspaces_btn.clicked.connect(self.open_workspaces.emit)
+        # 导航态注册表（rev55）：key 与 MainWindow 的页序对应，set_active 由页切换驱动
+        self._nav: dict[str, tuple[QPushButton, object]] = {
+            "workspaces": (self._workspaces_btn, self.open_workspaces),
+            "models": (self._models_btn, self.open_models),
+            "personas": (self._personas_btn, self.open_personas),
+            "skills": (self._skills_btn, self.open_skills),
+            "plugins": (self._plugins_btn, self.open_plugins),
+            "terminal": (self._terminal_btn, self.open_terminal),
+            "settings": (self._settings_btn, self.open_settings),
+        }
+        for key, (button, signal) in self._nav.items():
+            button.setCheckable(True)
+            button.clicked.connect(lambda _=False, k=key, s=signal: self._nav_goto(k, s))
 
         rail = QVBoxLayout()
-        rail.setContentsMargins(0, 0, 0, 0)
+        rail.setContentsMargins(4, 4, 4, 4)
         rail.setSpacing(4)
         rail.addWidget(self._toggle)
         rail.addStretch(1)
-        rail.addWidget(self._workspaces_btn)
-        rail.addWidget(self._models_btn)
-        rail.addWidget(self._personas_btn)
-        rail.addWidget(self._skills_btn)
-        rail.addWidget(self._plugins_btn)
-        rail.addWidget(self._terminal_btn)
-        rail.addWidget(self._settings_btn)
+        for button in (self._workspaces_btn, self._models_btn, self._personas_btn,
+                       self._skills_btn, self._plugins_btn, self._terminal_btn,
+                       self._settings_btn):
+            rail.addWidget(button)
+
+        rail_host = QWidget()
+        rail_host.setObjectName("railHost")
+        rail_host.setLayout(rail)
+        rail_host.setFixedWidth(RAIL_PX)
 
         # -- 会话面板（可折叠） ----------------------------------------------
         self._new = QPushButton("＋ 新对话")
+        self._new.setObjectName("primaryButton")  # rev55：关键 CTA 用 accent 实底
         self._new.setFixedHeight(40)
         self._new.clicked.connect(self.new_session.emit)
 
@@ -174,19 +154,29 @@ class Sidebar(QWidget):
 
         self._panel = QWidget()
         panel_layout = QVBoxLayout(self._panel)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setContentsMargins(4, 6, 6, 6)
         panel_layout.addWidget(self._new)
         panel_layout.addWidget(scroll, 1)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-        layout.addLayout(rail)
+        layout.setContentsMargins(0, 0, 0, 0)  # railHost 自带边距与底色（rev55）
+        layout.setSpacing(0)
+        layout.addWidget(rail_host)
         layout.addWidget(self._panel, 1)
 
     # -- 折叠 --------------------------------------------------------------
     def panel_visible(self) -> bool:
         return self._panel.isVisible()
+
+    def _nav_goto(self, key: str, signal) -> None:
+        """rail 导航点击（rev55）：先落 checked 态再发信号 —— 页切换会再校准一次（幂等）。"""
+        self.set_active(key)
+        signal.emit()
+
+    def set_active(self, key: str | None) -> None:
+        """rail 导航态（rev55）：当前页按钮反白；回对话页（None）全部复位。"""
+        for name, (button, _signal) in self._nav.items():
+            button.setChecked(name == key)
 
     def set_panel_visible(self, visible: bool) -> None:
         """只切面板可见性；最小宽随动（RAIL），拖拽宽度由 MainWindow 负责。"""
@@ -344,6 +334,7 @@ class Sidebar(QWidget):
 
     def _section_list(self, items: list, label: str, archived: bool = False) -> QListWidget:
         lst = QListWidget()
+        lst.setObjectName("sessionList")  # rev55：透明底药丸行，去嵌套灰盒
         lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         if not items:
             empty = QListWidgetItem("（暂无会话）")

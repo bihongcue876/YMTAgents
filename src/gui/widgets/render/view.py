@@ -75,6 +75,11 @@ class RendererView(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
 
+    @property
+    def view_created(self) -> bool:
+        """渲染视图是否已实际创建（惰性创建的观察口，rev55）。"""
+        return self._view is not None
+
     # -- 视图创建 ----------------------------------------------------------
     def _ensure_view(self) -> None:
         if self._view is not None:
@@ -118,6 +123,12 @@ class RendererView(QWidget):
         缺省只在「原本就在底部」时跟底，不拽走上翻阅读的用户。
         """
         self._inner = inner
+        if self._view is None and not inner:
+            # rev55：视图未建且帧为空 —— 不为「空渲染」拉起 WebEngine（启动慢的大头之一）。
+            # 只记底色，留待首个真实内容一并无痕建视图。
+            if bg:
+                self._bg = bg
+            return
         self._dirty = not self.isVisible()
         self._ensure_view()
         if bg and bg != self._bg:

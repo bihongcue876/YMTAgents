@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui.widgets import section_label
+
 
 class PersonaDialog(QDialog):
     """新建 / 编辑角色：名称 + 提示词。"""
@@ -51,7 +53,7 @@ class PersonaDialog(QDialog):
         form.addRow("名称", self._name)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(QLabel("提示词（系统提示词本体）"))
+        layout.addWidget(section_label("提示词（系统提示词本体）"))
         layout.addWidget(self._prompt, 1)
         layout.addWidget(buttons)
         self.resize(680, 560)

@@ -39,6 +39,7 @@ class Palette:
     danger_bg: str
     danger_border: str
     code_bg: str
+    accent_hover: str = ""  # 主按钮 hover 底色（缺省空串 = 由取用方回退 accent）
 
 
 LIGHT = Palette(
@@ -50,6 +51,7 @@ LIGHT = Palette(
     muted="#6B7280",
     border="#E5E7EB",
     accent="#2563EB",
+    accent_hover="#1D4ED8",
     ok="#16A34A",
     warn="#D97706",
     danger="#DC2626",
@@ -67,6 +69,7 @@ DARK = Palette(
     muted="#9AA0A6",
     border="#3C4043",
     accent="#8AB4F8",
+    accent_hover="#A5C8FA",
     ok="#5DD58A",
     warn="#F5B544",
     danger="#F28B82",
@@ -165,14 +168,42 @@ QPushButton:hover {{ border-color: {p.accent}; }}
 QPushButton:pressed {{ background: {p.accent}; color: {p.bg}; }}
 QPushButton:disabled {{ color: {p.muted}; }}
 
-/* 侧栏图标栏（rail）：带文字的扁平按钮，折叠后仍常显（rev13/rev18）。
+/* 侧栏图标栏（rail）：host 给 surface 底与右分隔线（rev55，与面板区分层）；
+   导航按钮在 host 上做「药丸」态 —— hover 微浮、checked 反白 + accent，当前页一目了然。
    不设 font-size —— 随应用字体（theme.apply 已设为 ui 档），避免与 sizeHint 脱节 */
+QWidget#railHost {{
+    background: {p.surface};
+    border-right: 1px solid {p.border};
+}}
 QPushButton#railButton {{
     background: transparent; color: {p.fg};
     border: none; border-radius: 8px; text-align: left; padding: 0 8px;
 }}
-QPushButton#railButton:hover {{ background: {p.surface}; }}
+QPushButton#railButton:hover {{ background: {p.border}; }}
 QPushButton#railButton:pressed {{ background: {p.accent}; color: {p.bg}; }}
+QPushButton#railButton:checked {{ background: {p.bg}; color: {p.accent}; }}
+
+/* 主操作按钮（新对话、关卡放行等关键 CTA）：accent 实底（rev55） */
+QPushButton#primaryButton {{
+    background: {p.accent}; color: {p.bg};
+    border: 1px solid {p.accent}; border-radius: 6px; padding: 5px 12px;
+}}
+QPushButton#primaryButton:hover {{
+    background: {p.accent_hover or p.accent}; border-color: {p.accent_hover or p.accent};
+}}
+QPushButton#primaryButton:pressed {{ background: {p.accent_hover or p.accent}; }}
+QPushButton#primaryButton:disabled {{
+    background: {p.border}; border-color: {p.border}; color: {p.bg};
+}}
+
+/* 配置页节标题（rev55）：小节分组感，不再与正文同权重 */
+QLabel#sectionLabel {{ color: {p.muted}; font-weight: 600; }}
+
+/* 侧栏会话列表（rev55）：去嵌套边框，行做药丸 —— 左栏从「层层灰盒」变轻 */
+QListWidget#sessionList {{ background: transparent; border: none; }}
+QListWidget#sessionList::item {{ padding: 5px 8px; border-radius: 6px; }}
+QListWidget#sessionList::item:selected {{ background: {p.accent}; color: {p.bg}; }}
+QListWidget#sessionList::item:hover {{ background: {p.border}; }}
 
 /* 辅助说明小字（rev14；rev16 起不再单独设字号 —— 应用字体已按 ui 档设置，sizeHint 自准） */
 QLabel#mutedNote {{ color: {p.muted}; }}

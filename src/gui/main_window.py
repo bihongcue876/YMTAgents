@@ -136,6 +136,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.terminal_page)
         self.stack.addWidget(self.workspaces_page)
         self.stack.addWidget(self.settings)
+        # rail 导航态随页切换校准（rev55）：索引与上面的添加顺序一致
+        self._page_keys: list[str | None] = [
+            None, "models", "personas", "plugins", "skills", "terminal", "workspaces", "settings",
+        ]
+        self.stack.currentChanged.connect(self._on_page_changed)
 
         # 右侧会话详情面板（rev24）：默认收起，随 chat 头条「详情」或侧栏右键唤起
         self.detail = SessionPanel()
@@ -476,6 +481,11 @@ class MainWindow(QMainWindow):
             self.bus.submit(RenameSession(session_id=self._current_session_id, title=title))
 
     # -- 外观 --------------------------------------------------------------
+    def _on_page_changed(self, index: int) -> None:
+        """页切换 → rail 导航态（rev55）：回对话页复位全部按钮。"""
+        key = self._page_keys[index] if 0 <= index < len(self._page_keys) else None
+        self.sidebar.set_active(key)
+
     def _apply_appearance(self, name: str | None, font_size: str | None) -> None:
         """应用外观（主题 + 字号）：全局 QSS + 需自渲染的视图重绘。
 

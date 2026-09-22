@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import theme
-from gui.widgets import text_fit
+from gui.widgets import section_label, text_fit
 
 VERSION = "0.0.2"
 
@@ -38,7 +38,7 @@ class SettingsPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._title)
-        layout.addWidget(QLabel("外观"))
+        layout.addWidget(section_label("外观"))
         layout.addLayout(self._build_appearance())
         # rev24：全局上下文策略取消 → 改为「每会话」设置，此处只留指引
         self._context_note = QLabel(
@@ -48,13 +48,13 @@ class SettingsPage(QWidget):
         self._context_note.setObjectName("mutedNote")
         self._context_note.setWordWrap(True)
         layout.addWidget(self._context_note)
-        layout.addWidget(QLabel("网络白名单"))
+        layout.addWidget(section_label("网络白名单"))
         layout.addLayout(self._build_whitelist())
-        layout.addWidget(QLabel("数据"))
+        layout.addWidget(section_label("数据"))
         layout.addLayout(self._build_data())
-        layout.addWidget(QLabel("日志与诊断"))
+        layout.addWidget(section_label("日志与诊断"))
         layout.addLayout(self._build_logging())
-        layout.addWidget(QLabel("关于"))
+        layout.addWidget(section_label("关于"))
         layout.addWidget(QLabel(f"言明通 / YMTAgents　版本 {VERSION}"))
         layout.addStretch(1)
         self.refresh_metrics()

@@ -42,6 +42,11 @@ class MessageList(QWidget):
 
     # -- 渲染 --------------------------------------------------------------
     def _render(self, jump_bottom: bool = False) -> None:
+        if not self._messages and not self._renderer.view_created:
+            # rev55：空流且视图未建 → 不渲染。首帧 settings.state 与空会话回放都会走这里，
+            # 不能为了「渲染空」把 WebEngine 首视图（GPU/渲染子进程，启动 ~1s）提前拉起；
+            # 首条真实消息到达时自会按当前外观建视图。
+            return
         inner = md.messages_inner(self._messages, self._theme, self._font_size)
         # 随帧下发主题底色；WebEngine 侧走 innerHTML 局部更新（rev19：不重载、不闪、无 2MB 限）
         # jump_bottom：会话切换/清空后无条件回底（rev21）；流式帧仍只在「原本在底部」时跟底

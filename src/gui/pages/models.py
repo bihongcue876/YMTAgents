@@ -34,7 +34,7 @@ from shared.ids import PRV, new_id
 from shared.net import is_local_url
 
 from gui import theme
-from gui.widgets import text_fit
+from gui.widgets import section_label, text_fit
 
 #: 云端预设（URL 即 OpenAI 兼容端点；Cherry Studio 式「选预设 → 填 Key → 取模型」）
 CLOUD_PRESETS = {
@@ -396,7 +396,7 @@ class ModelsPage(QWidget):
         layout.addWidget(add)
         layout.addLayout(self._list)
         layout.addSpacing(12)
-        layout.addWidget(QLabel("槽位"))
+        layout.addWidget(section_label("槽位"))
         self._note = QLabel("「上次使用」自动记录你最近选择的模型，新对话从它开始；无需手动设默认。")
         self._note.setObjectName("mutedNote")
         self._note.setWordWrap(True)
