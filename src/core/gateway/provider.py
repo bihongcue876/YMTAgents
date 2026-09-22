@@ -11,9 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Callable, Protocol
-
-import openai
+from typing import Any, Callable, Protocol
 
 from shared.envelope import ModelSpec, ProviderSpec, SessionParams, Usage
 from shared.net import is_secure_transport
@@ -207,9 +205,13 @@ class ModelGateway(IModelGateway):
 
     # -- 客户端 ------------------------------------------------------------
     @staticmethod
-    def _default_client(base_url: str, api_key: str) -> openai.OpenAI:
+    def _default_client(base_url: str, api_key: str) -> Any:
+        # openai SDK 惰性导入：它拖带 pydantic 全家 + httpx，import 占 ~1s，
+        # 而 GUI 启动根本不碰网关 —— 推迟到真正建客户端时（启动提速 rev55）。
         # max_retries=0：重试策略由网关自己持有（首 token 前至多 1 次，见 _stream_with_retry）。
         # 若放任 SDK 默认重试，单次 60s 静默会被放大到数倍，A8「60s 无增量即失败」不成立。
+        import openai
+
         return openai.OpenAI(base_url=base_url, api_key=api_key, max_retries=0)
 
     def _client(self, base_url: str, api_key: str) -> object:
