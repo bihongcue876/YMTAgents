@@ -63,6 +63,7 @@ from shared.envelope import (
     McpServerStatus,
     SkillImported,
     SkillList,
+    ShellList,
     ToolList,
 )
 from shared.schema import (
@@ -106,6 +107,7 @@ class CoreController:
         executor: ToolExecutor | None = None,
         mcp_manager: McpManager | None = None,
         skill_manager=None,
+        shell_manager=None,
     ) -> None:
         self.bridge = bridge
         self.store = store
@@ -119,6 +121,7 @@ class CoreController:
         self.executor = executor
         self.mcp_manager = mcp_manager
         self.skill_manager = skill_manager
+        self.shell_manager = shell_manager
         self.current_session_id: str | None = None
         # rev43：confirm 关卡裁决登记（泵取队列时命中；正常分派路径亦可投递）。
         self._gate_decisions: dict[str, bool] = {}
@@ -186,9 +189,11 @@ class CoreController:
         )
 
     def refresh_modules(self) -> None:
-        """把宿主态同步进 supervisor（rev44：mcp 模块实装）。"""
+        """把宿主态同步进 supervisor（rev44：mcp 模块实装；v0.0.5：shell 实装）。"""
         if self.mcp_manager is not None:
             self.supervisor.set_state("mcp", self.mcp_manager.host_state())
+        if self.shell_manager is not None:
+            self.supervisor.set_state("shell", self.shell_manager.host_state())
 
     def push_initial_state(self) -> None:
         """GUI 连接信号后调用，推送首屏数据。"""
@@ -199,6 +204,7 @@ class CoreController:
         self._emit_personas()
         self._emit_mcp()
         self._emit_skills()
+        self._emit_shell()
 
     # -- Persona（阶段 2 · spec rev23） --------------------------------------
     def _emit_personas(self) -> None:
@@ -386,6 +392,56 @@ class CoreController:
         # 正常路径下 gate.respond 多被 _gate_handler 泵取命中；此处登记以兜底竞态。
         self._gate_decisions[request.call_id] = request.decision == "allow"
 
+    # -- Shell（v0.0.5） -----------------------------------------------------
+    def _emit_shell(self) -> None:
+        """推送 shell 列表 + 权限档 + 上限（运行态，不入盘）。"""
+        if self.shell_manager is None:
+            return
+        self.emit(
+            ShellList(
+                shells=self.shell_manager.list_status(),
+                max_shells=self.shell_manager.max_shells(),
+                permission=self.shell_manager.effective_permission(),
+                allow_restricted=self.shell_manager.allow_restricted(),
+            )
+        )
+
+    def _on_shell_spawn(self, request) -> None:
+        if self.shell_manager is None:
+            return
+        created = self.shell_manager.spawn(
+            cwd=request.cwd, session_id=self.current_session_id or ""
+        )
+        if created is None:
+            # 起不来必须有可读回执（用户点按钮却毫无反应是最差体验）。
+            self._report(
+                "system",
+                ErrorCode.TOOL_UNAVAILABLE.value,
+                self.shell_manager.last_error() or "无法创建终端。",
+            )
+        self._emit_shell()
+
+    def _on_shell_close(self, request) -> None:
+        if self.shell_manager is not None:
+            self.shell_manager.close(request.id)
+            self._emit_shell()
+
+    def _on_shell_input(self, request) -> None:
+        if self.shell_manager is not None:
+            self.shell_manager.input(request.id, request.command)
+            self._emit_shell()
+
+    def _on_shell_refresh(self, request) -> None:
+        """刷新 = 重读配置再回推：`modules.json → shell` 的权限档/上限/高危开关改完即生效。
+
+        与 docs 01 §7.3「文件即配置」一致；不新造运行期提权通道（提权仍是改文件 + 显式动作）。
+        """
+        if self.shell_manager is None:
+            return
+        self.shell_manager.load()
+        self.refresh_modules()
+        self._emit_shell()
+
     # -- Skills（v0.0.4） -----------------------------------------------------
     def _emit_skills(self) -> None:
         if self.skill_manager is None:
@@ -562,6 +618,14 @@ class CoreController:
             self._on_mcp_reconnect(request)
         elif t == "mcp.server.refresh":
             self._emit_mcp()
+        elif t == "shell.spawn":
+            self._on_shell_spawn(request)
+        elif t == "shell.close":
+            self._on_shell_close(request)
+        elif t == "shell.input":
+            self._on_shell_input(request)
+        elif t == "shell.refresh":
+            self._on_shell_refresh(request)
         elif t == "skill.toggle":
             self._on_skill_toggle(request)
         elif t == "skill.import":
@@ -702,6 +766,10 @@ class CoreController:
         self.store.delete(request.session_id)
         if self.current_session_id == request.session_id:
             self.current_session_id = None
+        # v0.0.5：会话删除 → 关闭其派生的 shell（不留悬挂进程；docs 03 §8 运行态不入盘）。
+        if self.shell_manager is not None:
+            self.shell_manager.close_session(request.session_id)
+            self._emit_shell()
         self._emit_index()
 
     # -- 会话详情 / 策略（stage 2 · rev24） ---------------------------------
@@ -961,6 +1029,12 @@ class CoreController:
                 self.mcp_manager.shutdown()
             except Exception:  # noqa: BLE001 - 退出路径不抛
                 log.exception("MCP 收尾失败")
+        # v0.0.5：shell 子进程一律全关（运行态，退出即消失）。
+        if self.shell_manager is not None:
+            try:
+                self.shell_manager.shutdown()
+            except Exception:  # noqa: BLE001 - 退出路径不抛
+                log.exception("shell 收尾失败")
         if not session_id:
             return
         try:

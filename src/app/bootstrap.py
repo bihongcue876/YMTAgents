@@ -28,6 +28,7 @@ from core.registry.registry import Registry
 from core.security.dpapi import DpapiBox
 from core.security.legacy import LegacyKeyring, migrate_keyring_to_vault
 from core.security.vault import ISecretStore, Vault
+from core.shell.manager import ShellManager
 from core.skills.manager import SkillManager
 from core.store.config_store import ConfigStore
 from core.store.migrate import migrate_all
@@ -52,6 +53,7 @@ class AppContext:
     mcp_manager: McpManager
     executor: ToolExecutor
     skill_manager: SkillManager
+    shell_manager: ShellManager
 
 
 def bootstrap(
@@ -96,6 +98,12 @@ def bootstrap(
         registry, config_store, secret_store, audit=sink.append_audit, emit=bridge.emit_event
     )
     mcp_manager.load()
+    # v0.0.5：shell 宿主。**启动零子进程** —— 此处只读配置 + 探测解释器（which），
+    # 首次 shell.exec 才 spawn（惰性）；无解释器时工具不注册、宿主态 error（不阻断启动）。
+    shell_manager = ShellManager(
+        registry, config_store, audit=sink.append_audit, emit=bridge.emit_event
+    )
+    shell_manager.load()
     executor = ToolExecutor(
         registry, store=session_store, emit=bridge.emit_event, audit=sink.append_audit
     )
@@ -106,7 +114,7 @@ def bootstrap(
     controller = CoreController(
         bridge, session_store, gateway, agent, supervisor, registry, config_store, root,
         personas=personas, executor=executor, mcp_manager=mcp_manager,
-        skill_manager=skill_manager,
+        skill_manager=skill_manager, shell_manager=shell_manager,
     )
     # 启用的 server 在此启动；连接失败只落 server 状态（不阻断启动）。
     mcp_manager.start_all()
@@ -130,4 +138,5 @@ def bootstrap(
         mcp_manager=mcp_manager,
         executor=executor,
         skill_manager=skill_manager,
+        shell_manager=shell_manager,
     )
