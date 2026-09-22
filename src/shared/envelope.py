@@ -582,6 +582,43 @@ class SkillsRefresh(Envelope):
     type: Literal["skill.refresh"] = "skill.refresh"
 
 
+# ---------------------------------------------------------------------------
+# Shell（v0.0.5）：本地 shell 宿主（docs 07 §4.1 / 09 §2）
+# ---------------------------------------------------------------------------
+class ShellSpawn(Envelope):
+    """用户手动新建一个本地终端（docs 01 §6④「用户可手动使用」）。
+
+    与模型侧 `shell.exec(new=True)` 共用同一池与上限；`cwd=None` 用配置的初始目录。
+    """
+
+    type: Literal["shell.spawn"] = "shell.spawn"
+    cwd: str | None = None
+
+
+class ShellClose(Envelope):
+    """关闭指定 shell（终止其进程并回收其注册痕迹）。"""
+
+    type: Literal["shell.close"] = "shell.close"
+    id: str
+
+
+class ShellInput(Envelope):
+    """用户在终端页直接把命令送进某个 shell。
+
+    用户即主决策者 → 不经确认关卡（docs 09 §3），但记 audit（与白名单编辑同理）。
+    """
+
+    type: Literal["shell.input"] = "shell.input"
+    id: str
+    command: str
+
+
+class ShellRefresh(Envelope):
+    """请求重发 shell 列表与权限档（终端页「刷新」）。"""
+
+    type: Literal["shell.refresh"] = "shell.refresh"
+
+
 class PersonaExported(Envelope):
     type: Literal["persona.export.result"] = "persona.export.result"
     persona_id: str
@@ -690,6 +727,32 @@ class SkillImported(Envelope):
 
 
 # ---------------------------------------------------------------------------
+# Shell 事件（v0.0.5）
+# ---------------------------------------------------------------------------
+class ShellList(Envelope):
+    """shell 列表 + 权限档 + 上限（推给终端页）。
+
+    **不落盘**：shell 是运行态（docs 03 §8「一切运行态不入盘」）。
+    一帧带全权限与上限，省一次往返。
+    """
+
+    type: Literal["shell.list"] = "shell.list"
+    shells: list[dict] = Field(default_factory=list)
+    max_shells: int = 5
+    permission: str = "confirm"  # 有效权限档（覆盖 ⊕ 缺省）
+    allow_restricted: bool = False  # 高危档是否已显式启用
+
+
+class ShellOutput(Envelope):
+    """某个 shell 的增量输出（监视用）。**不落盘**（运行态）。"""
+
+    type: Literal["shell.output"] = "shell.output"
+    id: str
+    chunk: str = ""
+
+
+
+# ---------------------------------------------------------------------------
 # 联合类型 + 校验器
 # ---------------------------------------------------------------------------
 Request = Annotated[
@@ -734,6 +797,10 @@ Request = Annotated[
         SkillDelete,
         SkillPermission,
         SkillsRefresh,
+        ShellSpawn,
+        ShellClose,
+        ShellInput,
+        ShellRefresh,
     ],
     Field(discriminator="type"),
 ]
@@ -768,6 +835,8 @@ Event = Annotated[
         GateResult,
         SkillList,
         SkillImported,
+        ShellList,
+        ShellOutput,
     ],
     Field(discriminator="type"),
 ]

@@ -163,8 +163,33 @@ class BtcmConfig(BaseModel):
 
 
 class ShellConfig(BaseModel):
+    """本地 shell 宿主配置（docs 03 §3.3；v0.0.5 扩展）。
+
+    设计要点（spec v0.0.5 §3.9）：
+    - `env`/`policy` 保留原语义（首期只做本地直连 + confirm 档，`01` §6④）；
+    - `kind`：解释器选择。`auto` = 按平台探测（Windows `pwsh`→`powershell`；
+      其余 `bash`→`sh`）；显式指定但探测不到 → 宿主 error + 可读原因（不静默降级）；
+    - `max_shells`：全局池上限（「一个 Agent 最多唤醒 5 个 shell」的落实）；
+    - `idle_timeout_s`：空闲回收阈值（懒检查，零定时器）；
+    - `timeout_ms`：单条命令默认超时（docs 09 §6 工具执行超时 30s）；
+    - `cwd`：初始工作目录；`None` = 用户主目录；
+    - `allow_restricted`：高危命令档。**默认 false**（09 §2 restricted「默认关闭」）→
+      命中清单即策略拒绝；置 true 须改配置文件显式启用，运行期不可提权；
+    - `tool_permissions`：逐工具权限覆盖（键=工具名，与 MCP 的 `tool_permissions` 同构）；
+      有效权限 = 本覆盖 ⊕ ToolSpec 缺省档（09 §2）。
+    """
+
     env: Literal["local"] = "local"
     policy: Literal["confirm"] = "confirm"
+    kind: Literal["auto", "pwsh", "powershell", "bash", "sh"] = "auto"
+    max_shells: int = 5
+    idle_timeout_s: int = 600
+    timeout_ms: int = 30000
+    cwd: str | None = None
+    allow_restricted: bool = False
+    tool_permissions: dict[str, Literal["safe", "confirm", "restricted"]] = Field(
+        default_factory=dict
+    )
 
 
 class McpServerConfig(BaseModel):
