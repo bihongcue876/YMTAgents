@@ -11,7 +11,7 @@ from core.security.dpapi import ENTROPY_VAULT
 from core.security.legacy import LegacyKeyring
 from core.security.vault import Vault, key_ref_for, secret_name
 from core.store.config_store import ConfigStore
-from shared.envelope import ModelSpec, ProviderSpec, ProviderUpsert
+from shared.envelope import ModelSpec, ProviderSpec
 from shared.schema import ModelConfig, ModelsConfig, ProviderConfig
 from tests.mocks.secrets import FakeBox, FakeVault
 
@@ -105,7 +105,7 @@ def _bootstrap(tmp_path, monkeypatch, **kwargs):
 
 
 def test_bootstrap_migrates_legacy_key_and_never_stores_plaintext(tmp_path, monkeypatch, qapp):
-    store = _seed_store(tmp_path / "ymtdata")
+    _seed_store(tmp_path / "ymtdata")
     vault = FakeVault()
     legacy = LegacyKeyring(backend=_FakeLegacy({"prv_1": "sk-legacy-999"}))
 
@@ -141,7 +141,7 @@ def test_bootstrap_continues_when_migration_fails(tmp_path, monkeypatch, qapp):
 
 
 def test_bootstrap_is_idempotent_for_vault_refs(tmp_path, monkeypatch, qapp):
-    store = _seed_store(tmp_path / "ymtdata")
+    _seed_store(tmp_path / "ymtdata")
     vault = FakeVault()
     backend = _FakeLegacy({"prv_1": "sk-legacy-999"})
     backend.delete_ok = False  # 旧条目删不掉也不该重试写

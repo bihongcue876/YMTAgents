@@ -746,8 +746,6 @@ class _BoomClient:
     """探测时直接抛非 400/422 异常 → 归 unknown。"""
 
     def __init__(self) -> None:
-        outer = self
-
         class _Completions:
             def create(self, **kw):
                 raise RuntimeError("connection reset")

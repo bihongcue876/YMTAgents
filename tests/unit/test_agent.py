@@ -828,7 +828,7 @@ def test_auto_compress_gated_by_switches_and_threshold(tmp_path):
             memory_auto=auto,
             memory_threshold=threshold,
         )
-        for i in range(6):
+        for _ in range(6):
             store.append_event(meta.id, SendMessage(text="问题" * 200))
             store.append_event(meta.id, AssistantFinal(content="回答" * 200))
         gw = MemoryGateway(ctx_window=window)

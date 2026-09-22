@@ -111,7 +111,7 @@ def test_import_multi_skill_repo(env, tmp_path):
     _make_skill_dir(repo, "skills-a")
     _make_skill_dir(repo, "skills-b")
     imported = manager.import_skill(str(repo))
-    assert {m.name for m in imported} == {"测试技能", "测试技能"}
+    assert {m.name for m in imported} == {"测试技能"}
     assert len(imported) == 2
     assert len(manager.list_status()) >= 2
 

@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from app import bootstrap as bootstrap_mod
 from app import paths
 from shared.envelope import (

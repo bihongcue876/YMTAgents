@@ -160,8 +160,6 @@ def test_apply_syncs_qpalette(qapp):
     实测缺陷：应用暗色主题后 `QApplication.palette()` 仍是亮色默认
     （Window=#efefef、Mid=#b8b8b8）→ 暗色界面残留亮灰元素。
     """
-    from gui import app_palette
-
     try:
         theme.apply("dark")
         p = theme.palette("dark")
