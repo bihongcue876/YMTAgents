@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout
+from collections.abc import Callable
+
+from PySide6.QtWidgets import QFrame, QLabel, QMenu, QVBoxLayout
+
+from shared.ids import WS_DEFAULT
 
 
 def section_label(text: str) -> QLabel:
@@ -37,3 +41,33 @@ def key_badge(text: str, ok: bool | None = None) -> QLabel:
     if ok is not None:
         badge.setProperty("keyStored", ok)
     return badge
+
+
+def workspace_new_menu(
+    menu: QMenu,
+    workspaces: list[dict],
+    current_ws: str,
+    *,
+    on_default,
+    on_in: Callable[[str], None],
+) -> None:
+    """填充「新建会话」的工作区 ▾ 菜单（rev58：侧栏与聊天头同款）。
+
+    `menu` 由调用方持有（usually 按钮的 setMenu），展开时 `/aboutToShow` 调用本函数
+    动态填充：首项「当前工作区（…）」走 `on_default`，随后每个工作区一项
+    「在「X」新建」走 `on_in(workspace_id)`。菜单项在 QMenu 关闭时自动回收。
+    """
+    menu.clear()
+    current_name = "默认工作区" if current_ws == WS_DEFAULT else current_ws
+    for info in workspaces:
+        if (info.get("id") or WS_DEFAULT) == current_ws:
+            current_name = info.get("name") or current_ws
+            break
+    first = menu.addAction(f"当前工作区（{current_name}）")
+    first.triggered.connect(lambda _=False: on_default())
+    menu.addSeparator()
+    for info in workspaces:
+        wid = info.get("id") or WS_DEFAULT
+        name = info.get("name") or ("默认工作区" if wid == WS_DEFAULT else wid)
+        action = menu.addAction(f"在「{name}」新建")
+        action.triggered.connect(lambda _=False, w=wid: on_in(w))

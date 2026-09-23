@@ -101,6 +101,7 @@ class SettingsConfig(BaseModel):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     ui: UISettings = Field(default_factory=UISettings)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
+    auto_title: bool = True  # rev59：是否在新会话首轮回复后自动生成标题（模型提炼）
 
 
 # ---------------------------------------------------------------------------

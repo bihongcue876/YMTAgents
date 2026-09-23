@@ -38,6 +38,7 @@ class MockGateway(IModelGateway):
         self._tool_round_index = 0
         self.calls: list[dict] = []
         self._providers: list[ProviderSpec] = []
+        self._auto_title = ""  # rev59：自动标题返回；空 → 调用方走首条消息截断回退
 
     def list_providers(self) -> list[ProviderSpec]:
         if self._providers:
@@ -79,6 +80,10 @@ class MockGateway(IModelGateway):
     def probe_reasoning(self, model_id: str) -> str:
         self.calls.append({"probe_reasoning": model_id})
         return "no"
+
+    def generate_title(self, messages: list[dict], model_id: str) -> str:
+        self.calls.append({"generate_title": model_id})
+        return self._auto_title
 
     def test_connection(self, provider_id: str, model_id: str) -> tuple[bool, int | None, str | None]:
         self.calls.append({"test_connection": (provider_id, model_id)})

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
@@ -20,6 +21,7 @@ from shared.envelope import (
     ErrorReport,
     SendMessage,
     SessionMemoryResult,
+    SessionTitleUpdated,
     TurnStatus,
     Usage,
 )
@@ -65,6 +67,16 @@ _DEFAULT_FILE = 8192
 
 #: rev42：ReAct 工具循环迭代上限（docs 06 §3）。达到上限后撤工具、强制模型收束作答。
 MAX_TOOL_ITERATIONS = 15
+
+#: rev59：自动标题 —— 模型提炼目标长度与首条消息截断上限（字符数）。
+TITLE_MAX_CHARS = 30
+TITLE_COLLAPSE = re.compile(r"\s+")
+
+#: rev59：标题提炼提示词。客观叙述、不含身份叙事（rev16）；标题极短故不发 max_tokens（rev20）。
+TITLE_PROMPT = (
+    "为这段对话拟一个简短的标题。仅输出标题本身：不超过 30 个字符、单行、"
+    "不要引号、不要前缀如「标题：」，可用中文。"
+)
 
 
 def effective_reserve(configured: int, window: int) -> int:
@@ -138,6 +150,17 @@ def _tool_content(result: object) -> str:
         return getattr(result, "output", None) or ""
     err = getattr(result, "error", None) or {}
     return err.get("message") or err.get("code") or "工具执行失败"
+
+
+def _collapse_title(raw: str, max_chars: int = TITLE_MAX_CHARS) -> str:
+    """把模型/消息文本压成**单行软截断**标题：削连续空白、换行压空格、超长软截断。
+
+    模型侧与消息回退侧重用（spec §3 溢出边界）：`max_chars` 按字符计。
+    """
+    text = TITLE_COLLAPSE.sub(" ", raw or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip()
 
 
 class AgentLoop(IAgentLoop):
@@ -429,6 +452,60 @@ class AgentLoop(IAgentLoop):
             return
         self.compress_memory(session_id)
 
+    # -- 自动标题（rev59）---------------------------------------------------
+    def _maybe_auto_title(self, session_id: str, meta) -> None:
+        """新会话首轮后自动生成标题：模型优先 + 截断回退；失败/异常不打扰、不阻断回复。
+
+        条件（spec §0.1 D2/D3/D4）：全局开关开 & 未手动命名 & 标题仍为默认「新对话」。
+        生成成功且非空，或回退首条消息截断，均经 `store.touch_auto_title`（只改 title，
+        不置 `title_manual`）后用 `SessionTitleUpdated` 广播给 GUI 刷新。
+        """
+        try:
+            config = self.config_store.load("settings")
+        except Exception:  # noqa: BLE001
+            config = None
+        if config is None or not getattr(config, "auto_title", True):
+            return
+        if getattr(meta, "title_manual", False) or (meta.title and meta.title != "新对话"):
+            return
+        # 首条用户消息 = 该会话第一条 `msg.user` 事件（用于模型上下文与截断回退）。
+        first_text = ""
+        for ev in self.store.replay(session_id):
+            if ev.get("type") == "msg.user":
+                first_text = (ev.get("text") or "").strip()
+                break
+        title = ""
+        model_id = self._resolve_model(meta.main_model)
+        if model_id and first_text:
+            # 一次轻量非流式调用；失败/空 → 空串走截断回退（不在回复路径上，静默）。
+            try:
+                raw = self.gateway.generate_title(
+                    [
+                        {"role": "system", "content": TITLE_PROMPT},
+                        {"role": "user", "content": first_text},
+                    ],
+                    model_id,
+                )
+                title = _collapse_title(raw)
+            except Exception:  # noqa: BLE001 - 标题提炼失败不打扰用户
+                log.debug("自动标题生成异常，回退截断首条消息", exc_info=True)
+        if not title:
+            title = _collapse_title(first_text)
+        if not title:
+            return
+        try:
+            self.store.touch_auto_title(session_id, title)
+            self.emit(
+                SessionTitleUpdated(
+                    session_id=session_id,
+                    workspace_id=meta.workspace_id,
+                    branch_id=None,
+                    title=title,
+                )
+            )
+        except OSError:
+            log.debug("自动标题落盘失败", exc_info=True)
+
     # -- 回合 --------------------------------------------------------------
     def run_turn(self, session_id: str, user_message: SendMessage) -> None:
         meta = self.store.get_meta(session_id)
@@ -521,6 +598,8 @@ class AgentLoop(IAgentLoop):
         if not interrupted:
             # v0.0.1：回合正常结束后，按阈值自动压缩记忆（默认关；见 _maybe_auto_compress）。
             self._maybe_auto_compress(session_id, meta)
+            # rev59：新会话（首轮）后自动生成标题（模型优先 + 截断回退；不在回复路径上）。
+            self._maybe_auto_title(session_id, meta)
 
     def _tool_payloads(self) -> list[dict]:
         """当前可见工具的 function calling 定义（无执行器则返回空，行为同首期）。"""

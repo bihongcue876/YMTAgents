@@ -96,6 +96,8 @@ class SessionMeta(BaseModel):
     memory_threshold: int | None = None
     # v0.0.6：本会话所属工作区；None = 默认工作区（存量会话**零迁移** —— 缺字段即 None）
     workspace_id: str | None = None
+    # rev59：是否已被用户手动重命名/保存（手动命名优先；True 后不再被自动标题覆盖）
+    title_manual: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +316,16 @@ class SessionCreated(Envelope):
     title: str
     persona_name: str | None = None
     created_at: datetime
+
+
+class SessionTitleUpdated(Envelope):
+    """rev59：会话标题已（异步）更新。GUI 据此刷新侧栏/会话列表/详情，不改协议请求。"""
+
+    type: Literal["session.title_updated"] = "session.title_updated"
+    session_id: str
+    workspace_id: str | None = None
+    branch_id: str | None = None
+    title: str
 
 
 class SessionIndex(Envelope):
@@ -955,6 +967,7 @@ Event = Annotated[
         TurnStatus,
         ContextUsage,
         SessionCreated,
+        SessionTitleUpdated,
         SessionIndex,
         SessionEvents,
         SessionDetailResult,

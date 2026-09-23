@@ -176,6 +176,45 @@ class RendererView(QWidget):
     def _run_update(self, inner: str, jump_bottom: bool = False) -> None:
         self._view.page().runJavaScript(self._update_script(inner, jump_bottom))
 
+    # -- 消息粒度增量（消息流增量渲染，根治长对话每帧整段重建） ------------
+    def stream_ready(self) -> bool:
+        """增量渲染判据：WebEngine 壳已加载 → 可按消息粒度就地更新 #stream。
+
+        QTextBrowser 降级路径恒返 False → 调用方落回整文档 setHtml（增量对其收益有限）。
+        """
+        return self.using_webengine and self._loaded and self._view is not None
+
+    def append_node(self, node_html: str) -> None:
+        """消息粒度增量：在 #stream 末尾追加一个新节点（会话切换后首个新消息也用）。
+
+        `insertAdjacentHTML('beforeend')` 只解析**新增**片段，不复读既有节点；
+        跟底纪律沿用 rev19/rev21：仅在「原本就在底部」时自动跟底，上翻阅读不打扰。
+        仅在 `stream_ready()` 为真时由调用方调起。
+        """
+        payload = json.dumps(node_html, ensure_ascii=False)  # 合法 JS 字符串字面量
+        self._view.page().runJavaScript(
+            "var nb=(window.innerHeight+window.scrollY)"
+            f">=document.body.scrollHeight-{NEAR_BOTTOM_PX};"
+            "var s=document.getElementById('stream');"
+            f"s.insertAdjacentHTML('beforeend',{payload});"
+            "if(nb){window.scrollTo(0,document.body.scrollHeight);}"
+        )
+
+    def update_node(self, index: int, node_html: str) -> None:
+        """消息粒度增量：就地替换 #m{index} 节点（流式助手 delta/finalize、工具补全）。
+
+        仅重渲染**该单条**消息（`message_row`），已完成旧消息节点不触碰；
+        outerHTML 替换后按 NEAR_BOTTOM 条件跟底。仅在 `stream_ready()` 为真时调起。
+        """
+        payload = json.dumps(node_html, ensure_ascii=False)
+        self._view.page().runJavaScript(
+            "var nb=(window.innerHeight+window.scrollY)"
+            f">=document.body.scrollHeight-{NEAR_BOTTOM_PX};"
+            f"var e=document.getElementById('m{index}');"
+            f"if(e){{e.outerHTML={payload};}}"
+            "if(nb){window.scrollTo(0,document.body.scrollHeight);}"
+        )
+
     def scroll_to(self, index: int) -> None:
         """滚动到第 index 条消息（rev24：右侧问题列表跳转；`id="m{index}"` 锚点）。"""
         if self._view is None:

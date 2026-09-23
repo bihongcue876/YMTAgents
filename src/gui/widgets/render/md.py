@@ -15,12 +15,7 @@ from __future__ import annotations
 import html as _html
 import json
 import re
-
-from markdown_it import MarkdownIt
-from pygments import highlight
-from pygments.formatters import HtmlFormatter
-from pygments.lexers import get_lexer_by_name, guess_lexer
-from pygments.util import ClassNotFound
+from typing import Any
 
 from gui.theme import (
     DARK,
@@ -32,11 +27,27 @@ from gui.theme import (
     terminal_css,
 )
 
-_FORMATTER = HtmlFormatter(cssclass="highlight")
-_FORMATTERS: dict[str, HtmlFormatter] = {}
+_FORMATTERS: dict[str, Any] = {}
+_DEFAULT_FORMATTER: Any = None
 
 
-def _formatter(theme: str | None) -> HtmlFormatter:
+def _default_formatter() -> Any:
+    """惰性构建默认高亮 formatter（rev59）：无 style = pygments 默认配色。
+
+    供 `_highlight` 使用；`_formatter(theme)` 才带主题 style。pygments 在函数内
+    惰性 import，避免启动即加载（空流首屏不渲染）。
+    """
+    global _DEFAULT_FORMATTER
+    if _DEFAULT_FORMATTER is None:
+        from pygments.formatters import HtmlFormatter
+
+        _DEFAULT_FORMATTER = HtmlFormatter(cssclass="highlight")
+    return _DEFAULT_FORMATTER
+
+
+def _formatter(theme: str | None) -> Any:
+    from pygments.formatters import HtmlFormatter
+
     key = (theme or DEFAULT_THEME).lower()
     if key not in _FORMATTERS:
         _FORMATTERS[key] = HtmlFormatter(cssclass="highlight", style=pygments_style(key))
@@ -48,14 +59,35 @@ def _pygments_css(theme: str | None) -> str:
 
 
 def _highlight(code: str, lang: str, _attrs: str = "") -> str:
+    from pygments import highlight
+    from pygments.lexers import get_lexer_by_name, guess_lexer
+    from pygments.util import ClassNotFound
+
     try:
         lexer = get_lexer_by_name(lang) if lang else guess_lexer(code)
     except ClassNotFound:
         lexer = get_lexer_by_name("text")
-    return highlight(code, lexer, _FORMATTER)
+    return highlight(code, lexer, _default_formatter())
 
 
-_MD = MarkdownIt("commonmark", {"highlight": _highlight}).enable("table").enable("strikethrough")
+_MD: Any = None
+
+
+def _md() -> Any:
+    """惰性构建 MarkdownIt（rev59）：让 markdown 引擎在首次渲染时才加载。
+
+    启动首屏为空流壳、无需渲染，故把整个 markdown_it（重依赖，~160ms）推迟到
+    真正渲染 markdown 时加载。构建可配置项（table/strikethrough 扩展、代码高亮
+    钩子）仅此一处。
+    """
+    global _MD
+    if _MD is None:
+        from markdown_it import MarkdownIt
+
+        _MD = MarkdownIt("commonmark", {"highlight": _highlight}).enable("table").enable(
+            "strikethrough"
+        )
+    return _MD
 
 #: ANSI SGR 序列（颜色 / 加粗 / 重置）。
 _ANSI_RE = re.compile(r"\x1b\[([0-9;]*)m")
@@ -187,7 +219,7 @@ def _block_assistant(
             '<details class="think"><summary>思考过程</summary>'
             f'<div class="think-body">{_html.escape(reasoning)}</div></details>'
         )
-    parts.append(_MD.render(text or ""))
+    parts.append(_md().render(text or ""))
     parts.append("</div>")
     meta: list[str] = []
     if usage:
@@ -244,28 +276,35 @@ def _block_tool(message: dict, index: int = 0, theme: str | None = DEFAULT_THEME
     return "".join(parts)
 
 
+def message_row(msg: dict, index: int = 0, theme: str | None = DEFAULT_THEME) -> str:
+    """单条消息 → HTML 节点（消息流增量渲染按消息粒度复用的纯函数）。
+
+    与 `messages_inner` 整段 body 的结构完全一致（锚点 `m{index}`、`msg`/`bubble`/
+    `think` 等类名），保证「增量逐条追加/就地更新」与「整段重建」产出等价 DOM ——
+    已完成旧消息因此只渲染一次、缓存于 DOM，不再每帧重复组 HTML。
+    """
+    role = msg.get("role")
+    if role == "user":
+        return _bubble_user(msg.get("content", ""), index)
+    if role == "assistant":
+        return _block_assistant(
+            msg.get("content", ""),
+            msg.get("usage"),
+            bool(msg.get("interrupted")),
+            index,
+            msg.get("reasoning", ""),
+        )
+    if role == "error":
+        return _block_error(msg.get("content", ""), msg.get("detail"), index)
+    if role == "tool":
+        return _block_tool(msg, index, theme)
+    return ""
+
+
 def _messages_body(messages: list[dict], theme: str | None = DEFAULT_THEME) -> str:
     # rev24：每个消息带 `id="m{i}"` 锚点 —— 右侧问题列表点击后 scrollIntoView 跳转。
-    parts: list[str] = []
-    for i, m in enumerate(messages):
-        role = m.get("role")
-        if role == "user":
-            parts.append(_bubble_user(m.get("content", ""), i))
-        elif role == "assistant":
-            parts.append(
-                _block_assistant(
-                    m.get("content", ""),
-                    m.get("usage"),
-                    bool(m.get("interrupted")),
-                    i,
-                    m.get("reasoning", ""),
-                )
-            )
-        elif role == "error":
-            parts.append(_block_error(m.get("content", ""), m.get("detail"), i))
-        elif role == "tool":
-            parts.append(_block_tool(m, i, theme))
-    return "\n".join(parts)
+    # 逐一复用 `message_row`，保证整段 body 与增量逐条产出字节一致。
+    return "\n".join(message_row(m, i, theme) for i, m in enumerate(messages))
 
 
 def messages_inner(
@@ -306,7 +345,7 @@ def markdown_inner(
     text: str, theme: str | None = DEFAULT_THEME, font_size: str | None = DEFAULT_FONT_SIZE
 ) -> str:
     """单段 Markdown → innerHTML 片段。"""
-    return _inner(theme, _MD.render(text or ""), _pygments_css(theme), font_size)
+    return _inner(theme, _md().render(text or ""), _pygments_css(theme), font_size)
 
 
 def messages_to_html(
@@ -324,7 +363,7 @@ _ANSI_RE = re.compile(r"\x1b\[([0-9;]*)m")
 def markdown_to_html(
     text: str, theme: str | None = DEFAULT_THEME, font_size: str | None = DEFAULT_FONT_SIZE
 ) -> str:
-    return _page(theme, _MD.render(text or ""), _pygments_css(theme), font_size)
+    return _page(theme, _md().render(text or ""), _pygments_css(theme), font_size)
 
 
 def plain_to_html(

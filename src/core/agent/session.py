@@ -444,6 +444,8 @@ class SessionStore(ISessionStore):
         """整态更新（rev24）：面板提交完整期望状态，未变的字段原样回写。"""
         meta = self._read_meta(session_id)
         meta.title = title or meta.title
+        if title:
+            meta.title_manual = True  # rev59：面板保存标题 = 手动命名优先
         meta.note = note or None
         meta.max_context = max_context
         meta.params = params
@@ -684,6 +686,15 @@ class SessionStore(ISessionStore):
         return meta
 
     def rename(self, session_id: str, title: str) -> SessionMeta:
+        meta = self._read_meta(session_id)
+        meta.title = title
+        meta.title_manual = True  # rev59：手动命名优先——此后自动标题不再覆盖
+        self._touch(meta)
+        self.append(session_id, "agent", "meta.update", {"title": title, "title_manual": True})
+        return meta
+
+    def touch_auto_title(self, session_id: str, title: str) -> SessionMeta:
+        """rev59：自动标题写入 —— 只改 `meta.title`，**不置** `title_manual`。"""
         meta = self._read_meta(session_id)
         meta.title = title
         self._touch(meta)

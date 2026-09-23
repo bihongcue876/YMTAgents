@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from shared.ids import WS_DEFAULT
+from gui.widgets import workspace_new_menu
 
 RAIL_PX = 96  # 折叠后侧栏总宽（图标 + 文字，rev18）
 PANEL_MIN_PX = 180  # 展开时面板最小宽
@@ -406,16 +407,13 @@ class Sidebar(QWidget):
 
     def _fill_new_menu(self) -> None:
         """「＋ 新对话」▾ 菜单：动态列出全部工作区（数据即缓存，展开时填充）。"""
-        self._new_menu.clear()
-        current_name = self._workspace_meta(self._current_ws).get("name") or DEFAULT_LABEL
-        first = self._new_menu.addAction(f"当前工作区（{current_name}）")
-        first.triggered.connect(lambda _=False: self.new_session.emit())
-        self._new_menu.addSeparator()
-        for info in self._workspaces:
-            wid = info.get("id") or WS_DEFAULT
-            name = info.get("name") or DEFAULT_LABEL
-            action = self._new_menu.addAction(f"在「{name}」新建")
-            action.triggered.connect(lambda _=False, w=wid: self.new_session_in.emit(w))
+        workspace_new_menu(
+            self._new_menu,
+            self._workspaces,
+            self._current_ws,
+            on_default=self.new_session.emit,
+            on_in=self.new_session_in.emit,
+        )
 
     @staticmethod
     def _group_tooltip(info: dict) -> str:

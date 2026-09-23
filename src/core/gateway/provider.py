@@ -105,6 +105,14 @@ class IModelGateway(ABC):
     def probe_reasoning(self, model_id: str) -> str:
         """一次性探测思考能力，返回 "yes"/"no"/"unknown"，结果写入 models.json 缓存。"""
 
+    @abstractmethod
+    def generate_title(self, messages: list[dict], model_id: str) -> str:
+        """模型提炼单行会话标题（→调用方截断，本方法只须返回单次非流式短输出）。
+
+        供新会话首轮回复后自动生成标题（rev59）。复用底层一次对话通道（非流式，短输出），
+        不发 `max_tokens`（承 rev20）。返回空串或调用异常 → 由调用方走截断回退。
+        """
+
 
 def _map_exception(exc: Exception) -> GatewayError:
     """上游异常 → 带精确 code 的网关异常（spec rev5 §3）。
@@ -393,6 +401,44 @@ class ModelGateway(IModelGateway):
                 except Exception:  # noqa: BLE001
                     log.debug("关闭探测流失败", exc_info=True)
         return "yes" if saw_reasoning else "no"
+
+    # -- 标题提炼（rev59）---------------------------------------------------
+    def generate_title(self, messages: list[dict], model_id: str) -> str:
+        """模型提炼单行标题（非流式短输出）：返回空串或调用异常 → 调用方走截断回退。
+
+        不发 `max_tokens`（承 rev20）；取 `message.content` 尾部，供调用方统一软截断。
+        """
+        provider = self._find_provider_for_model(model_id)
+        if provider is None:
+            return ""
+        try:
+            self._ensure_secure_transport(provider.base_url)
+            if not self.whitelist.is_allowed(provider.base_url):
+                return ""
+            api_key = self._api_key_for(provider)
+            if not api_key:
+                return ""
+        except GatewayError:
+            return ""
+        client = self._client(provider.base_url, api_key)
+        options = self._reasoning_options(model_id)
+        try:
+            completion = client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                stream=False,
+                timeout=self.silent_timeout,
+                **options,
+            )
+        except Exception:  # noqa: BLE001 - 标题提炼失败不阻断对话，静默回退
+            log.debug("标题提炼失败，走截断回退：%s", model_id, exc_info=True)
+            return ""
+        choices = getattr(completion, "choices", None)
+        if not choices:
+            return ""
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None)
+        return (content or "").strip()
 
     def get_slots(self) -> dict[str, str | None]:
         return dict(self.models.slots)

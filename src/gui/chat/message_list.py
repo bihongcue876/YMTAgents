@@ -1,6 +1,8 @@
-"""消息流（整段渲染 + 合帧刷新，docs 05 §3）。
+"""消息流（增量渲染 + 合帧刷新，docs 05 §3）。
 
-单个渲染视图承载整条消息流；流式增量经 50ms 合帧后整帧替换。
+单个渲染视图承载整条消息流；流式增量经 50ms 合帧后**按消息粒度就地更新 DOM**
+（根治长对话每帧整段重建造成视觉「整窗重建/假重启」）。会话切换 / 清空 / 主题
+整帧换色仍走整段重建（rev19 局部更新纪律）。
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ class MessageList(QWidget):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(50)
-        self._timer.timeout.connect(self._render)
+        # 合帧后就地更新当前流的末条消息（流式助手 delta/reasoning）
+        self._timer.timeout.connect(self._paint_last)
 
     # -- 外观 --------------------------------------------------------------
     def set_theme(self, name: str | None, font_size: str | None = None) -> None:
@@ -41,6 +44,37 @@ class MessageList(QWidget):
             self._render()
 
     # -- 渲染 --------------------------------------------------------------
+    def _stream_ready(self) -> bool:
+        """增量渲染是否安全：WebEngine 壳已加载 **且** 消息流当前可见。
+
+        不可见时（切页 / 空状态 / 离屏）落回整段重建 —— `set_stream` 按 rev12 置脏，
+        showEvent 再整段重放，保证隐藏期增量的最终一致性。
+        """
+        return self._renderer.stream_ready() and self._renderer.isVisible()
+
+    def _paint_new_tail(self, jump_bottom: bool = False) -> None:
+        """追加最末一条新消息的 DOM 节点；视图未就绪 / 降级 / 隐藏 → 整段重建。
+
+        首条真实内容建立视图后，新消息（用户 / 错误 / 工具 / 助手骨架）只追加节点，
+        已完成旧消息不重渲染。
+        """
+        if self._stream_ready():
+            idx = len(self._messages) - 1
+            self._renderer.append_node(md.message_row(self._messages[idx], idx, self._theme))
+        else:
+            self._render(jump_bottom)
+
+    def _paint_last(self, jump_bottom: bool = False) -> None:
+        """就地重渲染最末消息节点（流式助手 delta / reason / finalize / 工具补全）。
+
+        只更新当前这一条，既不重建已完成旧消息，也不重注整条对话。
+        """
+        if self._stream_ready():
+            idx = len(self._messages) - 1
+            self._renderer.update_node(idx, md.message_row(self._messages[idx], idx, self._theme))
+        else:
+            self._render(jump_bottom)
+
     def _render(self, jump_bottom: bool = False) -> None:
         if not self._messages and not self._renderer.view_created:
             # rev55：空流且视图未建 → 不渲染。首帧 settings.state 与空会话回放都会走这里，
@@ -70,7 +104,7 @@ class MessageList(QWidget):
 
     def add_user(self, text: str) -> None:
         self._messages.append({"role": "user", "content": text})
-        self._render()
+        self._paint_new_tail()
 
     def begin_assistant(self) -> None:
         self._messages.append(
@@ -82,7 +116,8 @@ class MessageList(QWidget):
                 "interrupted": False,
             }
         )
-        self._render()
+        # 首个 delta 前先建节点骨架；后续 delta/reasoning 由 `_paint_last` 就地更新
+        self._paint_new_tail()
 
     def append_delta(self, text: str) -> None:
         if not self._last_is_assistant():
@@ -106,20 +141,35 @@ class MessageList(QWidget):
         self._messages[-1]["reasoning"] = reasoning
         self._messages[-1]["usage"] = usage_text
         self._messages[-1]["interrupted"] = interrupted
-        self._render()
+        # 只就地更新这条助手节点（content / usage / interrupted / thinking / 折叠）
+        self._paint_last()
 
     def add_error(self, message: str, detail: str | None = None) -> None:
         self._messages.append({"role": "error", "content": message, "detail": detail})
-        self._render()
+        self._paint_new_tail()
 
     # -- 工具调用（v0.0.3 完善）：折叠块进入消息流，结果到达后就地补全 --------------
     def add_tool_call(self, payload: dict) -> None:
         self._track_tool_call(payload)
-        self._render()
+        self._paint_new_tail()
 
     def add_tool_result(self, payload: dict) -> None:
+        call_id = payload.get("call_id", "")
+        existed = self._find_tool(call_id) is not None
         self._track_tool_result(payload)
-        self._render()
+        if existed:
+            # 结果到达 → 就地补全该工具节点（不新开节点、不重建无关消息）
+            idx = self._index_of_tool(call_id)
+            if idx is None:
+                return  # 理论上不会发生（existed 已保证），防御分支
+            if self._stream_ready():
+                self._renderer.update_node(
+                    idx, md.message_row(self._messages[idx], idx, self._theme)
+                )
+            else:
+                self._render()
+        else:
+            self._paint_new_tail()
 
     def _track_tool_call(self, payload: dict) -> None:
         self._messages.append(
@@ -159,6 +209,12 @@ class MessageList(QWidget):
         for message in reversed(self._messages):
             if message.get("role") == "tool" and message.get("call_id") == call_id:
                 return message
+        return None
+
+    def _index_of_tool(self, call_id: str) -> int | None:
+        for i, message in enumerate(self._messages):
+            if message.get("role") == "tool" and message.get("call_id") == call_id:
+                return i
         return None
 
     @staticmethod

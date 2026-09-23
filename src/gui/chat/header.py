@@ -10,6 +10,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QMenu, QPushButton, QWidget
 
 from shared.ids import WS_DEFAULT
+from gui.widgets import workspace_new_menu
 
 
 class ChatHeader(QWidget):
@@ -67,21 +68,13 @@ class ChatHeader(QWidget):
         self._current_ws = current or WS_DEFAULT
 
     def _fill_new_menu(self) -> None:
-        self._new_menu.clear()
-        current_name = self._ws_name(self._current_ws)
-        first = self._new_menu.addAction(f"当前工作区（{current_name}）")
-        first.triggered.connect(lambda _=False: self.new_session.emit())
-        self._new_menu.addSeparator()
-        for info in self._workspaces:
-            wid = info.get("id") or WS_DEFAULT
-            action = self._new_menu.addAction(f"在「{info.get('name') or wid}」新建")
-            action.triggered.connect(lambda _=False, w=wid: self.new_session_in.emit(w))
-
-    def _ws_name(self, workspace_id: str) -> str:
-        for info in self._workspaces:
-            if (info.get("id") or WS_DEFAULT) == workspace_id:
-                return info.get("name") or workspace_id
-        return workspace_id
+        workspace_new_menu(
+            self._new_menu,
+            self._workspaces,
+            self._current_ws,
+            on_default=self.new_session.emit,
+            on_in=self.new_session_in.emit,
+        )
 
     def set_detail_active(self, active: bool) -> None:
         """与右栏实际可见性同步（右栏也可能被自身关闭按钮收起）。"""
