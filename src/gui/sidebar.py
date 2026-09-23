@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import QMetaObject, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
@@ -33,9 +33,6 @@ PANEL_MIN_PX = 180  # 展开时面板最小宽
 PANEL_MAX_PX = 360  # 展开时面板最大宽
 RAIL_BTN_W = RAIL_PX - 12  # 按钮宽 = rail 减左右边距
 RAIL_BTN_H = 34
-
-#: 组展开/折叠动画时长（毫秒）——太长显得拖沓，太短等于没有（rev58）
-ANIM_MS = 180
 
 #: 默认工作区在侧栏的展示名兜底（正常由 `WorkspaceList` 给出）。
 DEFAULT_LABEL = "默认工作区"
@@ -89,11 +86,6 @@ class Sidebar(QWidget):
         self._current_ws: str = WS_DEFAULT
         self._collapsed: set[str] = set()
         self._archived_open = False
-        # rev58 动画状态：折叠动画期间数据事件只更新缓存、不重建（动画收尾统一重建）；
-        # _anim_ws = 刚请求展开的组，重建时为它播入场动画
-        self._animating = False
-        self._anim_ws: str | None = None
-        self._anims: list[QPropertyAnimation] = []
 
         # -- 图标栏（折叠后仍保留；rev18：图标右侧带文字，只看图标猜不出功能） --
         # rev55：rail 收进 #railHost（surface 底 + 右分隔线），导航按钮带 checked 态
@@ -164,7 +156,10 @@ class Sidebar(QWidget):
         new_row.addWidget(self._new_menu_btn)
 
         self._list = QVBoxLayout()
-        self._list.setAlignment(Qt.AlignTop)
+        # 注意：这里**不能** setAlignment(AlignTop)——带对齐的顶层布局会让
+        # widgetResizable 的滚动区不认「内容超出视口」，滚动条永远 max=0，
+        # 视口以下的分组（含「已归档」入口）完全够不到（rev62 实测）。
+        # 顶部堆叠改由 _rebuild 末尾的 addStretch 承担。
         self._list.setSpacing(6)
         holder = QWidget()
         holder.setLayout(self._list)
@@ -172,6 +167,11 @@ class Sidebar(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(holder)
+        # 冷构建时滚动区不因内容增长自行重估（rev62 实测：holder 恒钉在视口高、
+        # 滚动条 max 恒 0，视口以下分组够不到）——每次重建后显式同步一次。
+        self._holder = holder
+        self._scroll = scroll
+        self._scroll_restore: int | None = None
 
         self._panel = QWidget()
         panel_layout = QVBoxLayout(self._panel)
@@ -213,16 +213,14 @@ class Sidebar(QWidget):
     def update_sessions(self, metas) -> None:
         """`SessionIndex` 到达：更新会话缓存（归属由 `meta.workspace_id` 给出）。"""
         self._metas = list(metas)
-        if not self._animating:  # rev58：折叠动画期间只刷缓存，收尾统一重建
-            self._rebuild()
+        self._rebuild()
 
     def update_workspaces(self, workspaces: list[dict], current: str, collapsed) -> None:
         """`WorkspaceList` 到达：更新工作区缓存 + 当前工作区 + 折叠态。"""
         self._workspaces = list(workspaces)
         self._current_ws = current or WS_DEFAULT
         self._collapsed = set(collapsed or [])
-        if not self._animating:
-            self._rebuild()
+        self._rebuild()
 
     def rebuild(self) -> None:
         """按当前字体度量重算行高后重建（字号档位切换后必须调用）。
@@ -264,6 +262,8 @@ class Sidebar(QWidget):
         return ordered
 
     def _rebuild(self) -> None:
+        # 重建前记下滚动位置：整栏拆建会瞬时归零，恢复由 _apply_holder_height 收尾
+        self._scroll_restore = self._scroll.verticalScrollBar().value()
         while self._list.count():
             item = self._list.takeAt(0)
             widget = item.widget()
@@ -285,6 +285,8 @@ class Sidebar(QWidget):
             self._list.addWidget(self._archived_toggle(len(archived_ids)))
             if self._archived_open and archived_ids:
                 self._list.addWidget(self._section_list(self._pick(archived_ids), "已归档会话"))
+            self._list.addStretch(1)  # 顶部堆叠（不能用布局对齐，见 __init__ 注）
+            self._sync_holder_height()
             return
 
         # 每个**已登记**的工作区都出分组头（哪怕当前 0 个会话）：分组是工作区在侧栏的存在形式，
@@ -299,6 +301,31 @@ class Sidebar(QWidget):
                 rows = [m for m in items if m.id in archived_ids]
                 if rows:  # 归档区是筛选视图：没有归档会话的工作区不出空组
                     self._list.addWidget(self._group(key, rows, archived=True))
+        self._list.addStretch(1)  # 顶部堆叠（不能用布局对齐，见 __init__ 注）
+        self._sync_holder_height()
+
+    def _sync_holder_height(self) -> None:
+        """排队同步 holder 高度 = max(视口高, 布局最小高)。
+
+        - `widgetResizable` 的重估只在滚动区自身 resize 等时机触发；会话/分组
+          数据到达后的「冷增长」不触发（rev62 实测），必须手动补一次；
+        - **必须排队**：`_rebuild` 进行中布局最小值尚未结算（实测恒 18），
+          同步 resize 会变成同尺寸空操作；等事件循环空转、嵌套 LayoutRequest
+          全部落定后再取 `minimumSizeHint` 才是真实值（实测 968）；
+        - 取 max 保证两个方向都对：内容超出 → 撑高出滚动条；内容收起 →
+          回落到视口高，不残留空白滚动区。
+        """
+        QMetaObject.invokeMethod(self, "_apply_holder_height", Qt.ConnectionType.QueuedConnection)
+
+    @Slot()
+    def _apply_holder_height(self) -> None:
+        vp = self._scroll.viewport()
+        self._holder.resize(
+            vp.width(), max(vp.height(), self._holder.minimumSizeHint().height())
+        )
+        sb = self._scroll.verticalScrollBar()
+        if self._scroll_restore is not None:
+            sb.setValue(min(self._scroll_restore, sb.maximum()))
 
     def _pick(self, ids: set[str]) -> list:
         return [m for m in self._metas if m.id in ids]
@@ -352,58 +379,18 @@ class Sidebar(QWidget):
         if not collapsed:
             lst = self._section_list(items, label, archived=archived)
             layout.addWidget(lst)
-            if workspace_id == self._anim_ws and not archived:
-                # 刚请求展开的组：入场动画（0 → 实际行高），不再「整组砸下来」
-                self._anim_ws = None
-                target = lst.maximumHeight()  # _section_list 已 setFixedHeight，此处取目标值
-                lst.setMinimumHeight(0)
-                lst.setMaximumHeight(0)
-                self._animate_height(lst, target, lambda w=lst, h=target: w.setFixedHeight(h))
         return box
 
-    # -- 展开/折叠动画（rev58） --------------------------------------------
+    # -- 展开/折叠（rev61） --------------------------------------------------
     def _request_collapse(self, workspace_id: str, collapsed: bool) -> None:
-        """组头点击。信号**同步**发出（状态权威走主窗/设置，契约不变）：
-        - 折叠：先播收起动画，重建推迟到动画收尾（期间数据事件只刷缓存）；
-        - 展开：标记 _anim_ws，重建该组时由 _group 播入场动画。
-        动画只在面板**可见**时启用 —— 隐藏控件上的动画既无意义，且在离屏测试环境
-        触发过 Qt 访问违例（rev58 实测：plugins 页用例后折叠用例必崩），隐藏走即时路径。
+        """组头点击 → 同步发信号（状态权威走主窗/设置，契约不变），重建即时完成。
+
+        rev61（用户裁决）：展开/折叠一律**即时**到位（IDE 文件树形态：点开即展开，
+        组高 = 条目数 × 行高），撤销 rev58 的 180ms 高度动画 —— 一路扫到整组高度的
+        观感反而差。注意：重建仍是全列表重排（QVBoxLayout 逐项重建），即时态下
+        无中间帧，观感等价于「只有那个组变了」。
         """
-        if not collapsed:
-            if self.isVisible():
-                self._anim_ws = workspace_id
-            self.collapse_workspace.emit(workspace_id, False)
-            return
-        header = self.sender()
-        box = header.parent() if isinstance(header, QWidget) else None
-        lst = box.findChild(QListWidget) if box is not None else None
-        if lst is None or not self.isVisible():
-            self.collapse_workspace.emit(workspace_id, True)
-            return
-        self._animating = True
-        self.collapse_workspace.emit(workspace_id, True)  # 同步：主窗随即刷缓存（不重建）
-        lst.setMinimumHeight(0)  # setFixedHeight 锁住了 min/max，动画前必须先放 min
-        self._animate_height(lst, 0, self._finish_collapse)
-
-    def _finish_collapse(self) -> None:
-        self._animating = False
-        self._rebuild()
-
-    def _animate_height(self, widget: QWidget, target: int, on_finished=None) -> None:
-        anim = QPropertyAnimation(widget, b"maximumHeight", self)
-        anim.setDuration(ANIM_MS)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.setStartValue(widget.maximumHeight())
-        anim.setEndValue(target)
-        if on_finished is not None:
-            anim.finished.connect(on_finished)
-        anim.finished.connect(lambda a=anim: self._drop_anim(a))
-        self._anims.append(anim)  # 持有引用，防 GC 导致动画中止
-        anim.start()
-
-    def _drop_anim(self, anim: QPropertyAnimation) -> None:
-        if anim in self._anims:
-            self._anims.remove(anim)
+        self.collapse_workspace.emit(workspace_id, collapsed)
 
     def _fill_new_menu(self) -> None:
         """「＋ 新对话」▾ 菜单：动态列出全部工作区（数据即缓存，展开时填充）。"""
@@ -519,7 +506,7 @@ class Sidebar(QWidget):
         elif chosen == new_here:
             self.new_session_in.emit(workspace_id)
         elif chosen == collapse:
-            # 展开走 _request_collapse 可获入场动画（sender 非组头时折叠退化为即时）
+            # rev61：与组头点击同路（即时展开/折叠，无动画）
             self._request_collapse(workspace_id, workspace_id not in self._collapsed)
         elif chosen == rename:
             self.rename_workspace.emit(workspace_id)

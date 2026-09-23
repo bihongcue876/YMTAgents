@@ -13,7 +13,14 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QLabel, QListWidget, QMessageBox, QPushButton
+from PySide6.QtWidgets import (
+    QDialog,
+    QLabel,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+)
 
 from app import bootstrap as bootstrap_mod
 from app import paths
@@ -230,6 +237,64 @@ def test_sidebar_collapse_hides_group_and_emits_signal(qapp):
 
     _head(bar, "默认工作区").click()
     assert seen[-1] == (WS_DEFAULT, False)
+
+
+def test_sidebar_scrollbar_appears_when_content_overflows(qapp):
+    """rev62 回归锚点：内容超出视口时滚动条必须出现。
+
+    根因：`self._list.setAlignment(Qt.AlignTop)` —— 带对齐的顶层布局会让
+    widgetResizable 的滚动区不认「内容超出视口」（holder 恒等于视口高，
+    scrollbar max 恒 0），视口以下的分组（含「已归档」入口）完全够不到。
+    修法 = 去 AlignTop、重建末尾 addStretch（顶部堆叠语义不变）。
+    在旧代码下本用例必失败（max == 0）。
+    """
+    bar = Sidebar()
+    bar.resize(360, 300)
+    bar.show()
+    qapp.processEvents()
+    infos = [_info(id=WS_DEFAULT, name="默认工作区", builtin=True)] + [
+        _info(id=f"ws_{i}", name=f"项目{i}") for i in range(1, 6)
+    ]
+    metas = []
+    k = 0
+    for i in range(1, 6):
+        for j in range(8):
+            metas.append(_Meta(f"s{k}", f"会话{i}-{j}", workspace_id=f"ws_{i}"))
+            k += 1
+    bar.update_workspaces(infos, WS_DEFAULT, [])
+    bar.update_sessions(metas)
+    qapp.processEvents()
+    scroll = bar.findChild(QScrollArea)
+    assert scroll is not None
+    assert scroll.verticalScrollBar().maximum() > 0  # 旧代码恒 0
+    bar.hide()
+
+
+def test_sidebar_collapse_rebuild_is_immediate_when_visible(qapp):
+    """rev61 回归锚点：可见侧栏上折叠/展开**即时**重建（IDE 文件树形态）。
+
+    rev58 的折叠动画期间 `_animating` 会把 update_workspaces 压成「只刷缓存」，
+    重建推迟到动画收尾 —— 本用例不带任何等待，在 rev58 代码下必失败；
+    rev61 撤销动画后，主窗回推折叠态必须立即反映到列表。
+    """
+    bar = Sidebar()
+    bar.resize(300, 600)
+    bar.show()
+    qapp.processEvents()
+    infos = [_info(id=WS_DEFAULT, name="默认工作区", builtin=True)]
+    bar.update_workspaces(infos, WS_DEFAULT, [])
+    bar.update_sessions([_Meta("s1", "甲会话")])
+
+    _head(bar, "默认工作区").click()  # 请求折叠（信号同步发出）
+    bar.update_workspaces(infos, WS_DEFAULT, [WS_DEFAULT])  # 主窗回推折叠态
+    assert not any("甲会话" in t for t in _items(bar))
+    assert "▸" in _head(bar, "默认工作区").text()
+
+    _head(bar, "默认工作区").click()  # 请求展开
+    bar.update_workspaces(infos, WS_DEFAULT, [])
+    assert any("甲会话" in t for t in _items(bar))
+    assert "▾" in _head(bar, "默认工作区").text()
+    bar.hide()
 
 
 def test_sidebar_select_finds_session_after_grouping(qapp):
