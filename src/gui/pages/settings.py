@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from gui import theme
 from gui.widgets import card, section_label, text_fit
 
-VERSION = "0.0.2"
+VERSION = "0.0.8"
 
 
 class SettingsPage(QWidget):
