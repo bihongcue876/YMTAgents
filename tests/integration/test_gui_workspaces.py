@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLabel, QListWidget, QMessageBox, QPushButton
 
 from app import bootstrap as bootstrap_mod
@@ -218,7 +219,7 @@ def test_sidebar_collapse_hides_group_and_emits_signal(qapp):
     bar.collapse_workspace.connect(lambda wid, col: seen.append((wid, col)))
 
     _head(bar, "默认工作区").click()  # 当前未折叠 → 请求折叠
-    assert seen == [(WS_DEFAULT, True)]
+    assert seen == [(WS_DEFAULT, True)]  # 信号同步发出（契约不变，rev58）
 
     bar.update_workspaces(
         [_info(id=WS_DEFAULT, name="默认工作区", builtin=True)], WS_DEFAULT, [WS_DEFAULT]
@@ -273,6 +274,65 @@ def test_sidebar_group_header_tooltip_states_boundary(qapp):
     assert "不随数据根一起迁移" in tooltip
 
 
+# -- rev58：新建入口（组头 ＋ / ▾ 菜单） --------------------------------------
+def test_sidebar_group_add_button_emits_new_session_in(qapp):
+    """组头行尾的小 ＋：一键在该工作区新建（rev58 易用性入口）。"""
+    bar = Sidebar()
+    bar.update_workspaces(
+        [_info(id=WS_DEFAULT, name="默认工作区", builtin=True), _info(id="ws_1", name="我的项目")],
+        WS_DEFAULT,
+        [],
+    )
+    seen: list[str] = []
+    bar.new_session_in.connect(seen.append)
+    buttons = [
+        b
+        for b in bar.findChildren(QPushButton)
+        if b.objectName() == "wsGroupAdd" and "我的项目" in b.toolTip()
+    ]
+    assert len(buttons) == 1  # 每个已登记工作区恰好一个入口
+    buttons[0].click()
+    assert seen == ["ws_1"]
+
+
+def test_sidebar_new_menu_lists_every_workspace(qapp):
+    """「＋ 新对话 ▾」菜单动态列出全部工作区；点选即 new_session_in（不弹 real menu）。"""
+    bar = Sidebar()
+    bar.update_workspaces(
+        [_info(id=WS_DEFAULT, name="默认工作区", builtin=True), _info(id="ws_1", name="我的项目")],
+        "ws_1",
+        [],
+    )
+    bar._fill_new_menu()
+    texts = [a.text() for a in bar._new_menu.actions()]
+    assert any("当前工作区（我的项目）" in t for t in texts)
+    assert any("在「默认工作区」新建" in t for t in texts)
+    target = next(a for a in bar._new_menu.actions() if "默认工作区" in a.text())
+    seen: list[str] = []
+    bar.new_session_in.connect(seen.append)
+    target.trigger()
+    assert seen == [WS_DEFAULT]
+
+
+def test_chat_header_new_menu_emits_new_session_in(qapp):
+    """聊天页「新建会话 ▾」与侧栏同款：选工作区 → new_session_in（窗口层转 NewSession 请求）。"""
+    from gui.chat.header import ChatHeader
+
+    header = ChatHeader()
+    header.set_workspaces(
+        [_info(id=WS_DEFAULT, name="默认工作区", builtin=True), _info(id="ws_1", name="我的项目")],
+        WS_DEFAULT,
+    )
+    header._fill_new_menu()
+    texts = [a.text() for a in header._new_menu.actions()]
+    assert any("当前工作区（默认工作区）" in t for t in texts)
+    assert any("在「我的项目」新建" in t for t in texts)
+    seen: list[str] = []
+    header.new_session_in.connect(seen.append)
+    next(a for a in header._new_menu.actions() if "我的项目" in a.text()).trigger()
+    assert seen == ["ws_1"]
+
+
 # -- 窗口级 -------------------------------------------------------------------
 def _window(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
@@ -310,6 +370,33 @@ def test_window_follows_create_and_collapse(tmp_path, monkeypatch, qapp):
         qapp.processEvents()
         assert not any("项目里的会话" in t for t in _items(window.sidebar))
         assert window._collapsed_cache == [workspace_id]
+    finally:
+        ctx.worker.stop()
+
+
+def test_window_chat_new_menu_routes_to_workspace(qapp, tmp_path, monkeypatch):
+    """rev58 接线：聊天页 ▾ 菜单选工作区 → NewSession(workspace_id=…) 真正到达控制器。"""
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        ctx.controller.push_initial_state()
+        ext = tmp_path / "proj"
+        ext.mkdir()
+        ctx.controller.handle(
+            WorkspaceCreate(name="我的项目", root_kind="external", root=str(ext))
+        )
+        qapp.processEvents()
+        workspace_id = ctx.controller.workspace_manager.current()
+        assert workspace_id != WS_DEFAULT
+
+        window.chat.new_session_in.emit(workspace_id)
+        # 信号经工作线程排队处理，耗时不可假设 —— 轮询等到落库再断言
+        metas = []
+        for _ in range(50):
+            QTest.qWait(100)
+            metas = ctx.controller.store.list(include_archived=True)
+            if any(getattr(m, "workspace_id", None) == workspace_id for m in metas):
+                break
+        assert any(getattr(m, "workspace_id", None) == workspace_id for m in metas)
     finally:
         ctx.worker.stop()
 
