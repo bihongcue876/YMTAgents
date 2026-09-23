@@ -113,6 +113,10 @@ class SessionPanel(QWidget):
         super().__init__(parent)
         self._session_id: str | None = None
         self._question_texts: list[str] = []
+        # 拖拽宽度下限（rev29 裁决 340）：MainWindow 的按钮展开路径本就钳 380–720，
+        # 但 QSplitter 自由拖拽不受那条钳制 —— 不设下限时可拖到极窄，表单与
+        # 问题列表挤压变形。与侧栏 PANEL_MIN/MAX 同款纪律，交由 Qt 统一落实。
+        self.setMinimumWidth(340)
 
         header = QHBoxLayout()
         title = QLabel("会话详情")

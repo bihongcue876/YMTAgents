@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTextEdit, QWidget
@@ -9,7 +11,8 @@ from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTextEdit, QWidget
 # rev25（用户裁决）：默认 2 行；随输入增高至多 10 行；发送清空后自动回到 2 行。
 _MIN_LINES = 2
 _MAX_LINES = 10
-_LINE_PX = 22
+# 纵向富余：覆盖 QTextDocument 上下边距（4+4）与取整误差，保证内容不被裁。
+_PAD_PX = 10
 
 
 class _InputEdit(QTextEdit):
@@ -35,6 +38,11 @@ class InputBar(QWidget):
         self._edit.setPlaceholderText("输入消息，Ctrl+Enter 发送，Enter 换行")
         self._edit.submitted.connect(self._on_send)
         self._edit.textChanged.connect(self._adjust_height)
+        # 折行重排也驱动计高：视口变宽/变窄后同一段文本的视觉行数会变，
+        # textChanged 不发（内容没变），只有 documentSizeChanged 能捕获。
+        self._edit.document().documentLayout().documentSizeChanged.connect(
+            lambda _size: self._adjust_height()
+        )
         self._generating = False
 
         self._button = QPushButton("发送")
@@ -46,8 +54,23 @@ class InputBar(QWidget):
         self._adjust_height()
 
     def _adjust_height(self) -> None:
-        lines = min(_MAX_LINES, max(_MIN_LINES, self._edit.document().blockCount()))
-        self._edit.setFixedHeight(lines * _LINE_PX + 10)
+        """按**视觉行数**计高（rev60 修复）：
+
+        - 行高取 `fontMetrics().lineSpacing()`（随字号档位），不再写死像素 ——
+          特大档下固定 22px 会裁掉第 8 行以下的内容（样式表字号不参与
+          sizeHint 的已知陷阱在本处的处置）；
+        - 行数按 `document().size().height()`（折行后的真实文档高度）折算，
+          不用 `blockCount()` —— 后者只数段落，长单行折成十行视觉行仍是 1 块，
+          高度被压在 2 行导致内容被裁。
+        """
+        line_h = self._edit.fontMetrics().lineSpacing()
+        doc_h = self._edit.document().size().height()
+        if doc_h <= 0:
+            # 离屏/未 show 时文档布局不计算（size 恒 0）：按段落数兜底估计，
+            # 布局启用后 documentSizeChanged 会立即用真实高度纠正。
+            doc_h = self._edit.document().blockCount() * line_h
+        lines = min(_MAX_LINES, max(_MIN_LINES, math.ceil(doc_h / line_h)))
+        self._edit.setFixedHeight(lines * line_h + _PAD_PX)
 
     def _on_send(self) -> None:
         text = self._edit.toPlainText().strip()

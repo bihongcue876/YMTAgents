@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel
+import math
+
+from PySide6.QtWidgets import QComboBox, QLabel
 
 from app import bootstrap as bootstrap_mod
 from app import paths
@@ -143,16 +145,59 @@ def test_message_list_passes_theme_background(qapp):
 
 
 def test_input_bar_height_two_to_ten_lines(qapp):
-    """rev25（用户裁决）：输入区默认 2 行，随输入最多长到 10 行，发送清空后回到 2 行。"""
-    from gui.chat.input_bar import _LINE_PX, _MAX_LINES, _MIN_LINES, InputBar
+    """rev25（用户裁决）：输入区默认 2 行，随输入最多长到 10 行，发送清空后回到 2 行。
+
+    rev60：行高随字号档位（fontMetrics().lineSpacing()），行数按折行后的
+    真实文档高度折算 —— 不再写死 22px、不再按 blockCount 数段落。
+    """
+    from gui.chat.input_bar import _MAX_LINES, _MIN_LINES, _PAD_PX, InputBar
 
     assert (_MIN_LINES, _MAX_LINES) == (2, 10)
     bar = InputBar()
-    assert bar._edit.height() == _MIN_LINES * _LINE_PX + 10
+    line_h = bar._edit.fontMetrics().lineSpacing()
+
+    def expect(lines: int) -> None:
+        assert bar._edit.height() == lines * line_h + _PAD_PX
+
+    expect(_MIN_LINES)  # 空 → 默认 2 行
     bar._edit.setPlainText("\n".join(str(i) for i in range(20)))
-    assert bar._edit.height() == _MAX_LINES * _LINE_PX + 10
+    qapp.processEvents()
+    expect(_MAX_LINES)  # 20 段 → 封顶 10 行
     bar._edit.clear()
-    assert bar._edit.height() == _MIN_LINES * _LINE_PX + 10
+    qapp.processEvents()
+    expect(_MIN_LINES)  # 清空 → 回到 2 行
+
+
+def test_input_bar_height_counts_wrapped_lines(qapp, tmp_path):
+    """rev60 回归锚点：长单行**折行**后按视觉行数长高（blockCount 恒 1，旧算法停在 2 行）。"""
+    from gui.chat.input_bar import _MAX_LINES, _MIN_LINES, _PAD_PX, InputBar
+
+    bar = InputBar()
+    bar.resize(320, 200)
+    bar.show()
+    qapp.processEvents()
+    line_h = bar._edit.fontMetrics().lineSpacing()
+
+    bar._edit.setPlainText("一" * 60)  # 单段落，窄视口下折成数行（不足 10 行封顶）
+    qapp.processEvents()
+    doc_h = bar._edit.document().size().height()
+    assert doc_h > 2 * line_h  # 前提：确实折出了多于 2 行
+    expected = min(_MAX_LINES, max(_MIN_LINES, math.ceil(doc_h / line_h)))
+    assert expected < _MAX_LINES  # 前提：未触封顶（封顶后内部滚动是裁决本意，另论）
+    assert bar._edit.height() == expected * line_h + _PAD_PX
+    assert bar._edit.height() >= doc_h + 8  # 文档上下边距之内不被裁
+
+
+def test_detail_panel_min_width_and_header_combo_policy(qapp):
+    """rev60 回归锚点：右栏拖拽下限 340（rev29 裁决）；聊天头下拉不按最长条目占宽。"""
+    from gui.chat.header import ChatHeader
+    from gui.chat.session_panel import SessionPanel
+
+    assert SessionPanel().minimumWidth() >= 340  # QSplitter 拖拽同受此约束
+    header = ChatHeader()
+    policy = QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+    assert header._model.sizeAdjustPolicy() == policy
+    assert header._persona.sizeAdjustPolicy() == policy
 
 
 def test_usage_text_includes_generation_tps(qapp):

@@ -37,6 +37,14 @@ class ChatHeader(QWidget):
         self._persona = QComboBox()
         self._persona.setToolTip("选择本会话使用的角色；不同会话可以各用各的角色")
         self._persona.currentIndexChanged.connect(self._on_persona_changed)
+        # 宽度策略（rev60）：默认按最长条目占宽，长模型名会把标题挤成一条缝
+        # （实测 664px）。改为「最小内容宽 + 图标」策略，收起态窄而稳定，
+        # 超宽文本由 Qt 省略；完整列表在下拉弹层里仍按内容展开不受限。
+        for combo in (self._model, self._persona):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(12)
 
         self._new = QPushButton("新建会话")
         self._new.clicked.connect(self.new_session.emit)
