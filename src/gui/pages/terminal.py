@@ -180,6 +180,8 @@ class TerminalPage(QWidget):
             item = self._cards.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # 先摘父再 deleteLater（rev58，同 plugins）
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _rebuild(self) -> None:

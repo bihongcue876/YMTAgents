@@ -451,6 +451,8 @@ class ModelsPage(QWidget):
             item = self._list.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # 先摘父再 deleteLater（rev58，同 plugins）：孤儿控件带悬挂引用
+                widget.setParent(None)
                 widget.deleteLater()
         self._test_labels.clear()
         self._fetch_labels.clear()

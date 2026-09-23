@@ -105,8 +105,11 @@ class PersonasPage(QWidget):
         self._personas = list(event.personas)
         while self._list.count():
             item = self._list.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                # 先摘父再 deleteLater（rev58，同 plugins）
+                widget.setParent(None)
+                widget.deleteLater()
         for p in self._personas:
             self._list.addWidget(self._make_card(p))
 

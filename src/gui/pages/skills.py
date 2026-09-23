@@ -82,8 +82,11 @@ class SkillsPage(QWidget):
         self._skills = list(skills)
         while self._list.count():
             item = self._list.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                # 先摘父再 deleteLater（rev58，同 plugins）
+                widget.setParent(None)
+                widget.deleteLater()
         if not self._skills:
             empty = QLabel("还没有技能。点「导入目录」选择一个含 SKILL.md 的文件夹，或从 Git 仓库导入。")
             empty.setWordWrap(True)

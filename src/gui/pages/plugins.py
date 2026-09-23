@@ -226,6 +226,9 @@ class PluginsPage(QWidget):
             item = self._body.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # 先摘父再 deleteLater（rev58 实测修复）：deleteLater 要等事件循环才真删，
+                # 期间孤儿卡片带 `stretch item` 等悬挂引用，会在后续事件循环中访问违例
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _rebuild(self) -> None:
