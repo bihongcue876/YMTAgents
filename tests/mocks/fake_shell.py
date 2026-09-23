@@ -96,7 +96,9 @@ def _handle(script: str, marker: str) -> None:
 
 
 def main() -> None:
-    # 管道下的默认编码可能是系统码页；固定 UTF-8，与 ShellProcess 的解码口径一致。
+    # 管道下的默认编码可能是系统码页；stdin/stdout 都固定 UTF-8，与 ShellProcess 的线格式
+    # 口径一致（posix 方言写 UTF-8；ps 方言本身是 ASCII 包装，两者都由此解码口径覆盖）。
+    sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")
     buffered: list[str] = []
     for raw in sys.stdin:
