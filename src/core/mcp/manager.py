@@ -230,15 +230,42 @@ class McpManager:
     def is_tool_available(self, server_id: str) -> bool:
         return self._states.get(server_id) == STATE_READY
 
-    def scan(self, server_id: str) -> list[McpFinding]:
-        """安全检测**预留入口**（v0.0.3 未实现）：默认 NullScanner 恒返回空列表。
+    def scan(self, server_id: str, checks: list[str] | None = None) -> list[McpFinding]:
+        """对已配置服务器做一次安全体检（v0.0.9）。
 
-        未来实现检测器后，发现项仅供展示，不参与权限/能力判定。
+        findings 仅供展示，不参与权限/能力判定；审计只记检测项计数，不记证据原文。
+        无活连接时主动探测项自动记 `skip`（不报错）。
         """
         cfg = self._configs.get(server_id)
         if cfg is None:
             return []
-        return self._scanner.scan(cfg)
+        client = self._clients.get(server_id)
+        try:
+            findings = self._scanner.scan(cfg, client, checks)
+        except Exception:
+            log.exception("MCP 安全检测失败：%s", server_id)
+            findings = []
+        counts = {"pass": 0, "warn": 0, "fail": 0, "skip": 0}
+        for finding in findings:
+            counts[finding.status] = counts.get(finding.status, 0) + 1
+        self._audit("mcp.scan", id=server_id, transport=cfg.transport, **counts)
+        return findings
+
+    def scan_report(self, server_id: str, checks: list[str] | None = None) -> dict | None:
+        """体检结果载荷（服务器不存在返回 None）；findings 证据已脱敏。"""
+        cfg = self._configs.get(server_id)
+        if cfg is None:
+            return None
+        findings = self.scan(server_id, checks)
+        summary = {"pass": 0, "warn": 0, "fail": 0, "skip": 0}
+        for finding in findings:
+            summary[finding.status] = summary.get(finding.status, 0) + 1
+        return {
+            "server_id": server_id,
+            "server_name": cfg.name,
+            "findings": [f.as_dict() for f in findings],
+            "summary": summary,
+        }
 
     # ---------- 内部 ----------
     def _resolve_secret(self, name: str) -> str | None:

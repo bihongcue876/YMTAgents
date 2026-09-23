@@ -60,6 +60,7 @@ from shared.envelope import (
     PersonaImport,
     PersonaImported,
     McpServerList,
+    McpScanResult,
     SkillImported,
     SkillList,
     ShellList,
@@ -568,6 +569,25 @@ class CoreController:
             self._emit_mcp()
             self._emit_health()
 
+    def _on_mcp_scan(self, request) -> None:
+        # v0.0.9：手动安全体检 —— 结果只读展示，不影响权限 / 可见性 / 派发
+        if self.mcp_manager is None:
+            self._report("system", ErrorCode.INVALID_REQUEST.value, "MCP 模块未启用。", None)
+            return
+        report = self.mcp_manager.scan_report(request.server_id, request.checks)
+        if report is None:
+            self._report("config", ErrorCode.INVALID_REQUEST.value, "MCP 服务器不存在。", f"id={request.server_id}")
+            return
+        self.emit(
+            McpScanResult(
+                server_id=report["server_id"],
+                server_name=report["server_name"],
+                scanned_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                findings=report["findings"],
+                summary=report["summary"],
+            )
+        )
+
     def _on_gate_respond(self, request) -> None:
         # 正常路径下 gate.respond 多被 _gate_handler 泵取命中；此处登记以兜底竞态。
         self._gate_decisions[request.call_id] = request.decision == "allow"
@@ -798,6 +818,8 @@ class CoreController:
             self._on_mcp_reconnect(request)
         elif t == "mcp.server.refresh":
             self._emit_mcp()
+        elif t == "mcp.scan":
+            self._on_mcp_scan(request)
         elif t == "shell.spawn":
             self._on_shell_spawn(request)
         elif t == "shell.close":

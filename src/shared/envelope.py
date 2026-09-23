@@ -547,6 +547,18 @@ class McpServersRefresh(Envelope):
     type: Literal["mcp.server.refresh"] = "mcp.server.refresh"
 
 
+class McpScan(Envelope):
+    """手动触发一次 MCP 服务器安全体检（v0.0.9）。
+
+    只读展示：findings 永不参与权限裁定、可见性或工具派发（docs 07 §5）。
+    checks 为空表示执行全部检测项（A1–A4 + B1–B4）。
+    """
+
+    type: Literal["mcp.scan"] = "mcp.scan"
+    server_id: str
+    checks: list[str] | None = None
+
+
 class GateRespond(Envelope):
     """用户对关卡确认卡片的响应（allow/deny）。"""
 
@@ -796,6 +808,21 @@ class GateResult(Envelope):
     decider: str = "policy"
 
 
+class McpScanResult(Envelope):
+    """MCP 安全体检结果（v0.0.9；证据已脱敏，只读展示）。
+
+    findings 元素为 {id,name,status,severity,evidence,suggestion}；
+    summary 为 {pass,warn,fail,skip} 计数。
+    """
+
+    type: Literal["mcp.scan.result"] = "mcp.scan.result"
+    server_id: str
+    server_name: str = ""
+    scanned_at: str = ""
+    findings: list[dict] = Field(default_factory=list)
+    summary: dict = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Skills 事件（v0.0.4）
 # ---------------------------------------------------------------------------
@@ -938,6 +965,7 @@ Request = Annotated[
         McpServerToggle,
         McpServerReconnect,
         McpServersRefresh,
+        McpScan,
         GateRespond,
         SkillToggle,
         SkillImport,
@@ -989,6 +1017,7 @@ Event = Annotated[
         ToolResult,
         GateRequest,
         GateResult,
+        McpScanResult,
         SkillList,
         SkillImported,
         ShellList,

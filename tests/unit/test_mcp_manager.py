@@ -99,8 +99,12 @@ def test_host_state_and_lifecycle(tmp_path):
     assert mgr.host_state() == "disabled"
 
 
-def test_security_scan_reserved_is_noop(tmp_path):
-    """安全检测为预留扩展点：默认 NullScanner 恒返回空，不影响既有行为。"""
+def test_security_scan_reports_findings(tmp_path):
+    """v0.0.9：默认检测器为 McpScanner。
+
+    stdio 服务器未连接时：A1/A2 记 skip（不涉及网络），A3 pass（无明文凭证），
+    其余主动/工具项无活连接记 skip；服务器不存在返回 None/空。
+    """
     store = ConfigStore(tmp_path)
     store.ensure_defaults()
     modules = store.load("modules")
@@ -109,5 +113,17 @@ def test_security_scan_reserved_is_noop(tmp_path):
 
     mgr = McpManager(Registry(), store, _NoSecrets())
     mgr.load()
-    assert mgr.scan("a") == []
+
+    findings = mgr.scan("a")
+    assert [f.id for f in findings] == ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4"]
+    by_id = {f.id: f.status for f in findings}
+    assert by_id["A1"] == "skip" and by_id["A2"] == "skip"
+    assert by_id["A3"] == "pass"
+    assert all(by_id[c] == "skip" for c in ("A4", "B1", "B2", "B3", "B4"))
     assert mgr.scan("missing") == []
+
+    report = mgr.scan_report("a")
+    assert report is not None
+    assert report["server_name"] == "A"
+    assert report["summary"]["pass"] == 1 and report["summary"]["skip"] == 7
+    assert mgr.scan_report("missing") is None

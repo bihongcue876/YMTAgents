@@ -38,6 +38,14 @@ _STATE_TEXT = {
     "stopping": "停止中",
 }
 
+# v0.0.9：安全检测状态（只读展示，不参与权限/派发）
+_SCAN_TEXT = {
+    "pass": "通过",
+    "warn": "注意",
+    "fail": "风险",
+    "skip": "不适用",
+}
+
 
 class ServerDialog(QDialog):
     """服务器编辑对话框；确定后返回配置 dict（不含任何明文密钥）。"""
@@ -160,11 +168,13 @@ class PluginsPage(QWidget):
     toggle_requested = Signal(str, bool)
     reconnect_requested = Signal(str)
     refresh_requested = Signal()
+    scan_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._servers: list[dict] = []
         self._tools: list[dict] = []
+        self._scans: dict[str, dict] = {}
 
         title = QLabel("MCP 插件")
         title.setObjectName("pageTitle")
@@ -218,6 +228,15 @@ class PluginsPage(QWidget):
                 server["error"] = error
         self._rebuild()
 
+    def update_scan(self, server_id: str, server_name: str, findings: list, summary: dict) -> None:
+        """记录一次安全体检结果（只读展示）。"""
+        self._scans[server_id] = {
+            "name": server_name,
+            "findings": list(findings or []),
+            "summary": dict(summary or {}),
+        }
+        self._rebuild()
+
     def _tools_for(self, server_id: str) -> list[dict]:
         return [t for t in self._tools if t.get("server") == server_id]
 
@@ -260,11 +279,16 @@ class PluginsPage(QWidget):
         enabled.setChecked(bool(server.get("enabled")))
         sid = server.get("id", "")
         enabled.toggled.connect(lambda checked, sid=sid: self._on_toggle(sid, checked))
+        scan = QPushButton("安全检测")
+        scan.setEnabled(state == "ready")
+        scan.setToolTip("连接就绪后可就地做一次安全体检（只读展示，不影响权限）")
+        scan.clicked.connect(lambda: self.scan_requested.emit(sid))
 
         head = QHBoxLayout()
         head.addWidget(name)
         head.addWidget(badge)
         head.addStretch(1)
+        head.addWidget(scan)
         head.addWidget(enabled)
         head.addWidget(reconnect)
         head.addWidget(edit)
@@ -288,7 +312,49 @@ class PluginsPage(QWidget):
             dim = QLabel("工具：无")
             dim.setObjectName("mutedNote")
             layout.addWidget(dim)
+        scan_result = self._scans.get(sid)
+        if scan_result:
+            layout.addWidget(self._scan_panel(scan_result))
         return card_frame
+
+    def _scan_panel(self, scan: dict) -> QWidget:
+        """安全检测结果面板：汇总计数 + 逐项（状态徽标 · 证据 · 建议）。只读。"""
+        box = QWidget()
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(0, 6, 0, 0)
+        outer.setSpacing(3)
+        summary = scan.get("summary", {})
+        head = QLabel(
+            "安全检测："
+            f"风险 {summary.get('fail', 0)} · 注意 {summary.get('warn', 0)} · "
+            f"通过 {summary.get('pass', 0)} · 不适用 {summary.get('skip', 0)}"
+        )
+        head.setObjectName("mutedNote")
+        outer.addWidget(head)
+        for finding in scan.get("findings", []):
+            status = finding.get("status", "")
+            badge = key_badge(
+                _SCAN_TEXT.get(status, status),
+                {"pass": True, "fail": False}.get(status),
+            )
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"{finding.get('id', '')} {finding.get('name', '')}"))
+            row.addWidget(badge)
+            row.addStretch(1)
+            outer.addLayout(row)
+            evidence = finding.get("evidence", "")
+            if evidence:
+                ev = QLabel(evidence)
+                ev.setWordWrap(True)
+                ev.setObjectName("mutedNote")
+                outer.addWidget(ev)
+            suggestion = finding.get("suggestion", "")
+            if suggestion:
+                sug = QLabel(f"建议：{suggestion}")
+                sug.setWordWrap(True)
+                sug.setObjectName("mutedNote")
+                outer.addWidget(sug)
+        return box
 
     # -- 交互 --------------------------------------------------------------
     def _prompt_server(self, server: dict | None) -> None:

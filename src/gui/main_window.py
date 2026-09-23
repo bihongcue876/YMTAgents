@@ -50,6 +50,8 @@ from shared.envelope import (
     McpServerToggle,
     McpServerUpsert,
     McpServersRefresh,
+    McpScan,
+    McpScanResult,
     SkillDelete,
     SkillImport,
     SkillPermission,
@@ -281,6 +283,7 @@ class MainWindow(QMainWindow):
         )
         pl.reconnect_requested.connect(lambda sid: self.bus.submit(McpServerReconnect(id=sid)))
         pl.refresh_requested.connect(lambda: self.bus.submit(McpServersRefresh()))
+        pl.scan_requested.connect(lambda sid: self.bus.submit(McpScan(server_id=sid)))
 
         sk = self.skills_page
         sk.toggle_requested.connect(
@@ -611,6 +614,10 @@ class MainWindow(QMainWindow):
             self.plugins_page.update_tools(event.tools)
         elif t == "mcp.server.status":
             self.plugins_page.update_status(event.id, event.state, event.tools, event.error)
+        elif t == "mcp.scan.result":
+            self.plugins_page.update_scan(
+                event.server_id, event.server_name, event.findings, event.summary
+            )
         elif t == "skill.list":
             self.skills_page.update_skills(event.skills)
         elif t == "skill.import.result":

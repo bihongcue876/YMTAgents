@@ -36,6 +36,45 @@ def test_plugins_page_renders_and_updates(qapp):
     assert page._body.count() >= 1
 
 
+def test_scan_button_and_panel(qapp):
+    """v0.0.9：安全检测按钮仅在就绪时可用；结果面板只读展示汇总与逐项。"""
+    page = PluginsPage()
+    page.update_servers([_server()])  # state="ready"
+    page.show()
+    qapp.processEvents()
+    try:
+        emitted: list = []
+        page.scan_requested.connect(emitted.append)
+
+        from PySide6.QtWidgets import QPushButton
+
+        scan = next(b for b in page.findChildren(QPushButton) if b.text() == "安全检测")
+        assert scan.isEnabled()
+        scan.click()
+        assert emitted == ["demo"]
+
+        # 未就绪的服务器：按钮禁用
+        page.update_servers([_server(state="stopped")])
+        qapp.processEvents()
+        scan = next(b for b in page.findChildren(QPushButton) if b.text() == "安全检测")
+        assert not scan.isEnabled()
+
+        # 结果面板：写入后重绘，摘要与证据可见
+        page.update_scan(
+            "demo", "演示",
+            [{"id": "A1", "name": "TLS/明文传输", "status": "fail", "evidence": "明文使用 HTTP", "suggestion": "改用 HTTPS"}],
+            {"pass": 4, "warn": 0, "fail": 1, "skip": 3},
+        )
+        qapp.processEvents()
+        from PySide6.QtWidgets import QLabel
+
+        text = " ".join(label.text() for label in page.findChildren(QLabel))
+        assert "风险 1" in text
+        assert "明文使用 HTTP" in text
+    finally:
+        page.close()
+
+
 def test_server_dialog_parses_pairs(qapp):
     server = {
         "id": "fs", "name": "文件", "transport": "stdio", "command": "python",
