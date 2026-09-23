@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
@@ -32,6 +32,9 @@ PANEL_MIN_PX = 180  # 展开时面板最小宽
 PANEL_MAX_PX = 360  # 展开时面板最大宽
 RAIL_BTN_W = RAIL_PX - 12  # 按钮宽 = rail 减左右边距
 RAIL_BTN_H = 34
+
+#: 组展开/折叠动画时长（毫秒）——太长显得拖沓，太短等于没有（rev58）
+ANIM_MS = 180
 
 #: 默认工作区在侧栏的展示名兜底（正常由 `WorkspaceList` 给出）。
 DEFAULT_LABEL = "默认工作区"
@@ -85,6 +88,11 @@ class Sidebar(QWidget):
         self._current_ws: str = WS_DEFAULT
         self._collapsed: set[str] = set()
         self._archived_open = False
+        # rev58 动画状态：折叠动画期间数据事件只更新缓存、不重建（动画收尾统一重建）；
+        # _anim_ws = 刚请求展开的组，重建时为它播入场动画
+        self._animating = False
+        self._anim_ws: str | None = None
+        self._anims: list[QPropertyAnimation] = []
 
         # -- 图标栏（折叠后仍保留；rev18：图标右侧带文字，只看图标猜不出功能） --
         # rev55：rail 收进 #railHost（surface 底 + 右分隔线），导航按钮带 checked 态
@@ -141,6 +149,18 @@ class Sidebar(QWidget):
         self._new.setObjectName("primaryButton")  # rev55：关键 CTA 用 accent 实底
         self._new.setFixedHeight(40)
         self._new.clicked.connect(self.new_session.emit)
+        # rev58：▾ 选工作区新建 —— 展开时动态填充（工作区列表会增删）
+        self._new_menu_btn = QPushButton("▾")
+        self._new_menu_btn.setObjectName("sideMenuBtn")
+        self._new_menu_btn.setFixedHeight(40)
+        self._new_menu_btn.setToolTip("选择工作区新建对话")
+        self._new_menu = QMenu(self)
+        self._new_menu.aboutToShow.connect(self._fill_new_menu)
+        self._new_menu_btn.setMenu(self._new_menu)
+        new_row = QHBoxLayout()
+        new_row.setSpacing(4)
+        new_row.addWidget(self._new, 1)
+        new_row.addWidget(self._new_menu_btn)
 
         self._list = QVBoxLayout()
         self._list.setAlignment(Qt.AlignTop)
@@ -155,7 +175,7 @@ class Sidebar(QWidget):
         self._panel = QWidget()
         panel_layout = QVBoxLayout(self._panel)
         panel_layout.setContentsMargins(4, 6, 6, 6)
-        panel_layout.addWidget(self._new)
+        panel_layout.addLayout(new_row)
         panel_layout.addWidget(scroll, 1)
 
         layout = QHBoxLayout(self)
@@ -192,14 +212,16 @@ class Sidebar(QWidget):
     def update_sessions(self, metas) -> None:
         """`SessionIndex` 到达：更新会话缓存（归属由 `meta.workspace_id` 给出）。"""
         self._metas = list(metas)
-        self._rebuild()
+        if not self._animating:  # rev58：折叠动画期间只刷缓存，收尾统一重建
+            self._rebuild()
 
     def update_workspaces(self, workspaces: list[dict], current: str, collapsed) -> None:
         """`WorkspaceList` 到达：更新工作区缓存 + 当前工作区 + 折叠态。"""
         self._workspaces = list(workspaces)
         self._current_ws = current or WS_DEFAULT
         self._collapsed = set(collapsed or [])
-        self._rebuild()
+        if not self._animating:
+            self._rebuild()
 
     def rebuild(self) -> None:
         """按当前字体度量重算行高后重建（字号档位切换后必须调用）。
@@ -306,17 +328,94 @@ class Sidebar(QWidget):
         header.setCursor(Qt.PointingHandCursor)
         header.setToolTip(self._group_tooltip(info))
         header.clicked.connect(
-            lambda _=False, wid=workspace_id, col=collapsed: self.collapse_workspace.emit(wid, not col)
+            lambda _=False, wid=workspace_id, col=collapsed: self._request_collapse(wid, not col)
         )
         header.setContextMenuPolicy(Qt.CustomContextMenu)
         header.customContextMenuRequested.connect(
             lambda pos, wid=workspace_id, w=header: self._workspace_menu(wid, w.mapToGlobal(pos))
         )
-        layout.addWidget(header)
+        # rev58：行尾常驻小 ＋ —— 一键在该工作区新建对话（不必再找右键菜单）
+        add_here = QPushButton("＋")
+        add_here.setObjectName("wsGroupAdd")
+        add_here.setCursor(Qt.PointingHandCursor)
+        add_here.setToolTip(f"在「{label}」新建对话")
+        add_here.setFixedWidth(26)
+        add_here.clicked.connect(lambda _=False, wid=workspace_id: self.new_session_in.emit(wid))
+        head_row = QHBoxLayout()
+        head_row.setContentsMargins(0, 0, 0, 0)
+        head_row.setSpacing(2)
+        head_row.addWidget(header, 1)
+        head_row.addWidget(add_here)
+        layout.addLayout(head_row)
 
         if not collapsed:
-            layout.addWidget(self._section_list(items, label, archived=archived))
+            lst = self._section_list(items, label, archived=archived)
+            layout.addWidget(lst)
+            if workspace_id == self._anim_ws and not archived:
+                # 刚请求展开的组：入场动画（0 → 实际行高），不再「整组砸下来」
+                self._anim_ws = None
+                target = lst.maximumHeight()  # _section_list 已 setFixedHeight，此处取目标值
+                lst.setMinimumHeight(0)
+                lst.setMaximumHeight(0)
+                self._animate_height(lst, target, lambda w=lst, h=target: w.setFixedHeight(h))
         return box
+
+    # -- 展开/折叠动画（rev58） --------------------------------------------
+    def _request_collapse(self, workspace_id: str, collapsed: bool) -> None:
+        """组头点击。信号**同步**发出（状态权威走主窗/设置，契约不变）：
+        - 折叠：先播收起动画，重建推迟到动画收尾（期间数据事件只刷缓存）；
+        - 展开：标记 _anim_ws，重建该组时由 _group 播入场动画。
+        动画只在面板**可见**时启用 —— 隐藏控件上的动画既无意义，且在离屏测试环境
+        触发过 Qt 访问违例（rev58 实测：plugins 页用例后折叠用例必崩），隐藏走即时路径。
+        """
+        if not collapsed:
+            if self.isVisible():
+                self._anim_ws = workspace_id
+            self.collapse_workspace.emit(workspace_id, False)
+            return
+        header = self.sender()
+        box = header.parent() if isinstance(header, QWidget) else None
+        lst = box.findChild(QListWidget) if box is not None else None
+        if lst is None or not self.isVisible():
+            self.collapse_workspace.emit(workspace_id, True)
+            return
+        self._animating = True
+        self.collapse_workspace.emit(workspace_id, True)  # 同步：主窗随即刷缓存（不重建）
+        lst.setMinimumHeight(0)  # setFixedHeight 锁住了 min/max，动画前必须先放 min
+        self._animate_height(lst, 0, self._finish_collapse)
+
+    def _finish_collapse(self) -> None:
+        self._animating = False
+        self._rebuild()
+
+    def _animate_height(self, widget: QWidget, target: int, on_finished=None) -> None:
+        anim = QPropertyAnimation(widget, b"maximumHeight", self)
+        anim.setDuration(ANIM_MS)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(widget.maximumHeight())
+        anim.setEndValue(target)
+        if on_finished is not None:
+            anim.finished.connect(on_finished)
+        anim.finished.connect(lambda a=anim: self._drop_anim(a))
+        self._anims.append(anim)  # 持有引用，防 GC 导致动画中止
+        anim.start()
+
+    def _drop_anim(self, anim: QPropertyAnimation) -> None:
+        if anim in self._anims:
+            self._anims.remove(anim)
+
+    def _fill_new_menu(self) -> None:
+        """「＋ 新对话」▾ 菜单：动态列出全部工作区（数据即缓存，展开时填充）。"""
+        self._new_menu.clear()
+        current_name = self._workspace_meta(self._current_ws).get("name") or DEFAULT_LABEL
+        first = self._new_menu.addAction(f"当前工作区（{current_name}）")
+        first.triggered.connect(lambda _=False: self.new_session.emit())
+        self._new_menu.addSeparator()
+        for info in self._workspaces:
+            wid = info.get("id") or WS_DEFAULT
+            name = info.get("name") or DEFAULT_LABEL
+            action = self._new_menu.addAction(f"在「{name}」新建")
+            action.triggered.connect(lambda _=False, w=wid: self.new_session_in.emit(w))
 
     @staticmethod
     def _group_tooltip(info: dict) -> str:
@@ -422,7 +521,8 @@ class Sidebar(QWidget):
         elif chosen == new_here:
             self.new_session_in.emit(workspace_id)
         elif chosen == collapse:
-            self.collapse_workspace.emit(workspace_id, workspace_id not in self._collapsed)
+            # 展开走 _request_collapse 可获入场动画（sender 非组头时折叠退化为即时）
+            self._request_collapse(workspace_id, workspace_id not in self._collapsed)
         elif chosen == rename:
             self.rename_workspace.emit(workspace_id)
         elif chosen == open_dir:

@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QMenu, QPushButton, QWidget
+
+from shared.ids import WS_DEFAULT
 
 
 class ChatHeader(QWidget):
@@ -15,10 +17,14 @@ class ChatHeader(QWidget):
     switch_model = Signal(str)
     switch_persona = Signal(str)
     new_session = Signal()
+    new_session_in = Signal(str)  # rev58：新建会话也可指定工作区（▾ 菜单）
     toggle_detail = Signal()  # rev24：会话详情右栏开关
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._workspaces: list[dict] = []
+        self._current_ws = WS_DEFAULT
+
         self._title = QLineEdit()
         self._title.setPlaceholderText("未命名会话")
         self._title.editingFinished.connect(self._commit_title)
@@ -33,6 +39,13 @@ class ChatHeader(QWidget):
 
         self._new = QPushButton("新建会话")
         self._new.clicked.connect(self.new_session.emit)
+        # rev58：▾ 选工作区新建 —— 与侧栏「＋ 新对话 ▾」同款入口
+        self._new_menu_btn = QPushButton("▾")
+        self._new_menu_btn.setObjectName("sideMenuBtn")
+        self._new_menu_btn.setToolTip("选择工作区新建会话")
+        self._new_menu = QMenu(self)
+        self._new_menu.aboutToShow.connect(self._fill_new_menu)
+        self._new_menu_btn.setMenu(self._new_menu)
 
         self._detail = QPushButton("详情")
         self._detail.setCheckable(True)
@@ -44,8 +57,31 @@ class ChatHeader(QWidget):
         layout.addWidget(self._persona)
         layout.addWidget(self._model)
         layout.addWidget(self._new)
+        layout.addWidget(self._new_menu_btn)
         layout.addWidget(self._detail)
         self._loading = False
+
+    def set_workspaces(self, workspaces: list[dict], current: str) -> None:
+        """rev58：工作区列表缓存（workspace.list 事件驱动），供 ▾ 菜单动态填充。"""
+        self._workspaces = list(workspaces)
+        self._current_ws = current or WS_DEFAULT
+
+    def _fill_new_menu(self) -> None:
+        self._new_menu.clear()
+        current_name = self._ws_name(self._current_ws)
+        first = self._new_menu.addAction(f"当前工作区（{current_name}）")
+        first.triggered.connect(lambda _=False: self.new_session.emit())
+        self._new_menu.addSeparator()
+        for info in self._workspaces:
+            wid = info.get("id") or WS_DEFAULT
+            action = self._new_menu.addAction(f"在「{info.get('name') or wid}」新建")
+            action.triggered.connect(lambda _=False, w=wid: self.new_session_in.emit(w))
+
+    def _ws_name(self, workspace_id: str) -> str:
+        for info in self._workspaces:
+            if (info.get("id") or WS_DEFAULT) == workspace_id:
+                return info.get("name") or workspace_id
+        return workspace_id
 
     def set_detail_active(self, active: bool) -> None:
         """与右栏实际可见性同步（右栏也可能被自身关闭按钮收起）。"""

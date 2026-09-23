@@ -18,6 +18,7 @@ class ChatView(QWidget):
     switch_persona = Signal(str)
     rename_session = Signal(str)
     new_session = Signal()
+    new_session_in = Signal(str)  # rev58：新建会话指定工作区（header ▾ 菜单）
     add_model = Signal()  # 空状态 CTA：跳模型配置页（rev9 §6）
     toggle_detail = Signal()  # rev24：会话详情右栏
 
@@ -49,6 +50,7 @@ class ChatView(QWidget):
         self.header.switch_model.connect(self.switch_model.emit)
         self.header.switch_persona.connect(self.switch_persona.emit)
         self.header.new_session.connect(self.new_session.emit)
+        self.header.new_session_in.connect(self.new_session_in.emit)
         self.header.toggle_detail.connect(self.toggle_detail.emit)
         self.input.send_message.connect(self._on_send)
         self.input.cancel.connect(self.cancel_turn.emit)
@@ -71,6 +73,10 @@ class ChatView(QWidget):
         self.header.set_models(providers, current)
         # 空状态文案随「有无供应商」切换：无 → 添加模型；有 → 开始对话
         self.empty.set_has_provider(bool(providers))
+
+    def update_workspaces(self, workspaces: list[dict], current: str) -> None:
+        """rev58：工作区列表转发给 header（▾ 新建菜单的数据源）。"""
+        self.header.set_workspaces(workspaces, current)
 
     def set_personas(self, personas, current: str | None) -> None:
         """角色下拉（rev23）：current = 当前会话所用角色（None → 全局默认）。"""

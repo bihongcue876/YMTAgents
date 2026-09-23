@@ -331,6 +331,20 @@ QPushButton#wsGroupHeader {{
 }}
 QPushButton#wsGroupHeader:hover {{ background: {p.surface}; color: {p.fg}; }}
 
+/* 组头行尾「在此新建」小按钮（rev58）：常驻透明、悬停显色，不与折叠语义抢点击 */
+QPushButton#wsGroupAdd {{
+    background: transparent; color: {p.muted};
+    border: none; border-radius: 6px; padding: 2px 2px;
+}}
+QPushButton#wsGroupAdd:hover {{ color: {p.accent}; background: {p.surface}; }}
+
+/* CTA 旁的下拉伴侣（rev58）：「＋ 新对话 ▾」「新建会话 ▾」——描边弱化、悬停描边显色 */
+QPushButton#sideMenuBtn {{
+    background: {p.surface}; color: {p.fg};
+    border: 1px solid {p.border}; border-radius: 6px; padding: 2px 10px;
+}}
+QPushButton#sideMenuBtn:hover {{ border-color: {p.accent}; color: {p.accent}; }}
+
 QLabel#wsBadge {{ color: {p.muted}; }}
 QLabel#wsBadge[wsState="current"] {{ color: {p.ok}; }}
 QLabel#wsBadge[wsState="missing"] {{ color: {p.danger}; }}

@@ -231,6 +231,7 @@ class MainWindow(QMainWindow):
 
         c = self.chat
         c.new_session.connect(lambda: self.bus.submit(NewSession()))
+        c.new_session_in.connect(lambda wid: self.bus.submit(NewSession(workspace_id=wid)))  # rev58
         c.send_message.connect(lambda text: self.bus.submit(SendMessage(text=text)))
         c.cancel_turn.connect(lambda: self.bus.submit(CancelTurn()))
         c.switch_model.connect(lambda mid: self.bus.submit(SwitchModel(slot="main", model_id=mid)))
@@ -639,6 +640,7 @@ class MainWindow(QMainWindow):
             self._collapsed_cache = list(event.collapsed)
             self.sidebar.update_workspaces(items, event.current, event.collapsed)
             self.workspaces_page.update_workspaces(items, event.current)
+            self.chat.update_workspaces(items, event.current)  # rev58：header ▾ 新建菜单数据源
         elif t == "workspace.detail.result":
             self.workspaces_page.on_detail(event)
 
