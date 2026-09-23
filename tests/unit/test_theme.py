@@ -145,6 +145,24 @@ def test_markdown_css_carries_font_size():
         assert f"font-size: {theme.font_px(token, 'xlarge')}px" in css
 
 
+def test_stylesheet_carries_card_and_terminal_tokens():
+    """rev57 回归锚点：内容卡片与经典终端的 objectName 必须在全局样式表中 ——
+    页面改造依赖这些 QSS 选择器，丢了就退回「控件平铺」的旧观感。"""
+    qss = theme.stylesheet("light")
+    assert "QFrame#card" in qss
+    assert "QLineEdit#termInput" in qss
+    assert "QWebEngineView#termView" in qss
+
+
+def test_terminal_css_is_fixed_dark():
+    """rev57 回归锚点：终端配色**恒**深底浅字，不随应用主题反转 ——
+    亮色主题下白底终端正是「不像终端」的根源；暗色映射保证深底可读。"""
+    t = theme.terminal_palette()
+    assert t.bg.lower() == "#0c0c0c"
+    css = theme.terminal_css()
+    assert t.bg in css and t.fg in css
+
+
 def test_apply_sets_font_size(qapp):
     try:
         theme.apply("light", "xlarge")
