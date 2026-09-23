@@ -22,7 +22,15 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.util import ClassNotFound
 
-from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME, ansi_colors, markdown_css, pygments_style
+from gui.theme import (
+    DARK,
+    DEFAULT_FONT_SIZE,
+    DEFAULT_THEME,
+    ansi_colors,
+    markdown_css,
+    pygments_style,
+    terminal_css,
+)
 
 _FORMATTER = HtmlFormatter(cssclass="highlight")
 _FORMATTERS: dict[str, HtmlFormatter] = {}
@@ -281,6 +289,17 @@ def ansi_inner(
     """
     attr = f' class="{klass}"' if klass else ""
     return _inner(theme, f"<pre{attr}>{_ansi_spans(text, theme)}</pre>", "", font_size)
+
+
+def terminal_inner(text: str, font_size: str | None = DEFAULT_FONT_SIZE, klass: str = "term") -> str:
+    """终端监视区 innerHTML 片段（rev57）：**经典终端配色**，恒深底浅字。
+
+    不随应用主题反转（亮色主题下白底终端「不像终端」）—— ANSI 色码固定用暗色映射
+    （深底可读），CSS 经 `theme.terminal_css` 提供，本模块不出现颜色字面量。
+    """
+    attr = f' class="{klass}"' if klass else ""
+    body = f"<pre{attr}>{_ansi_spans(text, DARK.name)}</pre>"
+    return f"<style>\n{terminal_css(font_size)}\n</style>\n{body}"
 
 
 def markdown_inner(

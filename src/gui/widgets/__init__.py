@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout
 
 
 def section_label(text: str) -> QLabel:
@@ -14,6 +14,20 @@ def section_label(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("sectionLabel")
     return label
+
+
+def card() -> tuple[QFrame, QVBoxLayout]:
+    """内容卡片（`card`）：配置页与列表页的模块容器（rev57）。
+
+    底色、边框、圆角由 theme QSS 提供；此处只定内边距与控件间距。
+    返回 (框架, 布局) —— 布局已挂到框架上，调用方直接往里放内容。
+    """
+    frame = QFrame()
+    frame.setObjectName("card")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setSpacing(6)
+    return frame, layout
 
 
 def key_badge(text: str, ok: bool | None = None) -> QLabel:

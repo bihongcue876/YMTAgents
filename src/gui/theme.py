@@ -81,6 +81,43 @@ DARK = Palette(
 PALETTES: dict[str, Palette] = {LIGHT.name: LIGHT, DARK.name: DARK}
 
 
+# ---------------------------------------------------------------------------
+# 经典终端配色（rev57）：终端监视区与命令输入行**不随应用主题反转** ——
+# 恒为深色控制台观感（与 VS Code「亮色主题 + 深色终端」同策略）。
+# 亮色主题下白底终端正是「不像终端」的根源，故终端走独立固定配色。
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class TerminalPalette:
+    name: str
+    bg: str
+    fg: str
+    border: str
+
+
+TERMINAL = TerminalPalette(
+    name="classic",
+    bg="#0C0C0C",  # Windows 控制台同款近黑
+    fg="#CCCCCC",
+    border="#3C4043",
+)
+
+
+def terminal_palette() -> TerminalPalette:
+    """终端专用配色（当前固定经典款；留函数入口便于将来扩展终端皮肤）。"""
+    return TERMINAL
+
+
+def terminal_css(font_size: str | None = None) -> str:
+    """终端监视区 HTML 的 CSS：深底浅字（等宽与留白由渲染骨架提供）。"""
+    t = terminal_palette()
+    fs = font_sizes(font_size)
+    return f"""
+body {{ background: {t.bg}; color: {t.fg}; font-size: {fs["code"]}px; }}
+pre {{ background: transparent; }}
+pre.term {{ color: {t.fg}; }}
+"""
+
+
 def theme_names() -> list[str]:
     """可选主题名（顺序即界面下拉顺序）。"""
     return list(PALETTES)
@@ -150,6 +187,7 @@ def pygments_style(name: str | None) -> str:
 def stylesheet(name: str | None, font_size: str | None = None) -> str:
     """全应用 QSS。以 token 渲染，主题或字号切换即整体换肤/重排。"""
     p = palette(name)
+    t = terminal_palette()
     fs = font_sizes(font_size)
     return f"""
 QWidget {{ background: {p.bg}; color: {p.fg}; font-size: {fs["ui"]}px; }}
@@ -297,6 +335,29 @@ QLabel#wsBadge {{ color: {p.muted}; }}
 QLabel#wsBadge[wsState="current"] {{ color: {p.ok}; }}
 QLabel#wsBadge[wsState="missing"] {{ color: {p.danger}; }}
 QLabel#wsBadge[wsState="external"] {{ color: {p.warn}; }}
+
+/* 内容卡片（rev57）：配置页与列表页的模块容器 —— surface 底 + 圆角 + 内边距。
+   卡内输入控件回 bg 底，形成「页面 < 卡片 < 控件」三层；模块分隔不再靠空白硬挤 */
+QFrame#card {{
+    background: {p.surface};
+    border: 1px solid {p.border};
+    border-radius: 8px;
+}}
+QFrame#card QLineEdit, QFrame#card QSpinBox, QFrame#card QComboBox,
+QFrame#card QPlainTextEdit, QFrame#card QTextEdit, QFrame#card QTextBrowser,
+QFrame#card QListWidget, QFrame#card QTableWidget, QFrame#card QTreeWidget {{
+    background: {p.bg};
+}}
+
+/* 经典终端（rev57）：监视区与命令输入行恒为深色控制台观感，不随应用主题反转
+   （与 VS Code「亮色主题 + 深色终端」同策略）；t.border 只描边，不参与反色 */
+QLineEdit#termInput {{
+    background: {t.bg}; color: {t.fg};
+    border: 1px solid {t.border}; border-radius: 6px; padding: 4px 8px;
+    selection-background-color: {p.accent}; selection-color: {p.bg};
+}}
+QLineEdit#termInput:disabled {{ color: {p.muted}; background: {p.surface}; }}
+QWebEngineView#termView {{ border: 1px solid {t.border}; border-radius: 6px; }}
 """
 
 
