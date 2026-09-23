@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -34,7 +35,7 @@ from shared.ids import PRV, new_id
 from shared.net import is_local_url
 
 from gui import theme
-from gui.widgets import section_label, text_fit
+from gui.widgets import card, section_label, text_fit
 
 #: 云端预设（URL 即 OpenAI 兼容端点；Cherry Studio 式「选预设 → 填 Key → 取模型」）
 CLOUD_PRESETS = {
@@ -370,10 +371,22 @@ class ModelsPage(QWidget):
         self._title = QLabel("模型配置")
         self._title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
         add = QPushButton("添加供应商")
+        add.setObjectName("primaryButton")
         add.clicked.connect(self._on_add)
+        head = QHBoxLayout()
+        head.addWidget(self._title)
+        head.addStretch(1)
+        head.addWidget(add)
 
         self._list = QVBoxLayout()
         self._list.setAlignment(Qt.AlignTop)
+        self._list.setSpacing(8)
+        holder = QWidget()
+        holder.setLayout(self._list)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(holder)
 
         self._main_slot = QComboBox()
         self._main_slot.setEditable(True)  # 支持直接输入自定义模型
@@ -391,17 +404,20 @@ class ModelsPage(QWidget):
             self._other_slots.append(combo)
             slot_form.addRow(name, combo)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._title)
-        layout.addWidget(add)
-        layout.addLayout(self._list)
-        layout.addSpacing(12)
-        layout.addWidget(section_label("槽位"))
+        # 槽位分区入卡（rev57）：模块有自己的容器，不再与卡片列表挤在一起
+        slot_card, slot_box = card()
+        slot_box.addWidget(section_label("槽位"))
         self._note = QLabel("「上次使用」自动记录你最近选择的模型，新对话从它开始；无需手动设默认。")
         self._note.setObjectName("mutedNote")
         self._note.setWordWrap(True)
-        layout.addWidget(self._note)
-        layout.addLayout(slot_form)
+        slot_box.addWidget(self._note)
+        slot_box.addLayout(slot_form)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(head)
+        layout.addWidget(scroll, 1)
+        layout.addSpacing(8)
+        layout.addWidget(slot_card)
         self._loading = False
         self.refresh_metrics()
 
@@ -441,16 +457,16 @@ class ModelsPage(QWidget):
         self._badges.clear()
 
         if not self._providers:
-            self._list.addWidget(QLabel("尚无供应商。点击「添加供应商」开始。"))
+            empty = QLabel("尚无供应商。点击「添加供应商」开始。")
+            empty.setObjectName("mutedNote")
+            self._list.addWidget(empty)
             return
 
         for provider in self._providers:
             self._list.addWidget(self._make_card(provider))
 
     def _make_card(self, provider: ProviderSpec) -> QFrame:
-        card = QFrame()
-        card.setFrameShape(QFrame.StyledPanel)
-        layout = QVBoxLayout(card)
+        card_frame, layout = card()
 
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{provider.name}</b>"))
@@ -512,7 +528,7 @@ class ModelsPage(QWidget):
             row.addWidget(thinking)
             row.addStretch(1)
             layout.addLayout(row)
-        return card
+        return card_frame
 
     @staticmethod
     def _reasoning_text(model) -> str:

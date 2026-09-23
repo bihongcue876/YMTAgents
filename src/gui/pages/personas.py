@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -23,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.widgets import key_badge, section_label
+from gui.widgets import card, key_badge, section_label
 
 
 class PersonaDialog(QDialog):
@@ -82,22 +81,23 @@ class PersonasPage(QWidget):
         self._title = QLabel("角色配置")
         self._title.setObjectName("pageTitle")
         add = QPushButton("新建角色")
+        add.setObjectName("primaryButton")
         add.clicked.connect(self._on_add)
         imp = QPushButton("导入角色")
         imp.clicked.connect(self._on_import)
         self._list = QVBoxLayout()
         self._list.setAlignment(Qt.AlignTop)
+        self._list.setSpacing(8)
 
-        actions = QHBoxLayout()
-        actions.addWidget(add)
-        actions.addWidget(imp)
-        actions.addStretch(1)
+        head = QHBoxLayout()
+        head.addWidget(self._title)
+        head.addStretch(1)
+        head.addWidget(add)
+        head.addWidget(imp)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._title)
-        layout.addLayout(actions)
-        layout.addLayout(self._list)
-        layout.addStretch(1)
+        layout.addLayout(head)
+        layout.addLayout(self._list, 1)
         self._personas: list = []
 
     def update_personas(self, event) -> None:
@@ -112,9 +112,7 @@ class PersonasPage(QWidget):
 
     # -- 卡片 --------------------------------------------------------------
     def _make_card(self, p) -> QWidget:
-        card = QFrame()
-        card.setFrameShape(QFrame.StyledPanel)
-        layout = QVBoxLayout(card)
+        card_frame, layout = card()
 
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{p.name}</b>"))
@@ -149,7 +147,7 @@ class PersonasPage(QWidget):
         actions.addWidget(delete)
         actions.addStretch(1)
         layout.addLayout(actions)
-        return card
+        return card_frame
 
     # -- 动作 --------------------------------------------------------------
     def _on_add(self) -> None:

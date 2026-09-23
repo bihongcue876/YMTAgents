@@ -14,13 +14,14 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from gui import theme
-from gui.widgets import section_label, text_fit
+from gui.widgets import card, section_label, text_fit
 
 VERSION = "0.0.2"
 
@@ -36,10 +37,16 @@ class SettingsPage(QWidget):
         self._title = QLabel("系统设置")
         self._title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._title)
-        layout.addWidget(section_label("外观"))
-        layout.addLayout(self._build_appearance())
+        # rev57：五个分区各入一张卡片 —— 模块分隔靠容器，不再靠空白与小字标题硬挤
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(10)
+
+        appearance_card, appearance_box = card()
+        appearance_box.addWidget(section_label("外观"))
+        appearance_box.addLayout(self._build_appearance())
+        body.addWidget(appearance_card)
+
         # rev24：全局上下文策略取消 → 改为「每会话」设置，此处只留指引
         self._context_note = QLabel(
             "上下文策略已改为按对话独立设置：在对话右侧「详情」面板中调整本会话的"
@@ -47,16 +54,39 @@ class SettingsPage(QWidget):
         )
         self._context_note.setObjectName("mutedNote")
         self._context_note.setWordWrap(True)
-        layout.addWidget(self._context_note)
-        layout.addWidget(section_label("网络白名单"))
-        layout.addLayout(self._build_whitelist())
-        layout.addWidget(section_label("数据"))
-        layout.addLayout(self._build_data())
-        layout.addWidget(section_label("日志与诊断"))
-        layout.addLayout(self._build_logging())
-        layout.addWidget(section_label("关于"))
-        layout.addWidget(QLabel(f"言明通 / YMTAgents　版本 {VERSION}"))
-        layout.addStretch(1)
+        body.addWidget(self._context_note)
+
+        whitelist_card, whitelist_box = card()
+        whitelist_box.addWidget(section_label("网络白名单"))
+        whitelist_box.addLayout(self._build_whitelist())
+        body.addWidget(whitelist_card)
+
+        data_card, data_box = card()
+        data_box.addWidget(section_label("数据"))
+        data_box.addLayout(self._build_data())
+        body.addWidget(data_card)
+
+        logging_card, logging_box = card()
+        logging_box.addWidget(section_label("日志与诊断"))
+        logging_box.addLayout(self._build_logging())
+        body.addWidget(logging_card)
+
+        about_card, about_box = card()
+        about_box.addWidget(section_label("关于"))
+        about_box.addWidget(QLabel(f"言明通 / YMTAgents　版本 {VERSION}"))
+        body.addWidget(about_card)
+        body.addStretch(1)
+
+        holder = QWidget()
+        holder.setLayout(body)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(holder)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._title)
+        layout.addWidget(scroll, 1)
         self.refresh_metrics()
 
     # -- 分区构建（rev22：原 111 行构造器按分区拆开，组装顺序即页面顺序） -----

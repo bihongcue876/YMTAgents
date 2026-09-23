@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -28,6 +27,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from gui.widgets import card, key_badge
 
 _STATE_TEXT = {
     "stopped": "未启动",
@@ -172,27 +173,32 @@ class PluginsPage(QWidget):
             "MCP 服务器是外部代码，请仅接入可信来源；凭据只以 vault:// 引用存储。"
         )
         subtitle.setWordWrap(True)
+        subtitle.setObjectName("mutedNote")
 
         self._add = QPushButton("＋ 添加服务器")
+        self._add.setObjectName("primaryButton")
         self._add.clicked.connect(self._on_add)
         self._refresh = QPushButton("刷新")
         self._refresh.clicked.connect(self.refresh_requested.emit)
-        top = QHBoxLayout()
-        top.addWidget(self._add)
-        top.addWidget(self._refresh)
-        top.addStretch(1)
+        head = QHBoxLayout()
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(self._add)
+        head.addWidget(self._refresh)
 
         self._body = QVBoxLayout()
+        self._body.setAlignment(Qt.AlignTop)
+        self._body.setSpacing(8)
         holder = QWidget()
         holder.setLayout(self._body)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(holder)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        layout.addLayout(head)
         layout.addWidget(subtitle)
-        layout.addLayout(top)
         layout.addWidget(scroll, 1)
 
     # -- 数据 --------------------------------------------------------------
@@ -233,13 +239,13 @@ class PluginsPage(QWidget):
         self._body.addStretch(1)
 
     def _card(self, server: dict) -> QWidget:
-        card = QFrame()
-        card.setFrameShape(QFrame.StyledPanel)
+        card_frame, layout = card()
         name = QLabel(f"<b>{server.get('name', '')}</b>　·　{server.get('transport', '')}")
         name.setTextFormat(Qt.RichText)
         state = server.get("state", "stopped")
-        badge = QLabel(_STATE_TEXT.get(state, state))
-        badge.setObjectName("stateBadge")
+        # 徽标复用 keyBadge 三态：就绪=绿、错误=红、其余中性（rev57；
+        # 原 stateBadge 在 QSS 中无样式，纯文本无状态感）
+        badge = key_badge(_STATE_TEXT.get(state, state), {"ready": True, "error": False}.get(state))
 
         edit = QPushButton("编辑")
         edit.clicked.connect(lambda: self._on_edit(server))
@@ -261,26 +267,25 @@ class PluginsPage(QWidget):
         head.addWidget(edit)
         head.addWidget(remove)
 
-        layout = QVBoxLayout(card)
         layout.addLayout(head)
         error = server.get("error")
         if error:
             err = QLabel(f"错误：{error}")
             err.setWordWrap(True)
-            err.setObjectName("toolDim")
+            err.setObjectName("mutedNote")
             layout.addWidget(err)
         tools = self._tools_for(server.get("id", ""))
         if tools:
             tool_text = "　".join(f"{t.get('original', t.get('name'))}（{t.get('permission')}）" for t in tools)
             tool_label = QLabel(f"工具：{tool_text}")
             tool_label.setWordWrap(True)
-            tool_label.setObjectName("toolDim")
+            tool_label.setObjectName("mutedNote")
             layout.addWidget(tool_label)
         elif state == "ready":
             dim = QLabel("工具：无")
-            dim.setObjectName("toolDim")
+            dim.setObjectName("mutedNote")
             layout.addWidget(dim)
-        return card
+        return card_frame
 
     # -- 交互 --------------------------------------------------------------
     def _prompt_server(self, server: dict | None) -> None:

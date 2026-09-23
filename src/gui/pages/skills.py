@@ -14,7 +14,6 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -24,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.widgets import key_badge
+from gui.widgets import card, key_badge
 
 PERMISSIONS = ("safe", "confirm", "restricted")
 _PERM_TEXT = {"safe": "自动", "confirm": "确认", "restricted": "禁用"}
@@ -47,30 +46,31 @@ class SkillsPage(QWidget):
             "需要时自行调用读取正文并遵循。只提供指令，不提供能力。"
         )
         self._hint.setWordWrap(True)
-        self._hint.setObjectName("mutedLabel")
+        self._hint.setObjectName("mutedNote")
 
         imp_dir = QPushButton("导入目录")
+        imp_dir.setObjectName("primaryButton")
         imp_dir.clicked.connect(self._on_import_dir)
         imp_git = QPushButton("Git 导入")
         imp_git.clicked.connect(self._on_import_git)
         refresh = QPushButton("刷新")
         refresh.clicked.connect(self.refresh_requested.emit)
 
-        actions = QHBoxLayout()
-        actions.addWidget(imp_dir)
-        actions.addWidget(imp_git)
-        actions.addWidget(refresh)
-        actions.addStretch(1)
+        head = QHBoxLayout()
+        head.addWidget(self._title)
+        head.addStretch(1)
+        head.addWidget(imp_dir)
+        head.addWidget(imp_git)
+        head.addWidget(refresh)
 
         self._list = QVBoxLayout()
         self._list.setAlignment(Qt.AlignTop)
+        self._list.setSpacing(8)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._title)
+        layout.addLayout(head)
         layout.addWidget(self._hint)
-        layout.addLayout(actions)
-        layout.addLayout(self._list)
-        layout.addStretch(1)
+        layout.addLayout(self._list, 1)
         self._skills: list[dict] = []
         self._data_root = ""
 
@@ -87,7 +87,7 @@ class SkillsPage(QWidget):
         if not self._skills:
             empty = QLabel("还没有技能。点「导入目录」选择一个含 SKILL.md 的文件夹，或从 Git 仓库导入。")
             empty.setWordWrap(True)
-            empty.setObjectName("mutedLabel")
+            empty.setObjectName("mutedNote")
             self._list.addWidget(empty)
             return
         for info in self._skills:
@@ -95,9 +95,7 @@ class SkillsPage(QWidget):
 
     # -- 卡片 --------------------------------------------------------------
     def _make_card(self, info: dict) -> QWidget:
-        card = QFrame()
-        card.setFrameShape(QFrame.StyledPanel)
-        layout = QVBoxLayout(card)
+        card_frame, layout = card()
 
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{info.get('name', info['id'])}</b>"))
@@ -117,11 +115,11 @@ class SkillsPage(QWidget):
         if info.get("error"):
             err = QLabel(f"解析失败：{info['error']}")
             err.setWordWrap(True)
-            err.setObjectName("mutedLabel")
+            err.setObjectName("mutedNote")
             layout.addWidget(err)
         if info.get("source"):
             src = QLabel(f"来源：{info['source']}")
-            src.setObjectName("mutedLabel")
+            src.setObjectName("mutedNote")
             layout.addWidget(src)
 
         actions = QHBoxLayout()
@@ -160,7 +158,7 @@ class SkillsPage(QWidget):
         actions.addWidget(delete)
         actions.addStretch(1)
         layout.addLayout(actions)
-        return card
+        return card_frame
 
     # -- 动作 --------------------------------------------------------------
     def _on_import_dir(self) -> None:

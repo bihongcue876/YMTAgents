@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -31,6 +30,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from gui.widgets import card, section_label
 
 #: 数据落点档（值 → 界面文案）。`inline` 是用户裁决的默认档（D3）。
 DATA_HOME_CHOICES = (
@@ -179,16 +180,18 @@ class WorkspacesPage(QWidget):
             "（记忆与文档，默认在该目录内的 .ymtdata）。默认工作区恒存在、不可移除。"
         )
         self._hint.setWordWrap(True)
-        self._hint.setObjectName("mutedLabel")
+        self._hint.setObjectName("mutedNote")
 
         new_btn = QPushButton("＋ 新建工作区")
+        new_btn.setObjectName("primaryButton")
         new_btn.clicked.connect(self._on_create)
         refresh = QPushButton("刷新")
         refresh.clicked.connect(self.refresh_requested.emit)
-        actions = QHBoxLayout()
-        actions.addWidget(new_btn)
-        actions.addWidget(refresh)
-        actions.addStretch(1)
+        head = QHBoxLayout()
+        head.addWidget(self._title)
+        head.addStretch(1)
+        head.addWidget(new_btn)
+        head.addWidget(refresh)
 
         self._cards = QVBoxLayout()
         self._cards.setAlignment(Qt.AlignTop)
@@ -200,25 +203,25 @@ class WorkspacesPage(QWidget):
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(holder)
 
-        self._files_title = QLabel("文件")
-        self._files_title.setObjectName("mutedLabel")
+        files_card, files_box = card()
+        self._files_title = section_label("文件")
         self._files = QListWidget()
         self._files_note = QLabel("选中一个工作区的「文件」即可查看（列表有深度与数量上限）。")
         self._files_note.setWordWrap(True)
-        self._files_note.setObjectName("mutedLabel")
+        self._files_note.setObjectName("mutedNote")
+        files_box.addWidget(self._files_title)
+        files_box.addWidget(self._files)
+        files_box.addWidget(self._files_note)
 
         notice = QLabel(NOTICE)
         notice.setWordWrap(True)
-        notice.setObjectName("mutedLabel")
+        notice.setObjectName("mutedNote")
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._title)
+        layout.addLayout(head)
         layout.addWidget(self._hint)
-        layout.addLayout(actions)
         layout.addWidget(scroll, 1)
-        layout.addWidget(self._files_title)
-        layout.addWidget(self._files)
-        layout.addWidget(self._files_note)
+        layout.addWidget(files_card)
         layout.addWidget(notice)
 
         self._workspaces: list[dict] = []
@@ -245,7 +248,7 @@ class WorkspacesPage(QWidget):
         if not self._workspaces:
             empty = QLabel("还没有工作区。点「＋ 新建工作区」新建，或点「刷新」重读登记表。")
             empty.setWordWrap(True)
-            empty.setObjectName("mutedLabel")
+            empty.setObjectName("mutedNote")
             self._cards.addWidget(empty)
             return
         for info in self._workspaces:
@@ -286,9 +289,7 @@ class WorkspacesPage(QWidget):
 
     # -- 卡片 --------------------------------------------------------------
     def _card(self, info: dict) -> QWidget:
-        card = QFrame()
-        card.setFrameShape(QFrame.StyledPanel)
-        layout = QVBoxLayout(card)
+        card_frame, layout = card()
 
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{info.get('name', info.get('id', ''))}</b>"))
@@ -314,23 +315,23 @@ class WorkspacesPage(QWidget):
         ):
             row = QLabel(f"{caption}：{value or '—'}")
             row.setWordWrap(True)
-            row.setObjectName("mutedLabel")
+            row.setObjectName("mutedNote")
             layout.addWidget(row)
 
         if info.get("note"):
             note = QLabel(info["note"])
             note.setWordWrap(True)
-            note.setObjectName("mutedLabel")
+            note.setObjectName("mutedNote")
             layout.addWidget(note)
         if info.get("build_cmd"):
             build = QLabel(f"构建命令：{info['build_cmd']}")
             build.setWordWrap(True)
-            build.setObjectName("mutedLabel")
+            build.setObjectName("mutedNote")
             layout.addWidget(build)
         if info.get("missing"):
             warn = QLabel("该目录已不存在（可能被移动或删除）：仍可更换目录，或移除这条登记。")
             warn.setWordWrap(True)
-            warn.setObjectName("mutedLabel")
+            warn.setObjectName("mutedNote")
             layout.addWidget(warn)
 
         actions = QHBoxLayout()
@@ -356,7 +357,7 @@ class WorkspacesPage(QWidget):
         actions.addWidget(remove)
         actions.addStretch(1)
         layout.addLayout(actions)
-        return card
+        return card_frame
 
     # -- 动作 --------------------------------------------------------------
     def _on_create(self) -> None:

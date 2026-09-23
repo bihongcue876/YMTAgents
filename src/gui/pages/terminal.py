@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -29,7 +28,8 @@ from PySide6.QtWidgets import (
 )
 
 from gui import theme
-from gui.widgets.render.md import ansi_inner
+from gui.widgets import card
+from gui.widgets.render.md import terminal_inner
 from gui.widgets.render.view import RendererView
 
 #: 每个 shell 的监视缓冲上限（行 / 字符双保险，防长跑内存膨胀）。
@@ -71,31 +71,40 @@ class TerminalPage(QWidget):
             "shell 内命令的网络行为不受本应用出口白名单约束。"
         )
         subtitle.setWordWrap(True)
+        subtitle.setObjectName("mutedNote")
 
         self._add = QPushButton("＋ 新建终端")
+        self._add.setObjectName("primaryButton")
         self._add.clicked.connect(self.spawn_requested.emit)
         self._refresh = QPushButton("刷新")
         self._refresh.clicked.connect(self.refresh_requested.emit)
         self._summary = QLabel("")
         self._summary.setObjectName("mutedNote")
         self._summary.setWordWrap(True)
-        top = QHBoxLayout()
-        top.addWidget(self._add)
-        top.addWidget(self._refresh)
-        top.addWidget(self._summary, 1)
+        head = QHBoxLayout()
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(self._add)
+        head.addWidget(self._refresh)
+        head.addWidget(self._summary, 1)
 
         self._cards_holder = QWidget()
         self._cards = QVBoxLayout(self._cards_holder)
         self._cards.setContentsMargins(0, 0, 0, 0)
+        self._cards.setAlignment(Qt.AlignTop)
+        self._cards.setSpacing(8)
         cards_scroll = QScrollArea()
         cards_scroll.setWidgetResizable(True)
+        cards_scroll.setFrameShape(QScrollArea.NoFrame)
         cards_scroll.setWidget(self._cards_holder)
 
-        # -- 监视区 --
+        # -- 监视区（经典终端观感：深色监视窗 + 深色命令行输入行，rev57） --
         self._monitor_head = QLabel("监视：未选择终端")
         self._monitor_head.setObjectName("mutedNote")
         self._monitor = RendererView()
+        self._monitor.setObjectName("termView")
         self._input = QLineEdit()
+        self._input.setObjectName("termInput")
         self._input.setPlaceholderText("选中一个终端后，可在此直接输入命令（Enter 执行）")
         self._input.returnPressed.connect(self._on_send_input)
         self._send = QPushButton("发送")
@@ -120,9 +129,8 @@ class TerminalPage(QWidget):
         split.setSizes([200, 400])
 
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        layout.addLayout(head)
         layout.addWidget(subtitle)
-        layout.addLayout(top)
         layout.addWidget(split, 1)
 
         self._sync_input_enabled()
@@ -192,8 +200,7 @@ class TerminalPage(QWidget):
 
     def _card(self, shell: dict) -> QWidget:
         shell_id = str(shell.get("id", ""))
-        card = QFrame()
-        card.setFrameShape(QFrame.StyledPanel)
+        card_frame, layout = card()
         head = QLabel(f"<b>{shell_id}</b>　·　{shell.get('kind', '')}")
         head.setTextFormat(Qt.RichText)
         state = str(shell.get("state", "ready"))
@@ -227,11 +234,10 @@ class TerminalPage(QWidget):
         last_label.setObjectName("mutedNote")
         last_label.setWordWrap(True)
 
-        layout = QVBoxLayout(card)
         layout.addLayout(row)
         layout.addWidget(detail)
         layout.addWidget(last_label)
-        return card
+        return card_frame
 
     def _select(self, shell_id: str) -> None:
         self._selected = shell_id
@@ -252,8 +258,8 @@ class TerminalPage(QWidget):
             return
         if not self._selected:
             self._monitor_head.setText("监视：未选择终端")
-            self._monitor.set_stream(ansi_inner("", self._theme, self._font_size, klass="term"),
-                                     bg=theme.palette(self._theme).bg)
+            self._monitor.set_stream(terminal_inner("", self._font_size),
+                                     bg=theme.terminal_palette().bg)
             return
         kind = next(
             (s.get("kind", "") for s in self._shells if s.get("id") == self._selected), ""
@@ -261,8 +267,8 @@ class TerminalPage(QWidget):
         self._monitor_head.setText(f"监视：{self._selected} · {kind}")
         text = "".join(self._buffers.get(self._selected, []))
         self._monitor.set_stream(
-            ansi_inner(text, self._theme, self._font_size, klass="term"),
-            bg=theme.palette(self._theme).bg,
+            terminal_inner(text, self._font_size),
+            bg=theme.terminal_palette().bg,
             jump_bottom=True,
         )
 
