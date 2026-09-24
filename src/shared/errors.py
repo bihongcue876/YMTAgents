@@ -47,6 +47,12 @@ class ErrorCode(str, Enum):
     WORKSPACE_DENIED = "workspace_denied"
     # DPIM 库 root 命中宿主禁设清单或重复登记。
     LIBRARY_DENIED = "library_denied"
+    # v0.0.11（D-1 内置工具面板）：一码一义，只增真正用到的码。
+    TOOL_UNKNOWN = "tool_unknown"  # 请求操作的内置工具名不存在
+    # v0.0.11：文件工具三码（spec-2026-09-24-file-tools §4）——一码一义。
+    FILE_NOT_FOUND = "file_not_found"  # 读侧目标不存在
+    EDIT_NO_MATCH = "edit_no_match"  # old_string 在文件中不存在
+    EDIT_AMBIGUOUS = "edit_ambiguous"  # old_string 命中多处且未指定 replace_all
 
 
 # 码 → 前端中文提示（单一来源）。具体场景可在 message 中补充对象与操作指引。
@@ -77,6 +83,10 @@ ERROR_TEXT: dict[str, str] = {
     ErrorCode.TOOL_BACKEND_ERROR.value: "工具后端错误",
     ErrorCode.WORKSPACE_DENIED.value: "该位置不可作为工作区",
     ErrorCode.LIBRARY_DENIED.value: "该位置不可作为书库目录",
+    ErrorCode.FILE_NOT_FOUND.value: "文件或路径不存在",
+    ErrorCode.EDIT_NO_MATCH.value: "未找到要替换的文本",
+    ErrorCode.EDIT_AMBIGUOUS.value: "要替换的文本命中多处，需更精确的片段",
+    ErrorCode.TOOL_UNKNOWN.value: "该内置工具不存在",
 }
 
 

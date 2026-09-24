@@ -26,7 +26,14 @@ from shared.ids import WS, WS_DEFAULT, new_id
 from shared.redact import redact
 from shared.schema import WorkspaceIndex, WorkspaceRecord, WorkspaceSettings
 
-from core.store.atomic import atomic_write_json, atomic_write_text, backup_file
+from core.store.atomic import (
+    apply_eol,
+    atomic_write_json,
+    atomic_write_text,
+    atomic_write_text_exact,
+    backup_file,
+    eol_of_file,
+)
 
 from core.workspace import layout
 from core.workspace.layout import WorkspaceDenied, WorkspacePathError
@@ -700,7 +707,9 @@ class WorkspaceManager(IWorkspaceManager):
         root = layout.resolve_root(record.root_kind, record.root, self._data_root)
         if not root.is_dir():
             raise WorkspacePathError("工作区目录不存在。")
-        data = str(redact(str(content or "")) or "")
+        # v0.0.11（D-4）：落盘**不改写**内容 —— 脱敏只作用于日志 / 审计 / 事件 / 回显。
+        # 旧实现先过 redact 再落盘，会把文件里含 sk- / api_key= 的正常文本替换成掩码。
+        data = str(content or "")
         if len(data.encode("utf-8")) > self.MAX_FILE_BYTES:
             raise WorkspacePathError("内容超过 256 KB，拒绝写入。")
         target = layout.resolve_relative_file(root, path, must_exist=not create)
@@ -708,8 +717,10 @@ class WorkspaceManager(IWorkspaceManager):
             raise WorkspacePathError("目标不是普通文件。")
         if not target.parent.is_dir():
             raise WorkspacePathError("目标目录不存在。")
+        # v0.0.11（D-11）：沿用目标文件既有行尾，避免编辑一次就把 CRLF 全量改成 LF。
+        eol = eol_of_file(target) if target.is_file() else "\n"
         backup_file(target)
-        atomic_write_text(target, data)
+        atomic_write_text_exact(target, apply_eol(data, eol))
         size = len(data.encode("utf-8"))
         self._audit("workspace.file_write", workspace_id=workspace_id, bytes=size, created=create)
         return {

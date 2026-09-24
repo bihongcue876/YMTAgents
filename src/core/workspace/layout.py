@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-#: `inline` 数据落点的目录名（用户裁决 2026-09-22 D3：默认在工作区之中建此目录）。
-DATA_HOME_DIRNAME = ".ymtdata"
+# v0.0.11（D-2）：路径原语单一来源在 core.files.paths（工作区与文件工具共用）。
+from core.files.paths import DATA_HOME_DIRNAME, abs_path, is_under, path_key, same_path
+
+#: `inline` 数据落点的目录名（用户裁决 2026-09-22 D3）。
+#: **单一来源在 core.files.paths**，本模块只做导入（v0.0.11 D-2）。
 
 #: 托管工作区的分配区：`<数据根>/workspaces/<ws_id>/`。
 #: 禁设校验要**放行**此区（宿主自己在此分配），而拒绝数据根下的其它位置。
@@ -38,28 +40,6 @@ class WorkspaceDenied(WorkspacePathError):
     前者归 `invalid_request`（格式不合法），本类归 `denied`（策略不许），
     使界面能给出「为什么不行」而不是笼统的「格式不合法」。
     """
-
-
-def abs_path(path: str | Path) -> Path:
-    """规范化绝对路径（**不查文件系统**：不解析符号链接、`strict=False`）。
-
-    用 `abspath`（纯字符串拼接 + normpath）而非 `Path.resolve()` —— 后者会查询
-    文件系统解析链接，使「纯函数」不再可独立测试，且对被删目录行为不稳定。
-    """
-    return Path(os.path.abspath(str(path)))
-
-
-def path_key(path: str | Path) -> str:
-    """路径同一性键（Windows 大小写不敏感 + 统一分隔符）。
-
-    用途：记忆级联去重（`active == default` 时两层同一物理文件）、
-    以及工作区 root 撞车检测。
-    """
-    return os.path.normcase(os.path.abspath(str(path)))
-
-
-def same_path(a: str | Path, b: str | Path) -> bool:
-    return path_key(a) == path_key(b)
 
 
 def _safe_relative(value: str, what: str) -> str:
@@ -102,15 +82,6 @@ def resolve_data_home(
             raise WorkspacePathError("自定义数据落点必须指定目录。")
         return abs_path(text)
     raise WorkspacePathError(f"未知的 data_home_kind：{data_home_kind!r}")
-
-
-def is_under(child: str | Path, parent: str | Path) -> bool:
-    """`child` 是否在 `parent` 之内（含自身）。大小写不敏感（Windows 语义）。"""
-    child_key = path_key(child)
-    parent_key = path_key(parent)
-    if child_key == parent_key:
-        return True
-    return child_key.startswith(parent_key.rstrip("\\/") + os.sep)
 
 
 def forbid_reason(candidate: str | Path, data_root: str | Path) -> str | None:

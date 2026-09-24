@@ -36,6 +36,15 @@ log = logging.getLogger(__name__)
 #: confirm 关卡等待上限（docs 09 §3：超时视为拒绝）。
 GATE_TIMEOUT_S = 300.0
 
+
+def _guide_priority(name: str) -> int:
+    """指引段的截断优先级：内置（0）> 技能（1）> MCP（2）。"""
+    if name.startswith("mcp."):
+        return 2
+    if name.startswith("skill."):
+        return 1
+    return 0
+
 #: 工具输出内联上限（字符）：超过则外置到会话目录，事件流只留预览（output_ref）。
 INLINE_OUTPUT_CHARS = 8000
 
@@ -70,6 +79,10 @@ class IToolExecutor(ABC):
     @abstractmethod
     def tools_tokens(self) -> int:
         """工具定义的输入侧 token 估算（单列预算段）。"""
+
+    @abstractmethod
+    def tool_prompt_blocks(self) -> list[tuple[str, str]]:
+        """当前可见工具的**使用指引**（名字, prompt_block），按 内置 > 技能 > MCP 排序。"""
 
     @abstractmethod
     def execute(self, call_id: str, name: str, args: dict, ctx: ToolContext | None = None) -> ToolResult:
@@ -139,6 +152,32 @@ class ToolExecutor(IToolExecutor):
         for payload in self.tool_payloads():
             total += estimate_tokens(json.dumps(payload, ensure_ascii=False))
         return total
+
+    def tool_prompt_blocks(self) -> list[tuple[str, str]]:
+        """可见工具的 prompt_block（缺省空的工具不进指引段）。
+
+        排序即**截断优先级**：内置（0）> 技能（1）> MCP（2），同级按名字稳定排序。
+        """
+        items: list[tuple[int, str, str]] = []
+        for spec in self.visible_specs():
+            block = " ".join(str(getattr(spec, "prompt_block", "") or "").split())
+            if not block:
+                continue
+            items.append((_guide_priority(spec.name), spec.name, block))
+        items.sort(key=lambda item: (item[0], item[1]))
+        return [(name, block) for _priority, name, block in items]
+
+    def _preview(self, spec: ToolSpec, args: dict) -> dict:
+        """关卡预览（对照模式，v0.0.11）：由工具注册的 builder 生成，异常一律回退空预览。"""
+        builder = getattr(spec, "preview", None)
+        if not callable(builder):
+            return {}
+        try:
+            data = builder(args or {})
+        except Exception:  # noqa: BLE001 - 预览失败不阻断关卡
+            log.exception("生成关卡预览失败：%s", spec.name)
+            return {}
+        return dict(data) if isinstance(data, dict) else {}
 
     # -- 执行 --------------------------------------------------------------
     def _find_spec(self, name: str) -> ToolSpec | None:
@@ -235,6 +274,12 @@ class ToolExecutor(IToolExecutor):
                     self._persist_gate(call_id, "deny", "policy", ctx)
                     self.audit("gate.decision", tool=name, decision="deny", decider="policy")
                     return reason or error_text(ErrorCode.TOOL_DENIED.value)
+                if kind == "allow":
+                    # v0.0.11（α 方案）：策略**显式放行** ⇒ 跳过关卡。
+                    # precheck 只降低打扰、从不提权：声明档仍是 confirm，区外调用照旧弹卡。
+                    self._persist_gate(call_id, "allow", "policy", ctx)
+                    self.audit("gate.decision", tool=name, decision="skip", decider="policy")
+                    return None
                 warn = reason
 
         if permission == Permission.SAFE.value:
@@ -246,7 +291,12 @@ class ToolExecutor(IToolExecutor):
         # confirm：向 UI 请求确认（含参数原文），等待用户裁决；无裁决通道时 fail-closed。
         # `warn` 非空 = 按参数判定的高危：卡片以 restricted 档呈现，用户一眼可见。
         label = Permission.RESTRICTED.value if warn else permission
-        self.emit(GateRequest(call_id=call_id, name=name, args=args, permission=label))
+        self.emit(
+            GateRequest(
+                call_id=call_id, name=name, args=args, permission=label,
+                preview=self._preview(spec, args),
+            )
+        )
         allow = bool(self._gate(call_id, name, args, permission)) if self._gate is not None else False
         self._persist_gate(call_id, "allow" if allow else "deny", "user", ctx)
         self.audit("gate.decision", tool=name, decision="allow" if allow else "deny", decider="user")

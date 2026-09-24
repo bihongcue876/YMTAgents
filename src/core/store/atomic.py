@@ -39,6 +39,48 @@ def atomic_write_text(path: Path, text: str) -> None:
             time.sleep(_REPLACE_DELAYS[attempt])
 
 
+def atomic_write_text_exact(path: Path, text: str) -> None:
+    """原子写入文本且**保持原行尾、不创建父目录**（v0.0.11 D-11）。
+
+    与 atomic_write_text 的两点差异，都是文件工具的硬要求：
+    - newline="" 不做换行翻译（CRLF 保持 CRLF）；
+    - 不 mkdir：父目录不存在应由调用方判为参数错误，而不是被静默补齐。
+    """
+    tmp = _tmp_path(path)
+    with tmp.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+    for attempt in range(_REPLACE_RETRIES + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt >= _REPLACE_RETRIES:
+                raise
+            time.sleep(_REPLACE_DELAYS[attempt])
+
+
+def detect_eol(text: str) -> str:
+    """文本换行风格：出现 CRLF 即判 CRLF，否则 LF。"""
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def apply_eol(text: str, eol: str) -> str:
+    """把已归一为 LF 的文本恢复为指定行尾（LF 时原样返回）。"""
+    if eol == "\n":
+        return text
+    return text.replace("\r\n", "\n").replace("\n", eol)
+
+
+def eol_of_file(path: Path, *, sample: int = 65536) -> str:
+    """目标文件既有的换行风格（只取样前 64 KB）；不存在或不可读则按 LF。"""
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(sample)
+    except OSError:
+        return "\n"
+    return detect_eol(raw.decode("utf-8", errors="ignore"))
+
+
 def atomic_write_json(path: Path, obj: Any) -> None:
     """原子写入 JSON（缩进 2，非 ASCII 原样）。"""
     atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
