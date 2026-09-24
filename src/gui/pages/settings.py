@@ -22,17 +22,44 @@ from PySide6.QtWidgets import (
 
 from gui import theme
 from gui.widgets import card, section_label, text_fit
+from gui.widgets.switch import Switch
 
 VERSION = "0.0.8"
+
+#: 附加功能显示名（切片 0）；未知 name 回退原名。
+_FEATURE_LABELS = {
+    "mcp": "MCP 工具",
+    "shell": "Shell 终端",
+    "skills": "技能（Skills）",
+    "btcm": "副思考链（BTCM）",
+    "dpim": "小图书馆（DPIM）",
+}
+_FEATURE_DESCRIPTIONS = {
+    "mcp": "连接外部 MCP 服务器并使用其工具",
+    "shell": "为 Agent 提供本地终端命令工具",
+    "skills": "按需向模型提供技能指令",
+    "btcm": "对疑难问题进行副思考与验证",
+    "dpim": "管理本地书库、记录外部对话并查看来源关系",
+}
+_FEATURE_STATES = {
+    "ready": "已就绪",
+    "degraded": "部分可用",
+    "error": "运行异常",
+    "disabled": "已关闭",
+    "unavailable": "暂未接入",
+}
 
 
 class SettingsPage(QWidget):
     settings_update = Signal(str, object)  # section, data
+    feature_toggle = Signal(str, bool)  # name, enabled（切片 0 滑动开关）
 
     def __init__(self, data_root: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._root = Path(data_root) if data_root else Path(".")
         self._loading = False
+        self._loading_features = False
+        self._feature_rows: dict[str, tuple[QWidget, QLabel, QLabel, QLabel, Switch]] = {}
 
         self._title = QLabel("系统设置")
         self._title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
@@ -46,6 +73,21 @@ class SettingsPage(QWidget):
         appearance_box.addWidget(section_label("外观"))
         appearance_box.addLayout(self._build_appearance())
         body.addWidget(appearance_card)
+
+        features_card, features_box = card()
+        features_box.addWidget(section_label("附加功能"))
+        note = QLabel(
+            "滑动开关控制各附加功能的启停：关闭 = 真卸载（不注册工具、无后台活动）；"
+            "开启 = 按需装配。尚未接入的模块会显示为禁用状态。"
+        )
+        note.setObjectName("mutedNote")
+        note.setWordWrap(True)
+        features_box.addWidget(note)
+        self._features_box = QVBoxLayout()
+        self._features_box.setContentsMargins(0, 0, 0, 0)
+        self._features_box.setSpacing(0)
+        features_box.addLayout(self._features_box)
+        body.addWidget(features_card)
 
         # rev24：全局上下文策略取消 → 改为「每会话」设置，此处只留指引
         self._context_note = QLabel(
@@ -196,6 +238,92 @@ class SettingsPage(QWidget):
         for rule in data.get("network", {}).get("whitelist", []):
             self._whitelist.addItem(rule)
         self._loading = False
+
+    def set_features(self, features: list[dict]) -> None:
+        """按 `feature.state` 更新附加功能行；复用控件，避免状态回推时整卡重建。"""
+        self._loading_features = True
+        try:
+            items = [item for item in (features or []) if item.get("name")]
+            names = {str(item["name"]) for item in items}
+
+            # 暂时摘出布局项；仍存在的行控件复用，只有清单中消失的行才销毁。
+            while self._features_box.count():
+                self._features_box.takeAt(0)
+            for name in set(self._feature_rows) - names:
+                row, _label, _description, _badge, _switch = self._feature_rows.pop(name)
+                row.setParent(None)
+                row.deleteLater()
+
+            for info in items:
+                name = str(info["name"])
+                row_parts = self._feature_rows.get(name)
+                if row_parts is None:
+                    row = QWidget()
+                    row.setObjectName("featureRow")
+                    row_layout = QHBoxLayout(row)
+                    row_layout.setContentsMargins(8, 7, 8, 7)
+                    row_layout.setSpacing(12)
+
+                    copy = QVBoxLayout()
+                    copy.setContentsMargins(0, 0, 0, 0)
+                    copy.setSpacing(2)
+                    heading = QHBoxLayout()
+                    heading.setContentsMargins(0, 0, 0, 0)
+                    heading.setSpacing(8)
+                    label = QLabel()
+                    label.setObjectName("featureName")
+                    heading.addWidget(label)
+                    badge = QLabel()
+                    badge.setObjectName("featureState")
+                    heading.addWidget(badge)
+                    heading.addStretch(1)
+                    description = QLabel()
+                    description.setObjectName("featureDescription")
+                    description.setWordWrap(True)
+                    copy.addLayout(heading)
+                    copy.addWidget(description)
+
+                    switch = Switch()
+                    switch.setObjectName("featureSwitch")
+                    switch.setProperty("featureName", name)
+                    switch.toggled.connect(
+                        lambda checked, n=name: self._on_feature_toggled(n, checked)
+                    )
+                    switch.setAccessibleName(f"{_FEATURE_LABELS.get(name, name)} 启用")
+                    row_layout.addLayout(copy, 1)
+                    row_layout.addWidget(switch)
+                    row_parts = (row, label, description, badge, switch)
+                    self._feature_rows[name] = row_parts
+
+                row, label, description, badge, switch = row_parts
+                label.setText(_FEATURE_LABELS.get(name, name))
+                description.setText(_FEATURE_DESCRIPTIONS.get(name, ""))
+                state = str(info.get("state", "disabled"))
+                available = bool(info.get("available", True))
+                enabled = bool(info.get("enabled", False))
+                if not available:
+                    state_text = _FEATURE_STATES["unavailable"]
+                    switch.setToolTip("此模块尚未接入，当前不可启用。")
+                else:
+                    state_text = _FEATURE_STATES.get(state, state)
+                    if enabled and state == "disabled":
+                        state_text = "尚未就绪"
+                    switch.setToolTip("关闭将卸载此功能；开启将按需装配。")
+                badge.setText(state_text)
+                badge.setProperty("featureState", state)
+                badge.setProperty("featureName", name)
+                theme.restyle(badge)
+                switch.setEnabled(available)
+                switch.setChecked(enabled)
+                self._features_box.addWidget(row)
+                row.show()
+        finally:
+            self._loading_features = False
+
+    def _on_feature_toggled(self, name: str, checked: bool) -> None:
+        if self._loading_features:
+            return
+        self.feature_toggle.emit(name, bool(checked))
 
     def _on_level_changed(self, value: str) -> None:
         if not self._loading:

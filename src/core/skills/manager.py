@@ -82,6 +82,20 @@ class SkillManager:
     def _effective_permission(self, skill_id: str, default: str) -> str:
         return self._plugins().skills.permissions.get(skill_id, default)
 
+    # -- 附加功能契约（切片 0）----------------------------------------------
+    def activate(self) -> None:
+        """装配：预置复制 + 扫描 + 注册启用技能。"""
+        self.reload()
+
+    def deactivate(self) -> None:
+        """真卸载：注销全部 `skill.*`（不删磁盘、不改期望态；再开即恢复）。"""
+        for spec in self.registry.snapshot():
+            if spec.name.startswith("skill."):
+                self.registry.unregister(spec.name)
+
+    def host_state(self) -> str:
+        return "ready"
+
     # -- 生命周期 -----------------------------------------------------------
     def reload(self) -> None:
         """预置复制 → 目录扫描调和 → 重新注册全部启用技能（幂等，启动与变更后调用）。"""

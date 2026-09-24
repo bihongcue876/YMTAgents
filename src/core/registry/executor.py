@@ -54,6 +54,8 @@ class ToolContext:
     session_id: str
     turn_seq: int = 0
     cancel: object | None = None
+    #: 本次调用的 call_id（切片 2）：供工具把内部子流（如 `think.*`）与调用关联。
+    call_id: str = ""
 
 
 class IToolExecutor(ABC):
@@ -179,6 +181,8 @@ class ToolExecutor(IToolExecutor):
             self.audit("tool.invoke", tool=name, permission=permission, ok=False, code=ErrorCode.TOOL_DENIED.value)
             return result
 
+        if ctx is not None and not ctx.call_id:
+            ctx.call_id = call_id
         started = time.monotonic()
         try:
             result = self.registry.execute(name, args, ctx)

@@ -94,7 +94,16 @@ class McpManager:
         modules.mcp.servers = list(self._configs.values())
         self._config_store.save("modules", modules)
 
-    # ---------- 生命周期 ----------
+    # ---------- 生命周期（附加功能契约，切片 0）----------
+    def activate(self) -> None:
+        """装配：读配置 + 启动已启用 server（无启用 server 时零影响）。"""
+        self.load()
+        self.start_all()
+
+    def deactivate(self) -> None:
+        """真卸载：断开全部 server → 注销其工具（对象随即被 FeatureManager 断开引用）。"""
+        self.shutdown()
+
     def start_all(self) -> None:
         for cid, cfg in self._configs.items():
             if cfg.enabled:

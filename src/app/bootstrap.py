@@ -21,15 +21,13 @@ from core.agent.session import SessionStore
 from core.bus.bridge import BusBridge
 from core.bus.sink import EventSink
 from core.gateway.provider import ModelGateway
-from core.mcp.manager import McpManager
+from core.modules.manager import FeatureManager
 from core.modules.supervisor import ModuleSupervisor
 from core.registry.executor import ToolExecutor
 from core.registry.registry import Registry
 from core.security.dpapi import DpapiBox
 from core.security.legacy import LegacyKeyring, migrate_keyring_to_vault
 from core.security.vault import ISecretStore, Vault
-from core.shell.manager import ShellManager
-from core.skills.manager import SkillManager
 from core.store.config_store import ConfigStore
 from core.store.migrate import migrate_all
 from core.workspace.manager import WorkspaceManager
@@ -51,10 +49,13 @@ class AppContext:
     worker: CoreWorker
     personas: PersonaStore
     secrets: ISecretStore
-    mcp_manager: McpManager
+    #: 附加功能生命周期（切片 0）：宿主启停的唯一真值 + 惰性装配/真卸载。
+    features: FeatureManager
+    #: 以下为**初始快照**（便利字段，供集成测试/旧调用读取）；运行期启停请走 `features.host()`。
+    mcp_manager: object | None
     executor: ToolExecutor
-    skill_manager: SkillManager
-    shell_manager: ShellManager
+    skill_manager: object | None
+    shell_manager: object | None
     workspace_manager: WorkspaceManager
 
 
@@ -90,43 +91,102 @@ def bootstrap(
     # 零子进程、零网络；登记表不可读时按空表加载并留可读提示（不阻断启动）。
     workspace_manager = WorkspaceManager(root, config_store, audit=sink.append_audit)
     workspace_manager.load()
-    # v0.0.4：Skills 宿主（预置复制 + 注册启用技能；无启用技能时零影响）。
-    skill_manager = SkillManager(
-        config_store,
-        registry,
-        root / "skills",
-        audit=sink.append_audit,
-        presets_dir=Path(__file__).resolve().parent.parent / "core" / "skills" / "presets",
-    )
-    skill_manager.reload()
-    # rev41/rev43/rev44：MCP 宿主 + 工具执行器（无启用的 server 时宿主为 disabled，零影响）。
-    mcp_manager = McpManager(
-        registry, config_store, secret_store, audit=sink.append_audit, emit=bridge.emit_event
-    )
-    mcp_manager.load()
-    # v0.0.5：shell 宿主。**启动零子进程** —— 此处只读配置 + 探测解释器（which），
-    # 首次 shell.exec 才 spawn（惰性）；无解释器时工具不注册、宿主态 error（不阻断启动）。
-    shell_manager = ShellManager(
-        registry, config_store, audit=sink.append_audit, emit=bridge.emit_event
-    )
-    shell_manager.load()
+    # 切片 0：附加功能生命周期。宿主由工厂**惰性构造**（关档不 import）；
+    # 仅装配 `modules.json → features` 中已启用者（默认 mcp/shell/skills 开，btcm/dpim 关）。
+    features = FeatureManager(config_store, audit=sink.append_audit, emit=bridge.emit_event)
+
+    def _mcp_factory():
+        from core.mcp.manager import McpManager
+
+        return McpManager(
+            registry, config_store, secret_store, audit=sink.append_audit, emit=bridge.emit_event
+        )
+
+    def _shell_factory():
+        from core.shell.manager import ShellManager
+
+        # 启动零子进程：activate 只读配置 + 探测解释器（which），首次 shell.exec 才 spawn。
+        def _session_workspace(session_id: str) -> tuple[str | None, str | None]:
+            try:
+                meta = session_store.get_meta(session_id)
+                workspace_id = meta.workspace_id or "ws_default"
+                return workspace_id, str(workspace_manager.root_of(meta.workspace_id))
+            except Exception:  # noqa: BLE001 - 无效/旧会话回退 shell.cwd 配置
+                return None, None
+
+        return ShellManager(
+            registry, config_store, audit=sink.append_audit, emit=bridge.emit_event,
+            resolve_workspace=_session_workspace,
+        )
+
+    def _skills_factory():
+        from core.skills.manager import SkillManager
+
+        return SkillManager(
+            config_store,
+            registry,
+            root / "skills",
+            audit=sink.append_audit,
+            presets_dir=Path(__file__).resolve().parent.parent / "core" / "skills" / "presets",
+        )
+
+    def _btcm_factory():
+        from core.modules.btcm.manager import BtcmManager
+
+        def _session_model(sid: str) -> str | None:
+            return session_store.get_meta(sid).main_model
+
+        return BtcmManager(
+            registry,
+            config_store,
+            gateway,
+            emit=bridge.emit_event,
+            audit=sink.append_audit,
+            resolve_session_model=_session_model,
+        )
+
+    def _dpim_factory():
+        from core.modules.dpim.manager import DpimManager
+
+        return DpimManager(
+            registry,
+            root,
+            gateway,
+            config_store,
+            audit=sink.append_audit,
+        )
+
+    features.register("mcp", _mcp_factory)
+    features.register("shell", _shell_factory)
+    features.register("skills", _skills_factory)
+    features.register("btcm", _btcm_factory)
+    features.register("dpim", _dpim_factory)
+    features.load()
+
     executor = ToolExecutor(
         registry, store=session_store, emit=bridge.emit_event, audit=sink.append_audit
     )
+
+    def _workspace_memory_paths(session_id: str) -> list[Path]:
+        meta = session_store.get_meta(session_id)
+        return workspace_manager.cascade_dirs(meta.workspace_id)
+
+    def _workspace_root(session_id: str) -> Path:
+        meta = session_store.get_meta(session_id)
+        return workspace_manager.root_of(meta.workspace_id)
+
     agent = AgentLoop(
         session_store, gateway, bridge.emit_event, root, config_store,
-        personas=personas, executor=executor,
+        personas=personas, executor=executor, workspace_memory_paths=_workspace_memory_paths,
+        workspace_root=_workspace_root,
     )
     controller = CoreController(
         bridge, session_store, gateway, agent, supervisor, registry, config_store, root,
-        personas=personas, executor=executor, mcp_manager=mcp_manager,
-        skill_manager=skill_manager, shell_manager=shell_manager,
+        personas=personas, executor=executor, features=features,
         workspace_manager=workspace_manager,
     )
-    # 启用的 server 在此启动；连接失败只落 server 状态（不阻断启动）。
-    mcp_manager.start_all()
     controller.refresh_modules()
-    worker = CoreWorker(bridge, controller.handle)
+    worker = CoreWorker(bridge, controller.handle, on_stop=features.shutdown)
     worker.start()
 
     return AppContext(
@@ -142,9 +202,10 @@ def bootstrap(
         worker=worker,
         personas=personas,
         secrets=secret_store,
-        mcp_manager=mcp_manager,
+        features=features,
+        mcp_manager=features.host("mcp"),
         executor=executor,
-        skill_manager=skill_manager,
-        shell_manager=shell_manager,
+        skill_manager=features.host("skills"),
+        shell_manager=features.host("shell"),
         workspace_manager=workspace_manager,
     )
