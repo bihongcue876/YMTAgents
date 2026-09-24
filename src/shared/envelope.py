@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Union, get_args
 
-from pydantic import BaseModel, Field, TypeAdapter, field_serializer
+from pydantic import BaseModel, Field, TypeAdapter, field_serializer, model_validator
 
 
 def _now() -> datetime:
@@ -105,8 +105,10 @@ class SessionMeta(BaseModel):
 # ---------------------------------------------------------------------------
 class SendMessage(Envelope):
     type: Literal["msg.user"] = "msg.user"
-    text: str
-    attachments: list[str] = Field(default_factory=list)  # 相对 workspace/files 的路径
+    text: str = Field(max_length=100_000)
+    attachments: list[Annotated[str, Field(min_length=1, max_length=512)]] = Field(
+        default_factory=list, max_length=20
+    )  # 相对当前工作区 root；核心侧另回退 default workspace/files
 
 
 class CancelTurn(Envelope):
@@ -444,7 +446,7 @@ class HealthReport(Envelope):
 
 class ErrorReport(Envelope):
     type: Literal["error"] = "error"
-    scope: Literal["session", "config", "gateway", "system"] = "system"
+    scope: Literal["session", "config", "gateway", "system", "library"] = "system"
     code: str = "internal"
     message: str = ""
     detail: str | None = None
@@ -715,12 +717,253 @@ class WorkspaceDetail(Envelope):
     path: str = ""
 
 
+class WorkspaceMemoryWrite(Envelope):
+    """显式写入工作区级 AGENTS.md；不提供 Agent 自主写入通道。"""
+
+    type: Literal["workspace.memory_write"] = "workspace.memory_write"
+    scope: Literal["current", "default", "specific"] = "current"
+    workspace_id: str | None = Field(default=None, max_length=64)
+    mode: Literal["append", "replace"] = "append"
+    text: str = Field(min_length=1, max_length=20_000)
+
+    @model_validator(mode="after")
+    def _specific_requires_id(self) -> WorkspaceMemoryWrite:
+        if self.scope == "specific" and not self.workspace_id:
+            raise ValueError("scope=specific 时必须提供 workspace_id。")
+        return self
+
+
+class WorkspaceBuild(Envelope):
+    """执行已登记构建命令；UI 负责逐次展示完整命令并取得本次显式点击。"""
+
+    type: Literal["workspace.build"] = "workspace.build"
+    id: str = Field(min_length=1, max_length=64)
+
+
+class WorkspaceFileRead(Envelope):
+    """读取工作区内一个文本文件（GUI 编辑器用；不做二进制猜测）。"""
+
+    type: Literal["workspace.file_read"] = "workspace.file_read"
+    id: str = Field(min_length=1, max_length=64)
+    path: str = Field(min_length=1, max_length=512)
+
+
+class WorkspaceFileWrite(Envelope):
+    """写回工作区内一个文本文件（GUI 编辑器用；原子写 + 一代备份）。
+
+    仅经界面显式触发：不注册为模型工具、不新增 agent 写通道（能力面零扩张）。
+    """
+
+    type: Literal["workspace.file_write"] = "workspace.file_write"
+    id: str = Field(min_length=1, max_length=64)
+    path: str = Field(min_length=1, max_length=512)
+    content: str = Field(max_length=262_144)
+    create: bool = False
+
+
 class MoveSession(Envelope):
     """把会话挪到另一工作区（`workspace_id=None` = 默认工作区）。"""
 
     type: Literal["session.move"] = "session.move"
     session_id: str
     workspace_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# 小图书馆（DPIM）：管理请求只由核心线程落盘，Agent 查询工具只读。
+# ---------------------------------------------------------------------------
+class LibraryCreate(Envelope):
+    type: Literal["library.create"] = "library.create"
+    name: str = Field(min_length=1, max_length=80)
+    root_kind: Literal["managed", "external"] = "managed"
+    root: str | None = Field(default=None, max_length=4096)
+    group: str | None = Field(default=None, max_length=60)
+    model_ref: str = Field(default="main", min_length=1, max_length=200)
+    note: str = Field(default="", max_length=1000)
+
+
+class LibraryUpdate(Envelope):
+    type: Literal["library.update"] = "library.update"
+    id: str = Field(min_length=1, max_length=64)
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    root: str | None = Field(default=None, max_length=4096)
+    group: str | None = Field(default=None, max_length=60)
+    model_ref: str | None = Field(default=None, min_length=1, max_length=200)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class LibraryDelete(Envelope):
+    """移除登记，不删除库文件。"""
+
+    type: Literal["library.delete"] = "library.delete"
+    id: str = Field(min_length=1, max_length=64)
+
+
+class LibrarySwitch(Envelope):
+    type: Literal["library.switch"] = "library.switch"
+    id: str = Field(min_length=1, max_length=64)
+
+
+class LibraryRefresh(Envelope):
+    """重读登记表；id 指定时只修复该库派生图，否则重读索引。"""
+
+    type: Literal["library.refresh"] = "library.refresh"
+    id: str | None = Field(default=None, max_length=64)
+
+
+class LibraryDetail(Envelope):
+    type: Literal["library.detail"] = "library.detail"
+    id: str = Field(min_length=1, max_length=64)
+    event_offset: int = Field(default=0, ge=0, le=10_000_000)
+    event_limit: int = Field(default=50, ge=1, le=200)
+    graph_limit: int = Field(default=300, ge=1, le=1000)
+    graph_library_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] | None = Field(
+        default=None, max_length=20
+    )
+    focus_event_id: str | None = Field(default=None, max_length=64)
+
+
+class LibraryIngest(Envelope):
+    type: Literal["library.ingest"] = "library.ingest"
+    id: str = Field(min_length=1, max_length=64)
+    text: str = Field(default="", max_length=100_000)
+    event_type: Literal["interaction", "data", "source"] = "interaction"
+    index: bool = True
+    #: 指定时重试或跳过既有事件；不再追加新原文。
+    event_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _content_or_existing_event(self) -> LibraryIngest:
+        if bool(self.event_id) == bool(self.text.strip()):
+            raise ValueError("必须且只能提供新文本或既有 event_id。")
+        return self
+
+
+class LibraryQuery(Envelope):
+    type: Literal["library.query"] = "library.query"
+    lib_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] | None = Field(
+        default=None, max_length=100
+    )
+    query: str = Field(min_length=1, max_length=4000)
+    mode: Literal["hybrid", "events", "nodes"] = "hybrid"
+    top_k: int = Field(default=8, ge=1, le=50)
+
+
+# ---------------------------------------------------------------------------
+# 附加功能总开关（切片 0，用户 2026-09-24 裁决）
+# ---------------------------------------------------------------------------
+class FeatureToggle(Envelope):
+    """二态滑动开关：`关` = 真卸载（不 import/不注册/无后台/释放引用），`开` = 惰性装配。"""
+
+    type: Literal["feature.toggle"] = "feature.toggle"
+    name: str
+    enabled: bool
+
+
+class FeatureState(Envelope):
+    """附加功能态推送：每项 `{name, enabled, state, available}`。
+
+    `available=False` 表示 schema 中已声明、但当前没有可装配宿主；界面仍可展示，不能启用。
+    唯一启停真值仍是 `modules.json → features`。
+    """
+
+    type: Literal["feature.state"] = "feature.state"
+    features: list[dict] = Field(default_factory=list)
+
+
+class LibraryList(Envelope):
+    type: Literal["library.list"] = "library.list"
+    libraries: list[dict] = Field(default_factory=list)
+    current: str | None = None
+    error: str = ""
+
+
+class LibraryDetailResult(Envelope):
+    type: Literal["library.detail.result"] = "library.detail.result"
+    id: str
+    root: str = ""
+    counts: dict = Field(default_factory=dict)
+    events: list[dict] = Field(default_factory=list)
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)
+    event_offset: int = 0
+    event_limit: int = 50
+    truncated: bool = False
+    error: str = ""
+
+
+class LibraryIngestResult(Envelope):
+    type: Literal["library.ingest.result"] = "library.ingest.result"
+    id: str
+    event_id: str = ""
+    status: Literal["raw", "indexed", "linked", "failed", "skipped"] = "raw"
+    indexed: bool = False
+    message: str = ""
+
+
+class LibraryQueryResult(Envelope):
+    type: Literal["library.query.result"] = "library.query.result"
+    query: str
+    library_ids: list[str] = Field(default_factory=list)
+    results: list[dict] = Field(default_factory=list)
+    debug: list[dict] = Field(default_factory=list)
+
+
+class LibraryGraphResult(Envelope):
+    type: Literal["library.graph.result"] = "library.graph.result"
+    library_ids: list[str] = Field(default_factory=list)
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)
+    truncated: bool = False
+
+
+# ---------------------------------------------------------------------------
+# 副思考链（BTCM，切片 2/3）
+# ---------------------------------------------------------------------------
+class BtcmUpdate(Envelope):
+    """更新副思考链子选项（开启后的手动/自动、指定槽位）。"""
+
+    type: Literal["btcm.update"] = "btcm.update"
+    trigger: Literal["manual", "auto"] | None = None
+    slot: str | None = None
+
+
+class BtcmState(Envelope):
+    """副思考链态推送（子选项 + 就绪）。宿主开关态另由 `feature.state` 呈现。"""
+
+    type: Literal["btcm.state"] = "btcm.state"
+    trigger: Literal["manual", "auto"] = "manual"
+    slot: str = "thinking"
+    ready: bool = False
+
+
+class BtcmRun(Envelope):
+    """副思考链页「运行一次」：走与 `btcm.think` 相同的工具路径（不另开通道）。"""
+
+    type: Literal["btcm.run"] = "btcm.run"
+    question: str
+    effort: Literal["light", "standard", "deep"] = "standard"
+    mode: Literal["auto", "creative", "validate", "long"] = "auto"
+
+
+class ThinkDelta(Envelope):
+    """思考流增量（对 Agent 循环不作为决策输入，docs 06 §7）。"""
+
+    type: Literal["think.delta"] = "think.delta"
+    think_id: str = ""
+    agent: str = ""
+    kind: Literal["reasoning", "content"] = "content"
+    text: str = ""
+
+
+class ThinkIteration(Envelope):
+    """思考流按轮摘要（verdict / meta decision）。"""
+
+    type: Literal["think.iteration"] = "think.iteration"
+    think_id: str = ""
+    iteration: int = 0
+    verdict: str | None = None
+    decision: str | None = None
 
 
 class PersonaExported(Envelope):
@@ -926,6 +1169,38 @@ class WorkspaceDetailResult(Envelope):
     error: str | None = None
 
 
+class WorkspaceMemoryResult(Envelope):
+    type: Literal["workspace.memory.result"] = "workspace.memory.result"
+    workspace_id: str
+    scope: Literal["current", "default", "specific"]
+    mode: Literal["append", "replace"]
+    chars: int = 0
+    ok: bool = True
+    error: str = ""
+
+
+class WorkspaceBuildResult(Envelope):
+    type: Literal["workspace.build.result"] = "workspace.build.result"
+    id: str
+    ok: bool
+    exit_code: int | None = None
+    duration_ms: int = 0
+    output: str = Field(default="", max_length=250_000)
+    log_path: str = ""
+    started_at: str = ""
+
+
+class WorkspaceFileResult(Envelope):
+    type: Literal["workspace.file.result"] = "workspace.file.result"
+    id: str
+    path: str
+    ok: bool = True
+    is_write: bool = False
+    content: str = Field(default="", max_length=262_144)
+    bytes: int = 0
+    truncated: bool = False
+    error: str = ""
+
 
 # ---------------------------------------------------------------------------
 # 联合类型 + 校验器
@@ -983,7 +1258,22 @@ Request = Annotated[
         WorkspaceSwitch,
         WorkspaceRefresh,
         WorkspaceDetail,
+WorkspaceMemoryWrite,
+        WorkspaceBuild,
+        WorkspaceFileRead,
+        WorkspaceFileWrite,
         MoveSession,
+        LibraryCreate,
+        LibraryUpdate,
+        LibraryDelete,
+        LibrarySwitch,
+        LibraryRefresh,
+        LibraryDetail,
+        LibraryIngest,
+        LibraryQuery,
+        FeatureToggle,
+        BtcmUpdate,
+        BtcmRun,
     ],
     Field(discriminator="type"),
 ]
@@ -1024,6 +1314,18 @@ Event = Annotated[
         ShellOutput,
         WorkspaceList,
         WorkspaceDetailResult,
+WorkspaceMemoryResult,
+        WorkspaceBuildResult,
+        WorkspaceFileResult,
+        LibraryList,
+        LibraryDetailResult,
+        LibraryIngestResult,
+        LibraryQueryResult,
+        LibraryGraphResult,
+        FeatureState,
+        BtcmState,
+        ThinkDelta,
+        ThinkIteration,
     ],
     Field(discriminator="type"),
 ]

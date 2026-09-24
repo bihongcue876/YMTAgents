@@ -23,6 +23,8 @@ COLLABORATORS: dict[str, tuple[str, str] | None] = {
     "store": ("core.agent.session", "ISessionStore"),
     "agent": ("core.agent.loop", "IAgentLoop"),
     "supervisor": ("core.modules.supervisor", "IModuleSupervisor"),
+    "features": ("core.modules.feature", "IFeatureManager"),
+    "library_manager": ("core.library.manager", "ILibraryService"),
     "shell_manager": ("core.shell.manager", "IShellManager"),
     "workspace_manager": ("core.workspace.manager", "IWorkspaceManager"),
     "registry": None,
@@ -61,7 +63,29 @@ def test_controller_collaborator_calls_are_declared():
 def test_mock_gateway_satisfies_interface():
     """替身必须能实例化 —— 即实现全部抽象方法（缺一个即 TypeError）。"""
     from core.gateway.provider import IModelGateway
-
     from tests.mocks.gateway import MockGateway
 
     assert isinstance(MockGateway(), IModelGateway)
+
+
+def test_dpim_contracts_are_in_discriminated_unions():
+    from shared.envelope import EVENT_MODELS, REQUEST_MODELS
+
+    requests = {model.__name__ for model in REQUEST_MODELS}
+    events = {model.__name__ for model in EVENT_MODELS}
+    assert {"LibraryCreate", "LibraryUpdate", "LibraryDelete", "LibrarySwitch",
+            "LibraryRefresh", "LibraryDetail", "LibraryIngest", "LibraryQuery"} <= requests
+    assert {"LibraryList", "LibraryDetailResult", "LibraryIngestResult",
+            "LibraryQueryResult", "LibraryGraphResult"} <= events
+    assert (len(REQUEST_MODELS), len(EVENT_MODELS)) == (67, 46)
+
+
+def test_workspace_slice_contracts_are_in_discriminated_unions():
+    """工作区后续切片（shell cwd 绑定 / 记忆级联 / 附件与构建 / 文件编辑）的契约在联合中。"""
+    from shared.envelope import EVENT_MODELS, REQUEST_MODELS
+
+    requests = {model.__name__ for model in REQUEST_MODELS}
+    events = {model.__name__ for model in EVENT_MODELS}
+    assert {"WorkspaceMemoryWrite", "WorkspaceBuild", "WorkspaceFileRead",
+            "WorkspaceFileWrite"} <= requests
+    assert {"WorkspaceMemoryResult", "WorkspaceBuildResult", "WorkspaceFileResult"} <= events

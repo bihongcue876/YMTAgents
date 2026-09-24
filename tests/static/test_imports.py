@@ -38,6 +38,11 @@ ALLOWED: dict[str, set[str] | None] = {
         "core.store",
     },
     "core.modules": {"shared", "core.bus", "core.registry"},
+    "core.modules.btcm": {"shared", "core.gateway", "core.registry", "core.modules"},
+    "core.modules.dpim": {
+        "shared", "core.gateway", "core.registry", "core.modules", "core.library"
+    },
+    "core.library": {"shared", "core.store"},
     "gui": {"shared", "core.bus"},
     "app": None,
 }
@@ -45,6 +50,8 @@ ALLOWED: dict[str, set[str] | None] = {
 
 def pkg_of(path: Path) -> str:
     rel = path.relative_to(SRC).parts
+    if rel[0] == "core" and len(rel) > 3 and rel[1] == "modules":
+        return f"core.modules.{rel[2]}"
     if rel[0] == "core" and len(rel) > 2:
         return f"core.{rel[1]}"
     return rel[0]
@@ -56,6 +63,8 @@ def import_target(name: str) -> str | None:
     if parts[0] not in PROJECT_TOP:
         return None
     if parts[0] == "core":
+        if len(parts) > 2 and parts[1] == "modules" and parts[2] in {"btcm", "dpim"}:
+            return f"core.modules.{parts[2]}"
         return f"core.{parts[1]}" if len(parts) > 1 else "core"
     return parts[0]
 

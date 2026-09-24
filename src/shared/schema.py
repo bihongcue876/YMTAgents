@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +86,13 @@ class WorkspaceSettings(BaseModel):
       默认在工作区之中建 `.ymtdata` 这类私有数据目录 → 故为 `inline`。
     - `file_depth` / `file_limit`：文件列表的**有界**遍历（深度/条数），防越界遍历与卡死。
 
-    `build_timeout_ms` 不在此处 —— 构建（切片 4）尚未落地，**不留无消费者的配置项**
-    （项目纪律：零调用的配置值与零发射的错误码同属最有效的巡检线索）。
+    - `build_timeout_ms`：单次用户确认构建的有界超时，默认 10 分钟。
     """
 
     default_data_home_kind: Literal["inline", "managed", "custom"] = "inline"
     file_depth: int = 2
     file_limit: int = 500
+    build_timeout_ms: int = Field(default=600_000, ge=1_000, le=600_000)
 
 
 class SettingsConfig(BaseModel):
@@ -222,15 +222,96 @@ class SessionGraph(BaseModel):
 # ---------------------------------------------------------------------------
 # modules.json（期望态；运行态不入盘，docs 03 §3.3）
 # ---------------------------------------------------------------------------
+class DpimJointConfig(BaseModel):
+    """默认联合检索范围；具体查询仍可由调用方显式限定。"""
+
+    default_libs: list[str] = Field(default_factory=list, max_length=100)
+    top_k: int = Field(default=8, ge=1, le=50)
+
+
 class DpimConfig(BaseModel):
-    enabled: bool = False
-    joint: dict = Field(default_factory=lambda: {"default_libs": [], "top_k": 8})
+    joint: DpimJointConfig = Field(default_factory=DpimJointConfig)
+
+
+class LibraryRecord(BaseModel):
+    """小图书馆登记项；用户显示名与物理路径键严格分离。"""
+
+    id: str = Field(pattern=r"^lib_[0-9a-fA-F-]{16,}$", max_length=64)
+    name: str = Field(min_length=1, max_length=80)
+    root_kind: Literal["managed", "external"] = "managed"
+    #: managed 留空，物理位置由 id + group_key 推导；external 为绝对路径。
+    root: str | None = Field(default=None, max_length=4096)
+    group: str | None = Field(default=None, max_length=60)
+    #: 独立生成的目录键，绝不由 group 显示名计算。
+    group_key: str | None = Field(default=None, pattern=r"^grp_[0-9a-fA-F-]{16,}$", max_length=64)
+    #: 槽位名（main/thinking/fast/embedding）或模型 ID；绝不存密钥。
+    model_ref: str = Field(default="main", min_length=1, max_length=200)
+    note: str = Field(default="", max_length=1000)
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def _root_and_group_pairs(self) -> LibraryRecord:
+        if not self.name.strip():
+            raise ValueError("书库名称不能为空。")
+        if self.root_kind == "managed" and self.root is not None:
+            raise ValueError("托管书库不保存自定义 root。")
+        if self.root_kind == "external" and not self.root:
+            raise ValueError("外部书库必须保存 root。")
+        if self.group is None and self.group_key is not None:
+            raise ValueError("未分组书库不应带 group_key。")
+        return self
+
+
+class LibraryIndex(BaseModel):
+    """`ymtdata/libraries/index.json` 唯一事实源。"""
+
+    schema_version: Literal[1] = 1
+    libraries: list[LibraryRecord] = Field(default_factory=list, max_length=100)
+
+
+class BtcmAgentParams(BaseModel):
+    """BTCM 单个 Agent 的可调参数（均可缺省，缺省用宿主默认）。不下发 max_tokens（rev20）。"""
+
+    temperature: float | None = None
+    timeout: int | None = None
+    num_candidates: int | None = None
+    log_intermediate: bool | None = None
 
 
 class BtcmConfig(BaseModel):
-    enabled: bool = False
-    trigger: Literal["manual", "auto", "off"] = "off"
+    """副思考链配置（切片 2）。
+
+    宿主级启停由 `FeaturesConfig.btcm` 管（关=卸载）；此处是**开启后的子选项**：
+    `trigger` 手动/自动（自动=环境声明挂一条「遇严重矛盾可发起一次中级思考」策略）。
+    """
+
+    #: `off` 为存量兼容值（旧配置）；宿主级启停改由 `FeaturesConfig.btcm` 决定，
+    #: 读取时一律按 `manual` 处理（见 BtcmManager.state_payload）。
+    trigger: Literal["manual", "auto", "off"] = "manual"
     slot: Literal["main", "thinking", "fast", "embedding"] = "thinking"
+    max_iterations: int = 2
+    timeout: int = 3600
+    enable_creative: bool = True
+    enable_validator: bool = True
+    agents: dict[str, BtcmAgentParams] = Field(default_factory=dict)
+
+
+class FeaturesConfig(BaseModel):
+    """附加功能总开关（切片 0，用户 2026-09-24 裁决）——**宿主启停的唯一真值**。
+
+    - 每个附加功能一个二态滑动开关；`关` = 真卸载（不 import、不注册、无后台活动、
+      释放引用），`开` = 惰性装配（六条硬指标，见 spec）。
+    - 默认保真：`mcp`/`shell`/`skills` 沿用既有「默认装载」行为；`btcm`/`dpim` 未启用默认关。
+    - 模块内部档位（`BtcmConfig.trigger`、各 server `enabled` 等）是开启后的**子选项**，
+      不参与宿主级启停。
+    """
+
+    mcp: bool = True
+    shell: bool = True
+    skills: bool = True
+    btcm: bool = False
+    dpim: bool = False
 
 
 class ShellConfig(BaseModel):
@@ -286,12 +367,12 @@ class McpServerConfig(BaseModel):
 
 
 class McpConfig(BaseModel):
-    enabled: bool = False
     servers: list[McpServerConfig] = Field(default_factory=list)
 
 
 class ModulesConfig(BaseModel):
     schema_version: Literal[1] = 1
+    features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     dpim: DpimConfig = Field(default_factory=DpimConfig)
     btcm: BtcmConfig = Field(default_factory=BtcmConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)

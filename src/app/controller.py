@@ -9,10 +9,15 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from pydantic import ValidationError
+
+if TYPE_CHECKING:  # 类型专用：运行期不 import 宿主模块（关档不 import 铁律）
+    from core.modules.manager import FeatureManager
+    from core.library.manager import ILibraryService
 
 from shared.errors import ErrorCode, error_text
 from shared.redact import redact
@@ -69,12 +74,34 @@ from shared.envelope import (
     WorkspaceDelete,
     WorkspaceDetail,
     WorkspaceDetailResult,
+WorkspaceMemoryWrite,
+    WorkspaceMemoryResult,
+    WorkspaceBuild,
+    WorkspaceBuildResult,
+    WorkspaceFileRead,
+    WorkspaceFileWrite,
+    WorkspaceFileResult,
     WorkspaceInfo,
     WorkspaceList,
     WorkspaceRefresh,
     WorkspaceSwitch,
     WorkspaceUpdate,
     MoveSession,
+    LibraryCreate,
+    LibraryUpdate,
+    LibraryDelete,
+    LibrarySwitch,
+    LibraryRefresh,
+    LibraryDetail,
+    LibraryIngest,
+    LibraryQuery,
+    FeatureState,
+    BtcmState,
+    LibraryList,
+    LibraryDetailResult,
+    LibraryIngestResult,
+    LibraryQueryResult,
+    LibraryGraphResult,
 )
 from shared.schema import (
     LoggingSettings,
@@ -90,9 +117,8 @@ from core.agent.memory import effective_switches, effective_threshold, recommend
 from core.bus.bridge import BusBridge
 from core.gateway.errors import GatewayError
 from core.gateway.provider import ModelGateway
-from core.mcp.manager import McpManager
 from core.modules.supervisor import ModuleSupervisor
-from core.registry.executor import GATE_TIMEOUT_S, ToolExecutor
+from core.registry.executor import GATE_TIMEOUT_S, ToolContext, ToolExecutor
 from core.registry.registry import Registry
 from core.store.config_store import ConfigStore
 from core.workspace.layout import WorkspaceDenied, WorkspacePathError
@@ -116,9 +142,7 @@ class CoreController:
         root: Path,
         personas: PersonaStore | None = None,
         executor: ToolExecutor | None = None,
-        mcp_manager: McpManager | None = None,
-        skill_manager=None,
-        shell_manager=None,
+        features: FeatureManager | None = None,
         workspace_manager=None,
     ) -> None:
         self.bridge = bridge
@@ -131,15 +155,32 @@ class CoreController:
         self.root = Path(root)
         self.personas = personas
         self.executor = executor
-        self.mcp_manager = mcp_manager
-        self.skill_manager = skill_manager
-        self.shell_manager = shell_manager
+        # 切片 0：附加功能生命周期是宿主的唯一入口；各 manager 经 `features.host()` 实时取。
+        self.features = features
         self.workspace_manager = workspace_manager
         self.current_session_id: str | None = None
         # rev43：confirm 关卡裁决登记（泵取队列时命中；正常分派路径亦可投递）。
         self._gate_decisions: dict[str, bool] = {}
         if self.executor is not None:
             self.executor.set_gate(self._gate_handler)
+
+    # -- 附加功能宿主（切片 0：实时取，卸载后即为 None）--------------------
+    @property
+    def mcp_manager(self):
+        return self.features.host("mcp") if self.features else None
+
+    @property
+    def shell_manager(self):
+        return self.features.host("shell") if self.features else None
+
+    @property
+    def skill_manager(self):
+        return self.features.host("skills") if self.features else None
+
+    @property
+    def library_manager(self) -> ILibraryService | None:
+        """DPIM 管理面只在宿主启用时存在；属性本身不触发模块 import。"""
+        return self.features.host("dpim") if self.features else None
 
     # -- 发射辅助 ----------------------------------------------------------
     def emit(self, event) -> None:
@@ -202,11 +243,277 @@ class CoreController:
         )
 
     def refresh_modules(self) -> None:
-        """把宿主态同步进 supervisor（rev44：mcp 模块实装；v0.0.5：shell 实装）。"""
-        if self.mcp_manager is not None:
-            self.supervisor.set_state("mcp", self.mcp_manager.host_state())
-        if self.shell_manager is not None:
-            self.supervisor.set_state("shell", self.shell_manager.host_state())
+        """把附加功能宿主态同步进 supervisor（切片 0 起统一走 `features`；卸载即 disabled）。"""
+        for name in ("mcp", "shell", "btcm", "dpim"):
+            host = self.features.host(name) if self.features is not None else None
+            self.supervisor.set_state(name, host.host_state() if host is not None else "disabled")
+
+    def _emit_features(self) -> None:
+        if self.features is not None:
+            self.emit(FeatureState(features=self.features.states()))
+
+    def _on_feature_toggle(self, request) -> None:
+        """二态滑动开关：切换宿主启停（关=真卸载、开=惰性装配），随后回推受影响的面。"""
+        if self.features is None:
+            return
+        name, enabled = request.name, bool(request.enabled)
+        try:
+            ok = self.features.toggle(name, enabled)
+        except ValueError:
+            self._report(
+                "system",
+                ErrorCode.INVALID_REQUEST.value,
+                "请求格式不合法：未知附加功能。",
+                f"name={name!r}",
+            )
+            return
+        if not ok:
+            # 装配失败：真值已由 FeatureManager 回退；界面据下面的 feature.state 校准开关。
+            self._report(
+                "system",
+                ErrorCode.INTERNAL.value,
+                f"附加功能装配失败：{name}。",
+                f"enabled={enabled}",
+            )
+        if name == "mcp":
+            self._emit_mcp()
+        elif name == "shell":
+            self._emit_shell()
+        elif name == "skills":
+            self._emit_skills()
+        elif name == "btcm":
+            self._emit_btcm()
+        elif name == "dpim":
+            self._emit_libraries()
+        self._emit_features()
+        self._emit_health()
+
+    def _emit_btcm(self) -> None:
+        host = self.features.host("btcm") if self.features is not None else None
+        if host is None:
+            self.emit(BtcmState(ready=False))
+            return
+        payload = host.state_payload()
+        self.emit(
+            BtcmState(
+                trigger=payload.get("trigger", "manual"),
+                slot=payload.get("slot", "thinking"),
+                ready=bool(payload.get("ready", True)),
+            )
+        )
+
+    def _emit_libraries(self) -> None:
+        """DPIM 关闭时只发空态，不触碰 library data subtree。"""
+        manager = self.library_manager
+        if manager is None:
+            self.emit(LibraryList(libraries=[], current=None, error="小图书馆未启用。"))
+            return
+        try:
+            payload = manager.list_libraries()
+            host = self.features.host("dpim") if self.features is not None else None
+            state = host.state_payload() if host is not None else {}
+            self.emit(
+                LibraryList(
+                    libraries=payload,
+                    current=manager.current_library(),
+                    error=str(state.get("error") or ""),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - UI 仅收到可读状态
+            log.exception("推送书库列表失败")
+            self.emit(LibraryList(libraries=[], current=None, error="读取书库列表失败。"))
+            self._report("library", ErrorCode.STORAGE_ERROR.value, "读取书库列表失败。", type(exc).__name__)
+
+    def _library_failure(self, exc: Exception, action: str, message: str) -> None:
+        """DPIM 管理边界的单点错误映射；不把路径/内容原文回显到错误流。"""
+        if type(exc).__name__ == "LibraryDenied":
+            self._report("library", ErrorCode.LIBRARY_DENIED.value, str(exc) or message)
+        elif isinstance(exc, (ValueError, KeyError)):
+            self._report("library", ErrorCode.INVALID_REQUEST.value, str(exc) or message)
+        else:
+            log.exception("%s 失败", action)
+            self._report("library", ErrorCode.STORAGE_ERROR.value, message, type(exc).__name__)
+
+    def _on_library_create(self, request: LibraryCreate) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            library_id = manager.create_library(
+                request.name, request.root_kind, request.root, request.group,
+                request.model_ref, request.note,
+            )
+            manager.switch_library(library_id)
+        except Exception as exc:  # noqa: BLE001 - 具体归因由统一边界映射
+            self._library_failure(exc, "library.create", "创建书库失败。")
+        self._emit_libraries()
+        if manager.current_library():
+            self._on_library_detail(LibraryDetail(id=manager.current_library()))
+
+    def _on_library_update(self, request: LibraryUpdate) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            manager.update_library(
+                request.id,
+                name=request.name,
+                root=request.root,
+                group=request.group,
+                model_ref=request.model_ref,
+                note=request.note,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._library_failure(exc, "library.update", "保存书库设置失败。")
+        self._emit_libraries()
+
+    def _on_library_delete(self, request: LibraryDelete) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            manager.delete_library(request.id)  # 只摘登记，不删任何库文件
+        except Exception as exc:  # noqa: BLE001
+            self._library_failure(exc, "library.delete", "移除书库登记失败。")
+        self._emit_libraries()
+
+    def _on_library_switch(self, request: LibrarySwitch) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            error = manager.switch_library(request.id)
+            if error:
+                self._report("library", ErrorCode.STORAGE_ERROR.value, "打开书库时检查索引失败。", error)
+        except Exception as exc:  # noqa: BLE001
+            self._library_failure(exc, "library.switch", "切换书库失败。")
+        self._emit_libraries()
+        try:
+            self._on_library_detail(LibraryDetail(id=request.id))
+        except Exception:
+            log.exception("切换后读取书库详情失败")
+
+    def _on_library_refresh(self, request: LibraryRefresh) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            manager.refresh_libraries(request.id)
+        except Exception as exc:  # noqa: BLE001
+            self._library_failure(exc, "library.refresh", "刷新书库索引失败。")
+        self._emit_libraries()
+        selected = request.id or manager.current_library()
+        if selected:
+            self._on_library_detail(LibraryDetail(id=selected))
+
+    def _on_library_detail(self, request: LibraryDetail) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            result = manager.library_detail(
+                request.id, request.event_offset, request.event_limit, request.graph_limit,
+                request.focus_event_id,
+            )
+            self.emit(LibraryDetailResult(**result))
+            graph_data = (
+                manager.library_graph(request.graph_library_ids, request.graph_limit)
+                if request.graph_library_ids
+                else {
+                    "library_ids": [request.id],
+                    "nodes": result.get("nodes", []),
+                    "edges": result.get("edges", []),
+                    "truncated": bool(result.get("truncated")),
+                }
+            )
+            self.emit(
+                LibraryGraphResult(
+                    **graph_data,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._library_failure(exc, "library.detail", "读取书库详情失败。")
+
+    def _on_library_ingest(self, request: LibraryIngest) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            # 新增持久化文本先经通用脱敏；凭据真值不得写入库文件、模型提示词或错误流。
+            safe_text = redact(request.text) or ""
+            result = manager.ingest_event(
+                request.id,
+                safe_text,
+                request.event_type,
+                event_id=request.event_id,
+                index=request.index,
+            )
+            self.emit(LibraryIngestResult(**result))
+            self._on_library_detail(LibraryDetail(id=request.id))
+        except Exception as exc:  # noqa: BLE001
+            self._library_failure(exc, "library.ingest", "保存外部对话失败。")
+
+    def _on_library_query(self, request: LibraryQuery) -> None:
+        manager = self.library_manager
+        if manager is None:
+            self._report("library", ErrorCode.INVALID_REQUEST.value, "小图书馆未启用。")
+            return
+        try:
+            result = manager.query_libraries(
+                request.query, request.lib_ids, request.mode, request.top_k
+            )
+            self.emit(
+                LibraryQueryResult(
+                    query=result["query"],
+                    library_ids=result["library_ids"],
+                    results=result["results"],
+                    debug=result["debug"],
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._library_failure(exc, "library.query", "书库检索失败。")
+
+    def _on_btcm_update(self, request) -> None:
+        host = self.features.host("btcm") if self.features is not None else None
+        if host is None:
+            self._report("system", ErrorCode.INVALID_REQUEST.value, "副思考链未启用。", None)
+            return
+        self._persist(
+            "btcm.update",
+            lambda: host.update(request.trigger, request.slot),
+            "更新副思考链设置失败。",
+        )
+        self._emit_btcm()
+        self._emit_health()
+
+    def _on_btcm_run(self, request) -> None:
+        """副思考链页「运行一次」：走与 `btcm.think` **相同**的工具路径（不另开通道）。"""
+        if self.executor is None:
+            return
+        host = self.features.host("btcm") if self.features is not None else None
+        if host is None:
+            self._report("system", ErrorCode.INVALID_REQUEST.value, "副思考链未启用。", None)
+            return
+        call_id = f"btcm-page-{int(time.time() * 1000)}"
+        # 有当前会话则落盘其事件流；无会话时 ctx=None（仅发射事件，不写空 session）。
+        ctx = (
+            ToolContext(session_id=self.current_session_id, turn_seq=0)
+            if self.current_session_id
+            else None
+        )
+        self.executor.execute(
+            call_id,
+            "btcm.think",
+            {"question": request.question, "effort": request.effort, "mode": request.mode},
+            ctx,
+        )
 
     def push_initial_state(self) -> None:
         """GUI 连接信号后调用，推送首屏数据。"""
@@ -219,6 +526,9 @@ class CoreController:
         self._emit_skills()
         self._emit_shell()
         self._emit_workspaces()
+        self._emit_features()
+        self._emit_libraries()
+        self._emit_btcm()
 
     # -- 工作区（v0.0.6） -----------------------------------------------------
     def _session_counts(self) -> dict[str, int]:
@@ -294,6 +604,10 @@ class CoreController:
         if self.workspace_manager is None:
             return
         try:
+            old_root = self.workspace_manager.root_of(request.id)
+        except Exception:
+            old_root = None
+        try:
             self.workspace_manager.update(
                 request.id,
                 name=request.name,
@@ -303,6 +617,9 @@ class CoreController:
                 data_home_kind=request.data_home_kind,
                 data_home=request.data_home,
             )
+            new_root = self.workspace_manager.root_of(request.id)
+            if old_root is not None and old_root != new_root and self.shell_manager is not None:
+                self.shell_manager.close_workspace(request.id)
         except Exception as exc:  # noqa: BLE001
             self._workspace_failure(exc, "workspace.update", "保存工作区失败。")
         self._emit_workspaces()
@@ -321,6 +638,8 @@ class CoreController:
             self._workspace_failure(exc, "workspace.delete", "移除工作区失败。")
             self._emit_workspaces()
             return
+        if self.shell_manager is not None:
+            self.shell_manager.close_workspace(request.id)
         self._release_sessions(request.id)
         self._emit_workspaces()
         self._emit_index()  # 归属变了 → 侧栏分组要跟着变
@@ -366,6 +685,115 @@ class CoreController:
             return
         self.emit(WorkspaceDetailResult(**result))
 
+    def _on_workspace_memory_write(self, request: WorkspaceMemoryWrite) -> None:
+        if self.workspace_manager is None:
+            return
+        try:
+            result = self.workspace_manager.write_memory(
+                request.scope, request.workspace_id, request.mode, redact(request.text) or ""
+            )
+            self.emit(WorkspaceMemoryResult(**result))
+        except Exception as exc:  # noqa: BLE001 - 只从显式 UI 请求写入
+            self._workspace_failure(exc, "workspace.memory_write", "写入工作区记忆失败。")
+            target = request.workspace_id or self.workspace_manager.current()
+            self.emit(
+                WorkspaceMemoryResult(
+                    workspace_id=target,
+                    scope=request.scope,
+                    mode=request.mode,
+                    chars=0,
+                    ok=False,
+error="写入失败；请检查工作区目录与记忆文件。",
+                )
+            )
+
+    def _on_workspace_build(self, request: WorkspaceBuild) -> None:
+        """运行工作区构建（用户显式通道：逐次点击、命令原文在界面完整展示）。
+
+        不注册为模型工具、不过权限关卡；命令原文只在 `build.json`（用户自己的记录）里，
+        审计只记工作区/退出码/耗时。输出的脱敏与截断落在 shell 宿主与工作区宿主两侧。
+        """
+        if self.workspace_manager is None:
+            return
+        if self.shell_manager is None:
+            self._report("config", ErrorCode.TOOL_UNAVAILABLE.value, "终端功能未启用，无法运行构建。")
+            return
+        try:
+            spec = self.workspace_manager.build_spec(request.id)
+        except Exception as exc:  # noqa: BLE001
+            self._workspace_failure(exc, "workspace.build", "读取构建配置失败。")
+            return
+        started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        try:
+            timeout_ms = int(self.config_store.load("settings").workspace.build_timeout_ms)
+        except Exception:  # noqa: BLE001 - 配置异常回退出厂默认
+            timeout_ms = 600_000
+        try:
+            outcome = self.shell_manager.run_user_command(
+                spec["command"], str(spec["root"]), request.id, timeout_ms
+            )
+        except Exception as exc:  # noqa: BLE001 - 起壳失败也要给可读回执并落结果
+            log.exception("workspace.build 执行失败")
+            self._report("config", ErrorCode.STORAGE_ERROR.value, "无法启动构建：请检查 shell 解释器。")
+            outcome = {"ok": False, "exit_code": None, "duration_ms": 0,
+                       "output": "无法启动构建终端。"}
+        log_path = ""
+        try:
+            written = self.workspace_manager.write_build_result(
+                request.id,
+                spec["command"],
+                started_at,
+                outcome.get("exit_code"),
+                int(outcome.get("duration_ms") or 0),
+                str(outcome.get("output") or ""),
+            )
+            log_path = written.get("log_path", "")
+        except Exception:  # noqa: BLE001 - 落盘失败不吞掉构建结果
+            log.exception("写入构建日志失败")
+        self.emit(
+            WorkspaceBuildResult(
+                id=request.id,
+                ok=bool(outcome.get("ok")),
+                exit_code=outcome.get("exit_code"),
+                duration_ms=int(outcome.get("duration_ms") or 0),
+                output=str(outcome.get("output") or "")[:250_000],
+                log_path=log_path,
+                started_at=started_at,
+            )
+        )
+
+    def _on_workspace_file_read(self, request: WorkspaceFileRead) -> None:
+        if self.workspace_manager is None:
+            return
+        try:
+            result = self.workspace_manager.read_file(request.id, request.path)
+            self.emit(WorkspaceFileResult(**result))
+        except Exception as exc:  # noqa: BLE001 - 只读路径，按原因归码
+            self._workspace_failure(exc, "workspace.file_read", "读取文件失败。")
+            self.emit(
+                WorkspaceFileResult(
+                    id=request.id, path=request.path, ok=False, is_write=False,
+                    error="无法读取该文件（不存在、非 UTF-8 或超出大小上限）。",
+                )
+            )
+
+    def _on_workspace_file_write(self, request: WorkspaceFileWrite) -> None:
+        if self.workspace_manager is None:
+            return
+        try:
+            result = self.workspace_manager.write_file(
+                request.id, request.path, redact(request.content) or "", request.create
+            )
+            self.emit(WorkspaceFileResult(**result))
+        except Exception as exc:  # noqa: BLE001
+            self._workspace_failure(exc, "workspace.file_write", "保存文件失败。")
+            self.emit(
+                WorkspaceFileResult(
+                    id=request.id, path=request.path, ok=False, is_write=True,
+                    error="保存失败：请检查路径、权限与文件大小。",
+                )
+            )
+
     def _on_move_session(self, request: MoveSession) -> None:
         """把会话挪到另一工作区：归属变更只改 meta，事件流不动（`events.jsonl` 只增不改）。"""
         if (
@@ -380,10 +808,16 @@ class CoreController:
             )
             return
         try:
+            previous_workspace = self.store.get_meta(request.session_id).workspace_id
+        except KeyError:
+            previous_workspace = None
+        try:
             self.store.move_session(request.session_id, request.workspace_id)
         except KeyError:
             self._report("session", ErrorCode.SESSION_NOT_FOUND.value, "会话不存在。")
             return
+        if previous_workspace != request.workspace_id and self.shell_manager is not None:
+            self.shell_manager.close_session(request.session_id)
         self._emit_index()
         self._emit_workspaces()
 
@@ -609,8 +1043,19 @@ class CoreController:
     def _on_shell_spawn(self, request) -> None:
         if self.shell_manager is None:
             return
+        workspace_id = None
+        workspace_root = None
+        if self.workspace_manager is not None:
+            try:
+                workspace_id = self.workspace_manager.current()
+                workspace_root = str(self.workspace_manager.root_of(workspace_id))
+            except Exception:
+                log.exception("解析当前工作区 root 失败，shell 将按配置目录启动")
         created = self.shell_manager.spawn(
-            cwd=request.cwd, session_id=self.current_session_id or ""
+            cwd=request.cwd,
+            session_id=self.current_session_id or "",
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
         )
         if created is None:
             # 起不来必须有可读回执（用户点按钮却毫无反应是最差体验）。
@@ -840,8 +1285,32 @@ class CoreController:
             self._on_workspace_refresh(request)
         elif t == "workspace.detail":
             self._on_workspace_detail(request)
+        elif t == "workspace.memory_write":
+            self._on_workspace_memory_write(request)
+        elif t == "workspace.build":
+            self._on_workspace_build(request)
+        elif t == "workspace.file_read":
+            self._on_workspace_file_read(request)
+        elif t == "workspace.file_write":
+            self._on_workspace_file_write(request)
         elif t == "session.move":
             self._on_move_session(request)
+        elif t == "library.create":
+            self._on_library_create(request)
+        elif t == "library.update":
+            self._on_library_update(request)
+        elif t == "library.delete":
+            self._on_library_delete(request)
+        elif t == "library.switch":
+            self._on_library_switch(request)
+        elif t == "library.refresh":
+            self._on_library_refresh(request)
+        elif t == "library.detail":
+            self._on_library_detail(request)
+        elif t == "library.ingest":
+            self._on_library_ingest(request)
+        elif t == "library.query":
+            self._on_library_query(request)
         elif t == "skill.toggle":
             self._on_skill_toggle(request)
         elif t == "skill.import":
@@ -854,6 +1323,12 @@ class CoreController:
             self._on_skill_permission(request)
         elif t == "skill.refresh":
             self._emit_skills()
+        elif t == "feature.toggle":
+            self._on_feature_toggle(request)
+        elif t == "btcm.update":
+            self._on_btcm_update(request)
+        elif t == "btcm.run":
+            self._on_btcm_run(request)
         elif t == "gate.respond":
             self._on_gate_respond(request)
         else:
@@ -1251,18 +1726,12 @@ class CoreController:
         退出路径不得再向外抛异常。
         """
         session_id = self.current_session_id
-        # rev44：无论是否有当前会话，都要回收 MCP 子进程/连接（退出路径不抛）。
-        if self.mcp_manager is not None:
+        # 切片 0：附加功能统一收尾（MCP 连接 / shell 子进程等，退出路径不抛）。
+        if self.features is not None:
             try:
-                self.mcp_manager.shutdown()
+                self.features.shutdown()
             except Exception:  # noqa: BLE001 - 退出路径不抛
-                log.exception("MCP 收尾失败")
-        # v0.0.5：shell 子进程一律全关（运行态，退出即消失）。
-        if self.shell_manager is not None:
-            try:
-                self.shell_manager.shutdown()
-            except Exception:  # noqa: BLE001 - 退出路径不抛
-                log.exception("shell 收尾失败")
+                log.exception("附加功能收尾失败")
         if not session_id:
             return
         try:

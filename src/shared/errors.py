@@ -45,6 +45,8 @@ class ErrorCode(str, Enum):
     # `whitelist_blocked` 是**网络出口**的码 —— 两者语义都不是「工作区位置不许」。
     # 按真实原因新开一码，胜过把「格式不合法」的 `invalid_request` 挪作他用（一码一义）。
     WORKSPACE_DENIED = "workspace_denied"
+    # DPIM 库 root 命中宿主禁设清单或重复登记。
+    LIBRARY_DENIED = "library_denied"
 
 
 # 码 → 前端中文提示（单一来源）。具体场景可在 message 中补充对象与操作指引。
@@ -74,6 +76,7 @@ ERROR_TEXT: dict[str, str] = {
     ErrorCode.TOOL_INVALID_ARGS.value: "工具参数无效",
     ErrorCode.TOOL_BACKEND_ERROR.value: "工具后端错误",
     ErrorCode.WORKSPACE_DENIED.value: "该位置不可作为工作区",
+    ErrorCode.LIBRARY_DENIED.value: "该位置不可作为书库目录",
 }
 
 
