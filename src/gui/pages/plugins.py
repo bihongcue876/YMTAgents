@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.widgets import card, key_badge
+from gui.widgets import card, key_badge, section_label
 
 _STATE_TEXT = {
     "stopped": "未启动",
@@ -169,12 +169,14 @@ class PluginsPage(QWidget):
     reconnect_requested = Signal(str)
     refresh_requested = Signal()
     scan_requested = Signal(str)
+    builtin_toggle_requested = Signal(str, bool)  # v0.0.11（D-1）：内置工具开关
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._servers: list[dict] = []
         self._tools: list[dict] = []
         self._scans: dict[str, dict] = {}
+        self._builtins: list[dict] = []  # v0.0.11（D-1）：内置文件工具（file.*）
 
         title = QLabel("MCP 插件")
         title.setObjectName("pageTitle")
@@ -228,6 +230,11 @@ class PluginsPage(QWidget):
                 server["error"] = error
         self._rebuild()
 
+    def update_builtin(self, items: list[dict]) -> None:
+        """v0.0.11（D-1）：内置工具快照（含 enabled=false 的条目，一次拉全量）。"""
+        self._builtins = list(items or [])
+        self._rebuild()
+
     def update_scan(self, server_id: str, server_name: str, findings: list, summary: dict) -> None:
         """记录一次安全体检结果（只读展示）。"""
         self._scans[server_id] = {
@@ -250,8 +257,35 @@ class PluginsPage(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
+    def _builtin_card(self) -> QWidget:
+        """「内置工具」分区（D-1）：开 = 注册进模型工具列表；关 = 真卸载（不注册）。"""
+        frame, layout = card()
+        layout.addWidget(section_label("内置工具"))
+        note = QLabel("宿主自带工具随开关实时增减（关 = 立即从模型工具列表移除）；配置写 plugins.json。")
+        note.setWordWrap(True)
+        note.setObjectName("mutedNote")
+        layout.addWidget(note)
+        for item in self._builtins:
+            name = str(item.get("name") or "")
+            checkbox = QCheckBox("启用")
+            checkbox.setChecked(bool(item.get("enabled")))
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            label = QLabel(f"{name} — {item.get('title', '')}")
+            label.setWordWrap(True)
+            row_layout.addWidget(label, 1)
+            row_layout.addWidget(checkbox)
+            checkbox.toggled.connect(
+                lambda checked, n=name: self.builtin_toggle_requested.emit(n, bool(checked))
+            )
+            layout.addWidget(row)
+        return frame
+
     def _rebuild(self) -> None:
         self._clear()
+        if self._builtins:
+            self._body.addWidget(self._builtin_card())
         if not self._servers:
             hint = QLabel("尚未配置 MCP 服务器。点击「＋ 添加服务器」接入。")
             hint.setWordWrap(True)
