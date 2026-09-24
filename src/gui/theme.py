@@ -237,6 +237,34 @@ QPushButton#primaryButton:disabled {{
 /* 配置页节标题（rev55）：小节分组感，不再与正文同权重 */
 QLabel#sectionLabel {{ color: {p.muted}; font-weight: 600; }}
 
+/* 附加功能（rev65）：轻分隔行 + 次级说明 + 状态胶囊，开关列统一右对齐 */
+QWidget#featureRow {{
+    background: transparent;
+    border-bottom: 1px solid {p.border};
+}}
+QWidget#featureRow:hover {{ background: {p.bg}; border-radius: 6px; }}
+QLabel#featureName {{ font-weight: 600; }}
+QLabel#featureDescription {{ color: {p.muted}; }}
+QLabel#featureState {{
+    color: {p.muted}; background: {p.bg};
+    border: 1px solid {p.border}; border-radius: 8px; padding: 1px 7px;
+}}
+QLabel#featureState[featureState="ready"] {{ color: {p.ok}; border-color: {p.ok}; }}
+QLabel#featureState[featureState="degraded"] {{ color: {p.warn}; border-color: {p.warn}; }}
+QLabel#featureState[featureState="error"] {{ color: {p.danger}; border-color: {p.danger}; }}
+QLabel#featureState[featureState="unavailable"] {{ color: {p.muted}; }}
+QLabel#btcmReady {{
+    color: {p.muted}; background: {p.bg};
+    border: 1px solid {p.border}; border-radius: 8px; padding: 2px 8px;
+}}
+QLabel#btcmReady[btcmReady="true"] {{ color: {p.ok}; border-color: {p.ok}; }}
+
+/* 命令面板（rev67）：输入区上方的候选列表，边框 + 表面底 */
+QFrame#commandPalette {{
+    background: {p.surface}; border: 1px solid {p.border}; border-radius: 8px;
+}}
+QListWidget#commandList {{ background: transparent; border: none; }}
+
 /* 侧栏会话列表（rev55）：去嵌套边框，行做药丸 —— 左栏从「层层灰盒」变轻 */
 QListWidget#sessionList {{ background: transparent; border: none; }}
 QListWidget#sessionList::item {{ padding: 5px 8px; border-radius: 6px; }}
@@ -424,6 +452,7 @@ th, td {{ border-color: {p.border}; }}
 blockquote {{ border-left-color: {p.border}; color: {p.muted}; }}
 a {{ color: {p.accent}; }}
 .user .bubble {{ background: {p.surface}; }}
+.attachments {{ color: {p.muted}; font-size: {fs["caption"]}px; margin-top: 6px; }}
 .usage, .tag {{ color: {p.muted}; font-size: {fs["caption"]}px; }}
 .error {{ background: {p.danger_bg}; border-color: {p.danger_border}; color: {p.danger}; }}
 """

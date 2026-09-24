@@ -71,7 +71,9 @@ class Sidebar(QWidget):
     open_skills = Signal()
     open_plugins = Signal()
     open_terminal = Signal()
+    open_thinking = Signal()
     open_workspaces = Signal()
+    open_library = Signal()
     open_settings = Signal()
     toggle_requested = Signal()  # 折叠/展开请求（宽度由 MainWindow 的 QSplitter 落实）
 
@@ -106,6 +108,8 @@ class Sidebar(QWidget):
         self._skills_btn = _rail_button("🧩 技能", "技能（提示词指令包）")
         self._plugins_btn = _rail_button("🔌 插件", "MCP 插件与工具")
         self._terminal_btn = _rail_button("⌨ 终端", "本机终端（shell 会话与监视）")
+        self._thinking_btn = _rail_button("🧠 思考", "副思考链（BTCM）")
+        self._library_btn = _rail_button("📚 小图书馆", "本地书库与来源检索（DPIM）")
         self._settings_btn = _rail_button("🛠 设置", "系统设置")
 
         # 导航态注册表（rev55）：key 与 MainWindow 的页序对应，set_active 由页切换驱动
@@ -116,6 +120,8 @@ class Sidebar(QWidget):
             "skills": (self._skills_btn, self.open_skills),
             "plugins": (self._plugins_btn, self.open_plugins),
             "terminal": (self._terminal_btn, self.open_terminal),
+            "thinking": (self._thinking_btn, self.open_thinking),
+            "library": (self._library_btn, self.open_library),
             "settings": (self._settings_btn, self.open_settings),
         }
         for key, (button, signal) in self._nav.items():
@@ -129,7 +135,7 @@ class Sidebar(QWidget):
         rail.addStretch(1)
         for button in (self._workspaces_btn, self._models_btn, self._personas_btn,
                        self._skills_btn, self._plugins_btn, self._terminal_btn,
-                       self._settings_btn):
+                       self._thinking_btn, self._library_btn, self._settings_btn):
             rail.addWidget(button)
 
         rail_host = QWidget()

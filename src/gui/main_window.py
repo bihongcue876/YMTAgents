@@ -42,6 +42,9 @@ from shared.envelope import (
     SwitchBranch,
     SetSlot,
     SettingsUpdate,
+    FeatureToggle,
+    BtcmRun,
+    BtcmUpdate,
     SwitchModel,
     TestConnection,
     UnarchiveSession,
@@ -70,6 +73,16 @@ from shared.envelope import (
     WorkspaceRefresh,
     WorkspaceSwitch,
     WorkspaceUpdate,
+WorkspaceMemoryWrite,
+    WorkspaceBuild,
+    LibraryCreate,
+    LibraryUpdate,
+    LibraryDelete,
+    LibrarySwitch,
+    LibraryRefresh,
+    LibraryDetail,
+    LibraryIngest,
+    LibraryQuery,
 )
 
 from shared.ids import WS_DEFAULT
@@ -80,11 +93,13 @@ from gui import theme
 from gui.chat.session_panel import SessionPanel
 from gui.chat.view import ChatView
 from gui.pages.models import ModelsPage
+from gui.pages.library import LibraryPage
 from gui.pages.personas import PersonasPage
 from gui.pages.plugins import GateDialog, PluginsPage
 from gui.pages.settings import SettingsPage
 from gui.pages.skills import SkillsPage
 from gui.pages.terminal import TerminalPage
+from gui.pages.thinking import ThinkingPage
 from gui.pages.workspaces import WorkspacesPage
 from gui.sidebar import PANEL_MAX_PX, PANEL_MIN_PX, RAIL_PX, Sidebar
 
@@ -122,6 +137,8 @@ class MainWindow(QMainWindow):
         self.skills_page = SkillsPage()
         self.skills_page.set_data_root(data_root)
         self.terminal_page = TerminalPage()
+        self.thinking_page = ThinkingPage()
+        self.library_page = LibraryPage()
         self.workspaces_page = WorkspacesPage()
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
@@ -136,11 +153,14 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.plugins_page)
         self.stack.addWidget(self.skills_page)
         self.stack.addWidget(self.terminal_page)
+        self.stack.addWidget(self.thinking_page)
+        self.stack.addWidget(self.library_page)
         self.stack.addWidget(self.workspaces_page)
         self.stack.addWidget(self.settings)
         # rail 导航态随页切换校准（rev55）：索引与上面的添加顺序一致
         self._page_keys: list[str | None] = [
-            None, "models", "personas", "plugins", "skills", "terminal", "workspaces", "settings",
+            None, "models", "personas", "plugins", "skills", "terminal", "thinking", "library",
+            "workspaces", "settings",
         ]
         self.stack.currentChanged.connect(self._on_page_changed)
 
@@ -228,13 +248,21 @@ class MainWindow(QMainWindow):
         s.open_skills.connect(lambda: self.stack.setCurrentWidget(self.skills_page))
         s.open_plugins.connect(lambda: self.stack.setCurrentWidget(self.plugins_page))
         s.open_terminal.connect(lambda: self.stack.setCurrentWidget(self.terminal_page))
+        s.open_thinking.connect(lambda: self.stack.setCurrentWidget(self.thinking_page))
+        s.open_library.connect(lambda: self.stack.setCurrentWidget(self.library_page))
         s.open_workspaces.connect(lambda: self.stack.setCurrentWidget(self.workspaces_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
 
         c = self.chat
         c.new_session.connect(lambda: self.bus.submit(NewSession()))
         c.new_session_in.connect(lambda wid: self.bus.submit(NewSession(workspace_id=wid)))  # rev58
-        c.send_message.connect(lambda text: self.bus.submit(SendMessage(text=text)))
+        c.send_message.connect(
+            lambda text, attachments: self.bus.submit(
+                SendMessage(text=text, attachments=list(attachments or []))
+            )
+        )
+        c.command_run.connect(self._on_command)
+        c.command_error.connect(lambda message: QMessageBox.information(self, "命令", message))
         c.cancel_turn.connect(lambda: self.bus.submit(CancelTurn()))
         c.switch_model.connect(lambda mid: self.bus.submit(SwitchModel(slot="main", model_id=mid)))
         c.switch_persona.connect(
@@ -305,6 +333,16 @@ class MainWindow(QMainWindow):
         )
         tm.refresh_requested.connect(lambda: self.bus.submit(ShellRefresh()))
 
+        th = self.thinking_page
+        th.update_requested.connect(
+            lambda trigger, slot: self.bus.submit(BtcmUpdate(trigger=trigger, slot=slot))
+        )
+        th.run_requested.connect(
+            lambda question, effort, mode: self.bus.submit(
+                BtcmRun(question=question, effort=effort, mode=mode)
+            )
+        )
+
         # v0.0.6：工作区（侧栏分组 → 请求；页面 → 请求）
         s.switch_workspace.connect(lambda wid: self.bus.submit(WorkspaceSwitch(id=wid)))
         s.collapse_workspace.connect(self._on_collapse_workspace)
@@ -345,9 +383,62 @@ class MainWindow(QMainWindow):
             lambda wid, path: self.bus.submit(WorkspaceDetail(id=wid, path=path))
         )
         wp.open_dir_requested.connect(self._open_path)
+        wp.memory_write_requested.connect(
+            lambda scope, workspace_id, mode, text: self.bus.submit(
+                WorkspaceMemoryWrite(
+                    scope=scope, workspace_id=workspace_id, mode=mode, text=text
+                )
+            )
+        )
+        wp.build_requested.connect(lambda wid: self.bus.submit(WorkspaceBuild(id=wid)))
+
+        lp = self.library_page
+        lp.create_requested.connect(
+            lambda data: self.bus.submit(
+                LibraryCreate(
+                    name=data["name"], root_kind=data["root_kind"], root=data["root"],
+                    group=data["group"], model_ref=data["model_ref"], note=data["note"],
+                )
+            )
+        )
+        lp.update_requested.connect(
+            lambda data: self.bus.submit(
+                LibraryUpdate(
+                    id=data["id"], name=data.get("name"), root=data.get("root"),
+                    group=data.get("group"), model_ref=data.get("model_ref"), note=data.get("note"),
+                )
+            )
+        )
+        lp.delete_requested.connect(lambda lid: self.bus.submit(LibraryDelete(id=lid)))
+        lp.switch_requested.connect(lambda lid: self.bus.submit(LibrarySwitch(id=lid)))
+        lp.refresh_requested.connect(lambda lid: self.bus.submit(LibraryRefresh(id=lid)))
+        lp.detail_requested.connect(
+            lambda lid, offset, event_limit, graph_limit, graph_ids, focus_event_id: self.bus.submit(
+                LibraryDetail(
+                    id=lid, event_offset=offset, event_limit=event_limit,
+                    graph_limit=graph_limit, graph_library_ids=graph_ids,
+                    focus_event_id=focus_event_id,
+                )
+            )
+        )
+        lp.ingest_requested.connect(
+            lambda lid, text, event_type, index, event_id: self.bus.submit(
+                LibraryIngest(
+                    id=lid, text=text, event_type=event_type, index=index, event_id=event_id,
+                )
+            )
+        )
+        lp.query_requested.connect(
+            lambda ids, query, mode, top_k: self.bus.submit(
+                LibraryQuery(lib_ids=ids, query=query, mode=mode, top_k=top_k)
+            )
+        )
 
         self.settings.settings_update.connect(
             lambda section, data: self.bus.submit(SettingsUpdate(section=section, data=data))
+        )
+        self.settings.feature_toggle.connect(
+            self._on_feature_toggle
         )
 
         self.detail.close_requested.connect(self._toggle_detail)
@@ -361,6 +452,73 @@ class MainWindow(QMainWindow):
         self.detail.branch_switch_requested.connect(self._on_switch_branch)
 
     # -- 会话详情（rev24） --------------------------------------------------
+    def _on_feature_toggle(self, name: str, enabled: bool) -> None:
+        """关闭 DPIM 时先清掉 GUI 缓存，再请求核心真卸载。"""
+        if name == "dpim" and not enabled:
+            self.library_page.set_available(False)
+        self.bus.submit(FeatureToggle(name=name, enabled=enabled))
+
+    def _on_command(self, name: str, action: str, argument: str) -> None:
+        """命令系统的**唯一**执行点：把命令映射为既有按钮动作（不新开任何通道）。
+
+        `navigate` → 切页；`new_session` → 发 `NewSession`（可按工作区名定位）；
+        `compress` → 发 `CompressMemory(force=True)`；`detail` → 右栏开关；
+        `theme` → `settings.update(section="ui")`；`clear_view` → 仅清界面；`help` → 展示命令表。
+        """
+        from gui.chat import commands
+
+        if action == "help":
+            QMessageBox.information(self, "可用命令", commands.help_text())
+            return
+        if action == "navigate":
+            command = commands.by_name(name)
+            pages = {
+                "models": self.models,
+                "personas": self.personas_page,
+                "plugins": self.plugins_page,
+                "skills": self.skills_page,
+                "terminal": self.terminal_page,
+                "thinking": self.thinking_page,
+                "library": self.library_page,
+                "workspaces": self.workspaces_page,
+                "settings": self.settings,
+            }
+            widget = pages.get(command.target if command is not None else "")
+            if widget is not None:
+                self.stack.setCurrentWidget(widget)
+            return
+        if action == "new_session":
+            workspace_id = None
+            label = argument.strip()
+            if label:
+                match = next(
+                    (w for w in self._workspaces_cache
+                     if str(w.get("name") or "").strip().casefold() == label.casefold()),
+                    None,
+                )
+                if match is None:
+                    QMessageBox.information(self, "命令", f"未找到工作区：{label}")
+                    return
+                workspace_id = None if match.get("builtin") else match.get("id")
+            self.bus.submit(NewSession(workspace_id=workspace_id))
+            return
+        if action == "compress":
+            if self._current_session_id:
+                self.bus.submit(CompressMemory(force=True))
+            return
+        if action == "detail":
+            self._toggle_detail()
+            return
+        if action == "clear_view":
+            self.chat.clear()
+            return
+        if action == "theme":
+            theme_name = argument.strip().lower()
+            if theme_name not in ("light", "dark"):
+                QMessageBox.information(self, "命令", "用法：/theme light 或 /theme dark")
+                return
+            self.bus.submit(SettingsUpdate(section="ui", data={"theme": theme_name}))
+
     def _toggle_detail(self) -> None:
         visible = not self.detail.isVisible()
         self.detail.setVisible(visible)
@@ -508,6 +666,8 @@ class MainWindow(QMainWindow):
         self.chat.empty.refresh_metrics(used_font)
         self.models.refresh_metrics(used_font)
         self.settings.refresh_metrics(used_font)
+        self.thinking_page.refresh_metrics(used_font)
+        self.library_page.set_theme(used)
         self.models.set_theme(used)
         # 终端监视区是自渲染内容 → 整帧重渲染（颜色/字号经 theme 注入，模板不写死）
         self.terminal_page.set_theme(used, used_font)
@@ -557,17 +717,39 @@ class MainWindow(QMainWindow):
             self.chat.on_tool_call(event)
         elif t == "tool.result":
             self.chat.on_tool_result(event)
+            if str(getattr(event, "call_id", "")).startswith("btcm-page-"):
+                output = event.output if event.ok else (
+                    (event.error or {}).get("message", "") if event.error else ""
+                )
+                self.thinking_page.on_run_result(
+                    bool(event.ok), output or "", event.usage, event.duration_ms
+                )
+        elif t == "btcm.state":
+            self.thinking_page.set_state(event.trigger, event.slot, event.ready)
+        elif t == "think.delta":
+            self.thinking_page.on_delta(event.agent, event.kind, event.text)
+        elif t == "think.iteration":
+            self.thinking_page.on_iteration(event.iteration, event.verdict, event.decision)
         elif t == "error":
             self.chat.on_error(event)
+            if event.scope == "library":
+                self.library_page.set_error(event.message)
         elif t == "provider.list":
             self._providers_cache = list(event.providers)
             self._slots_cache = dict(event.slots or {})
             self.models.update_providers(event.providers, event.slots)
+            self.library_page.set_providers(event.providers)
             self._sync_model_dropdown()
         elif t == "provider.test.result":
             self.models.on_test_result(event)
         elif t == "provider.models.result":
             self.models.on_models_result(event)
+        elif t == "feature.state":
+            self.settings.set_features(event.features)
+            dpim = next((item for item in event.features if item.get("name") == "dpim"), {})
+            self.library_page.set_available(
+                bool(dpim.get("enabled")), str(dpim.get("state", "disabled"))
+            )
         elif t == "settings.state":
             ui = event.data.get("ui", {})
             self._apply_appearance(ui.get("theme"), ui.get("font_size"))
@@ -648,8 +830,40 @@ class MainWindow(QMainWindow):
             self.sidebar.update_workspaces(items, event.current, event.collapsed)
             self.workspaces_page.update_workspaces(items, event.current)
             self.chat.update_workspaces(items, event.current)  # rev58：header ▾ 新建菜单数据源
+            self.terminal_page.set_workspaces(items)
         elif t == "workspace.detail.result":
             self.workspaces_page.on_detail(event)
+        elif t == "workspace.memory.result":
+            if event.ok:
+                QMessageBox.information(
+                    self, "记忆已写入", f"已写入工作区记忆（{event.chars} 字）。"
+                )
+            else:
+                QMessageBox.warning(self, "记忆写入失败", event.error or "写入失败。")
+        elif t == "workspace.build.result":
+            if event.ok:
+                QMessageBox.information(
+                    self,
+                    "构建完成",
+                    f"退出码 {event.exit_code} · 用时 {event.duration_ms} ms\n日志：{event.log_path or '—'}",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "构建未成功",
+                    f"退出码：{event.exit_code if event.exit_code is not None else '—'} · "
+                    f"用时 {event.duration_ms} ms\n日志：{event.log_path or '—'}",
+                )
+        elif t == "library.list":
+            self.library_page.on_list(event)
+        elif t == "library.detail.result":
+            self.library_page.on_detail(event)
+        elif t == "library.graph.result":
+            self.library_page.on_graph(event)
+        elif t == "library.ingest.result":
+            self.library_page.on_ingest_result(event)
+        elif t == "library.query.result":
+            self.library_page.on_query_result(event)
 
     # -- 工作区（v0.0.6） --------------------------------------------------
     def _on_collapse_workspace(self, workspace_id: str, collapsed: bool) -> None:

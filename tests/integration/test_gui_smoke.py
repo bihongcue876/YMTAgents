@@ -857,6 +857,84 @@ def test_session_panel_content_fits_default_width(tmp_path, monkeypatch, qapp):
         window.close()
 
 
+def test_settings_feature_switches_toggle_and_reflect_state(tmp_path, monkeypatch, qapp):
+    """切片 0：设置页「附加功能」滑动开关 —— 初始态来自 feature.state，切换经 bus 真启停。"""
+    import time
+
+    from gui.widgets.switch import Switch
+
+    ctx, window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+
+        switches = window.settings.findChildren(Switch)
+        # 所有配置项均展示；DPIM 宿主已接入，但默认关闭，且未启用时不 import 实现。
+        assert len(switches) == 5
+        assert sum(1 for s in switches if s.isChecked()) == 3
+        assert sum(1 for s in switches if not s.isChecked()) == 2
+        by_name = {str(s.property("featureName")): s for s in switches}
+        assert set(by_name) == {"mcp", "shell", "skills", "btcm", "dpim"}
+        assert by_name["dpim"].isEnabled() is True
+        assert by_name["dpim"].isChecked() is False
+        dpim_badge = next(
+            label
+            for label in window.settings.findChildren(QLabel, "featureState")
+            if label.property("featureName") == "dpim"
+        )
+        assert dpim_badge.text() == "已关闭"
+        original_ids = {name: id(switch) for name, switch in by_name.items()}
+        ctx.controller.push_initial_state()
+        qapp.processEvents()
+        refreshed = {
+            str(s.property("featureName")): s
+            for s in window.settings.findChildren(Switch)
+        }
+        assert len(refreshed) == 5
+        assert {name: id(switch) for name, switch in refreshed.items()} == original_ids
+
+        window.settings.feature_toggle.emit("shell", False)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            current = {
+                str(s.property("featureName")): s
+                for s in window.settings.findChildren(Switch)
+            }
+            if ctx.features.host("shell") is None and not current["shell"].isChecked():
+                break
+            time.sleep(0.02)
+        assert ctx.features.host("shell") is None, "关档必须真卸载"
+        qapp.processEvents()
+        switches = window.settings.findChildren(Switch)
+        by_name = {str(s.property("featureName")): s for s in switches}
+        assert by_name["shell"].isChecked() is False  # 回推后 UI 与核心真值一致
+        assert by_name["dpim"].isEnabled() is True
+
+        window.settings.feature_toggle.emit("shell", True)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            current = {
+                str(s.property("featureName")): s
+                for s in window.settings.findChildren(Switch)
+            }
+            if ctx.features.host("shell") is not None and current["shell"].isChecked():
+                break
+            time.sleep(0.02)
+        assert ctx.features.host("shell") is not None, "回切必须真重装"
+        qapp.processEvents()
+        by_name = {
+            str(s.property("featureName")): s
+            for s in window.settings.findChildren(Switch)
+        }
+        assert by_name["shell"].isChecked() is True
+    finally:
+        ctx.worker.stop()
+        window.close()
+
+
 def test_app_icon_loads_from_feature_ico(qapp):
     """回归锚点（rev35）：应用图标取自 `src/feature/y-ico.ico`（标题栏与任务栏共用）。
 
