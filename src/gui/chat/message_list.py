@@ -102,8 +102,10 @@ class MessageList(QWidget):
         self._messages.clear()
         self._render(jump_bottom=True)
 
-    def add_user(self, text: str) -> None:
-        self._messages.append({"role": "user", "content": text})
+    def add_user(self, text: str, attachments: list[str] | None = None) -> None:
+        self._messages.append(
+            {"role": "user", "content": text, "attachments": list(attachments or [])}
+        )
         self._paint_new_tail()
 
     def begin_assistant(self) -> None:
@@ -257,7 +259,13 @@ class MessageList(QWidget):
             t = event.get("type")
             payload = event.get("payload", {})
             if t == "msg.user":
-                self._messages.append({"role": "user", "content": payload.get("text", "")})
+                self._messages.append(
+                    {
+                        "role": "user",
+                        "content": payload.get("text", ""),
+                        "attachments": list(payload.get("attachments") or []),
+                    }
+                )
             elif t == "msg.assistant.final":
                 self._messages.append(
                     {

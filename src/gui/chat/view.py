@@ -12,7 +12,9 @@ from gui.chat.message_list import MessageList
 
 
 class ChatView(QWidget):
-    send_message = Signal(str)
+    send_message = Signal(str, object)
+    command_run = Signal(str, str, str)  # name, action, argument（命令系统，与按钮等价）
+    command_error = Signal(str)
     cancel_turn = Signal()
     switch_model = Signal(str)
     switch_persona = Signal(str)
@@ -53,6 +55,8 @@ class ChatView(QWidget):
         self.header.new_session_in.connect(self.new_session_in.emit)
         self.header.toggle_detail.connect(self.toggle_detail.emit)
         self.input.send_message.connect(self._on_send)
+        self.input.command_run.connect(self.command_run.emit)
+        self.input.command_error.connect(self.command_error.emit)
         self.input.cancel.connect(self.cancel_turn.emit)
         self.empty.add_model.connect(self.add_model.emit)
         self.empty.start_chat.connect(self.input.focus)
@@ -63,10 +67,10 @@ class ChatView(QWidget):
         """空状态 ⇄ 消息流的**唯一**切换点。"""
         self._stack.setCurrentWidget(self.empty if self.messages.is_empty() else self.messages)
 
-    def _on_send(self, text: str) -> None:
-        self.messages.add_user(text)
+    def _on_send(self, text: str, attachments: list[str]) -> None:
+        self.messages.add_user(text, attachments)
         self._refresh_empty()
-        self.send_message.emit(text)
+        self.send_message.emit(text, attachments)
 
     def set_models(self, providers, current: str | None) -> None:
         self._current_model = current
@@ -77,6 +81,8 @@ class ChatView(QWidget):
     def update_workspaces(self, workspaces: list[dict], current: str) -> None:
         """rev58：工作区列表转发给 header（▾ 新建菜单的数据源）。"""
         self.header.set_workspaces(workspaces, current)
+        selected = next((item for item in workspaces if item.get("id") == current), None)
+        self.input.set_attachment_root(selected.get("root") if selected else None)
 
     def set_personas(self, personas, current: str | None) -> None:
         """角色下拉（rev23）：current = 当前会话所用角色（None → 全局默认）。"""

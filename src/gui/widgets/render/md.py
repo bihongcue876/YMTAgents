@@ -194,10 +194,14 @@ def _page(
     return assemble(_inner(theme, body, css, font_size))
 
 
-def _bubble_user(text: str, index: int = 0) -> str:
+def _bubble_user(text: str, index: int = 0, attachments: list[str] | None = None) -> str:
+    attachment_html = ""
+    if attachments:
+        names = " · ".join(_html.escape(str(path)) for path in attachments)
+        attachment_html = f'<div class="attachments">📎 {names}</div>'
     return (
         f'<div class="msg user" id="m{index}">'
-        f'<div class="bubble">{_html.escape(text or "")}</div></div>'
+        f'<div class="bubble">{_html.escape(text or "")}{attachment_html}</div></div>'
     )
 
 
@@ -285,7 +289,7 @@ def message_row(msg: dict, index: int = 0, theme: str | None = DEFAULT_THEME) ->
     """
     role = msg.get("role")
     if role == "user":
-        return _bubble_user(msg.get("content", ""), index)
+        return _bubble_user(msg.get("content", ""), index, msg.get("attachments"))
     if role == "assistant":
         return _block_assistant(
             msg.get("content", ""),
