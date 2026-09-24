@@ -45,6 +45,8 @@ from shared.envelope import (
     SessionUpdate,
     CompressMemory,
     BranchSession,
+    BuiltinToolState,
+    BuiltinToolToggle,
     RevertSession,
     SwitchBranch,
     SessionBranches,
@@ -144,6 +146,7 @@ class CoreController:
         executor: ToolExecutor | None = None,
         features: FeatureManager | None = None,
         workspace_manager=None,
+        files_manager=None,
     ) -> None:
         self.bridge = bridge
         self.store = store
@@ -158,6 +161,8 @@ class CoreController:
         # 切片 0：附加功能生命周期是宿主的唯一入口；各 manager 经 `features.host()` 实时取。
         self.features = features
         self.workspace_manager = workspace_manager
+        # v0.0.11：文件工具面（precheck 需要「当前工作区 root」→ 由这里按请求实时同步）。
+        self.files_manager = files_manager
         self.current_session_id: str | None = None
         # rev43：confirm 关卡裁决登记（泵取队列时命中；正常分派路径亦可投递）。
         self._gate_decisions: dict[str, bool] = {}
@@ -529,6 +534,7 @@ class CoreController:
         self._emit_features()
         self._emit_libraries()
         self._emit_btcm()
+        self._emit_builtin()  # v0.0.11（D-1）：插件页「内置工具」分区首屏快照
 
     # -- 工作区（v0.0.6） -----------------------------------------------------
     def _session_counts(self) -> dict[str, int]:
@@ -1022,6 +1028,38 @@ error="写入失败；请检查工作区目录与记忆文件。",
             )
         )
 
+    def _on_builtin_toggle(self, request) -> None:
+        """内置工具开关（v0.0.11 D-1）：未知名归 tool_unknown，非法值归 tool_invalid_args。
+
+        先改配置真值（plugins.json -> builtin），再刷新工具面（真卸载），最后回推快照。
+        """
+        known = self.files_manager is None or not hasattr(self.files_manager, "toggle_builtin")
+        if not known and request.name not in self.files_manager.KNOWN_BUILTIN_TOOLS:
+            self._report("config", ErrorCode.TOOL_UNKNOWN.value, "该内置工具不存在。", f"name={request.name}")
+            return
+        if known:
+            self._report("system", ErrorCode.INVALID_REQUEST.value, "内置文件工具未启用。", None)
+            return
+        try:
+            self.files_manager.toggle_builtin(request.name, bool(request.enabled))
+        except ValueError as exc:
+            # 非法值按契约归 invalid_args（一码一义）；未知名已在入口归 tool_unknown
+            self._report("config", ErrorCode.TOOL_INVALID_ARGS.value, str(exc), f"name={request.name}")
+            return
+        self.emit(
+            BuiltinToolState(items=self.files_manager.state())
+        )
+        try:
+            self.files_manager.refresh()
+        except Exception:  # noqa: BLE001 - 刷新失败不计入开关结果
+            log.exception("文件工具面刷新失败")
+
+    def _emit_builtin(self) -> None:
+        """内置工具快照（D-1；无文件工具面时不发，避免假空清单）。"""
+        if self.files_manager is None or not hasattr(self.files_manager, "state"):
+            return
+        self.emit(BuiltinToolState(items=self.files_manager.state()))
+
     def _on_gate_respond(self, request) -> None:
         # 正常路径下 gate.respond 多被 _gate_handler 泵取命中；此处登记以兜底竞态。
         self._gate_decisions[request.call_id] = request.decision == "allow"
@@ -1196,6 +1234,10 @@ error="写入失败；请检查工作区目录与记忆文件。",
 
     # -- 分派 --------------------------------------------------------------
     def handle(self, request) -> None:
+        # v0.0.11：文件工具的 precheck 拿不到 ctx，故在每次请求分发前同步「当前会话」
+        # （工具调用只发生在 msg.user 之内，此处同步足够；换会话会清空读记账）。
+        if self.files_manager is not None:
+            self.files_manager.set_active_session(self.current_session_id)
         t = getattr(request, "type", None)
         if t == "msg.user":
             self._on_send(request)
@@ -1265,6 +1307,12 @@ error="写入失败；请检查工作区目录与记忆文件。",
             self._emit_mcp()
         elif t == "mcp.scan":
             self._on_mcp_scan(request)
+        elif t == "tool.builtin.toggle":
+            self._on_builtin_toggle(request)
+        elif t == "tool.builtin.refresh":
+            self._emit_builtin()
+        elif t == "tool.builtin.toggle":
+            self._on_builtin_toggle(request)
         elif t == "shell.spawn":
             self._on_shell_spawn(request)
         elif t == "shell.close":

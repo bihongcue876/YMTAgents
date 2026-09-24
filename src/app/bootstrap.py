@@ -163,6 +163,21 @@ def bootstrap(
     features.register("dpim", _dpim_factory)
     features.load()
 
+    def _session_root(session_id: str) -> Path | None:
+        """当前会话的工作区 root（文件工具用）；无效 / 旧会话回 None → 一律走关卡。"""
+        try:
+            meta = session_store.get_meta(session_id)
+        except Exception:  # noqa: BLE001 - 无效会话
+            return None
+        return workspace_manager.root_of(meta.workspace_id)
+
+    from core.files.manager import FilesTools
+
+    files_tools = FilesTools(
+        registry, config_store, session_root=_session_root, data_root=root, audit=sink.append_audit
+    )
+    files_tools.refresh()
+
     executor = ToolExecutor(
         registry, store=session_store, emit=bridge.emit_event, audit=sink.append_audit
     )
@@ -183,7 +198,7 @@ def bootstrap(
     controller = CoreController(
         bridge, session_store, gateway, agent, supervisor, registry, config_store, root,
         personas=personas, executor=executor, features=features,
-        workspace_manager=workspace_manager,
+        workspace_manager=workspace_manager, files_manager=files_tools,
     )
     controller.refresh_modules()
     worker = CoreWorker(bridge, controller.handle, on_stop=features.shutdown)
