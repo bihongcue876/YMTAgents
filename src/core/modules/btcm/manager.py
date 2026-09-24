@@ -96,6 +96,11 @@ class BtcmManager(IFeatureHost):
             permission=Permission.SAFE,
             input_schema=_INPUT_SCHEMA,
             timeout_ms=TOOL_TIMEOUT_MS,
+            # v0.0.11（切片 C）：副思考链的使用指引（auto 档已另挂一条明示策略行，两者互补）。
+            prompt_block=(
+                "仅当判断问题存在严重矛盾、或需要多角度对抗检验时调用；其余情况不要调用。"
+                "调用本身只读，不改变工作区。结果供你复核结论，不代表系统立场。"
+            ),
         )
         self._registry.register(spec, self._handle)
         self._registered = True

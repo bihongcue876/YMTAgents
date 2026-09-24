@@ -66,6 +66,9 @@ _FILE_CAP = 65536
 _DEFAULT_RESERVE = 4096
 _DEFAULT_FILE = 8192
 
+#: v0.0.11：环境声明「工具使用指引」段总预算（token，宿主常量非配置项；tool-prompts §2.2）。
+_TOOL_GUIDE_TOKENS = 1200
+
 #: rev42：ReAct 工具循环迭代上限（docs 06 §3）。达到上限后撤工具、强制模型收束作答。
 MAX_TOOL_ITERATIONS = 15
 
@@ -635,6 +638,33 @@ class AgentLoop(IAgentLoop):
             lines.append(f"{name} — {desc}" if desc else name)
         return lines
 
+    def _tool_guide_lines(self) -> tuple[list[str], int]:
+        """工具使用指引段：随开关动态增删，超预算按 内置 > 技能 > MCP 截断。
+
+        截断只影响提示词、**不影响工具可用性**，且只记一次日志（不打扰用户）。
+        """
+        if self.executor is None:
+            return [], 0
+        try:
+            blocks = self.executor.tool_prompt_blocks()
+        except Exception:  # noqa: BLE001 - 指引段非关键路径
+            log.exception("读取工具使用指引失败")
+            return [], 0
+        lines: list[str] = []
+        used = 0
+        dropped = 0
+        for name, block in blocks:
+            text = f"{name}：{block}"
+            cost = estimate_tokens(text)
+            if used + cost > _TOOL_GUIDE_TOKENS:
+                dropped += 1
+                continue
+            lines.append(text)
+            used += cost
+        if dropped:
+            log.info("工具使用指引段超预算，已截断 %d 条（工具仍可用）", dropped)
+        return lines, dropped
+
     def _btcm_policy_lines(self, payloads: list[dict] | None) -> list[str]:
         """自动档副思考链：环境声明挂一条**明示**策略（非隐藏注入，可审计）。
 
@@ -742,6 +772,7 @@ class AgentLoop(IAgentLoop):
                 log.exception("读取附件失败")
                 self._fail(session_id, turn_seq, ErrorCode.STORAGE_ERROR.value, "读取附件失败。")
                 return None
+        guide_lines, _guide_dropped = self._tool_guide_lines()
         config = ConfigSnapshot(
             system_prompt=system_prompt,
             memory=read_cascade(self.root, session_id, workspace_dirs),
@@ -754,6 +785,7 @@ class AgentLoop(IAgentLoop):
             tool_lines=self._tool_lines(payloads),
             tools_tokens=(self.executor.tools_tokens() if (payloads and self.executor) else 0),
             policy_lines=self._btcm_policy_lines(payloads),
+            tool_guide_lines=guide_lines,
         )
         budget = config.window - config.reserve if config.window else _UNBOUNDED
         snapshot = self.store.resume(session_id)

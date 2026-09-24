@@ -211,6 +211,12 @@ class ShellManager(IShellManager):
             timeout_ms=self._config.timeout_ms,
             availability=lambda: self._interp is not None,
             precheck=self._precheck,
+            # v0.0.11（切片 C）：「本机命令」的第一批使用指引（≤600 字）。
+            prompt_block=(
+                "在本机解释器里执行一条命令（持久进程，可复用）。限时即杀、输出过脱敏；"
+                "需要交互输入的命令会等到超时，不要发起。命令文本是给解释器的，不是给用户的；"
+                "说明性结论请用中文回给用户。"
+            ),
         )
         self._registry.register(spec, self._handle_exec)
         self._registered = True
