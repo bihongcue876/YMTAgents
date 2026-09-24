@@ -70,7 +70,14 @@ class IShellManager(ABC):
     def input(self, shell_id: str, command: str) -> None: ...
 
     @abstractmethod
+    def run_user_command(self, command: str, cwd: str, workspace_id: str,
+                         timeout_ms: int) -> dict: ...
+
+    @abstractmethod
     def close_session(self, session_id: str) -> None: ...
+
+    @abstractmethod
+    def close_workspace(self, workspace_id: str) -> None: ...
 
     @abstractmethod
     def list_status(self) -> list[dict]: ...
@@ -106,11 +113,13 @@ class ShellManager(IShellManager):
         audit: Callable[..., None] | None = None,
         emit: Callable[[Any], None] | None = None,
         interp: Interpreter | None = None,
+        resolve_workspace: Callable[[str], tuple[str | None, str | None]] | None = None,
     ) -> None:
         self._registry = registry
         self._config_store = config_store
         self._audit = audit or (lambda *a, **k: None)
         self._emit = emit or (lambda *a, **k: None)
+        self._resolve_workspace = resolve_workspace or (lambda _session_id: (None, None))
         self._config = ShellConfig()
         self._interp = interp
         self._detected = interp is not None
@@ -118,8 +127,20 @@ class ShellManager(IShellManager):
         self._shells: dict[str, ShellProcess] = {}
         self._order: list[str] = []  # 稳定展示顺序
         self._session_shell: dict[str, str] = {}
+        self._shell_session: dict[str, str] = {}
+        self._shell_workspace: dict[str, str | None] = {}
         self._counter = 0
         self._registered = False
+
+    # ---------- 附加功能契约（切片 0）----------
+    def activate(self) -> None:
+        """装配：读配置 + 探测解释器 + 注册 `shell.exec`。"""
+        self.load()
+
+    def deactivate(self) -> None:
+        """真卸载：注销 `shell.exec` 并关闭全部子进程（六条硬指标）。"""
+        self._unregister()
+        self.shutdown()
 
     # ---------- 配置与注册 ----------
     def load(self) -> None:
@@ -152,10 +173,11 @@ class ShellManager(IShellManager):
         kind = interp.kind if interp else "?"
         syntax = "PowerShell" if interp and interp.dialect == "ps" else "POSIX shell"
         return (
-            f"在本机 {kind}（{syntax} 语法）执行命令，取回输出、退出码与工作目录。"
-            "变量与当前目录在多次调用之间持续；省略 shell_id 即复用本会话默认 shell，"
-            f"new=true 另开一个（全应用最多 {self._max_shells()} 个）。命令可用换行写多行脚本。"
-            "默认需用户逐次确认；勿用需要交互输入的命令（会一直等到超时）。"
+            f"在本机 {kind}（{syntax} 语法）执行命令，取回输出/退出码/工作目录。"
+            "变量与当前目录在多次调用之间持续；省略 shell_id 复用本会话默认 shell，"
+            f"new=true 另开一个（最多 {self._max_shells()} 个）。命令可写多行脚本。"
+            "新建时 cwd 默认取当前工作区 root，显式 cwd 优先；需逐次确认；"
+            "勿用需要交互输入的命令（会等到超时）。"
         )
 
     def _register(self) -> None:
@@ -269,7 +291,13 @@ class ShellManager(IShellManager):
         self._counter += 1
         return f"s{self._counter}"
 
-    def spawn(self, cwd: str | None = None, session_id: str = "") -> str | None:
+    def spawn(
+        self,
+        cwd: str | None = None,
+        session_id: str = "",
+        workspace_id: str | None = None,
+        workspace_root: str | None = None,
+    ) -> str | None:
         """新建 shell；成功返回 id，失败返回 None（原因见 `last_error()`）。"""
         self._reap()
         if self._interp is None:
@@ -281,7 +309,7 @@ class ShellManager(IShellManager):
             )
             return None
         shell_id = self._new_id()
-        workdir = cwd or self._config.cwd or default_cwd()
+        workdir = cwd or workspace_root or self._config.cwd or default_cwd()
         proc = ShellProcess(
             self._interp,
             workdir,
@@ -297,7 +325,9 @@ class ShellManager(IShellManager):
             return None
         self._shells[shell_id] = proc
         self._order.append(shell_id)
+        self._shell_workspace[shell_id] = workspace_id
         if session_id:
+            self._shell_session[shell_id] = session_id
             self._session_shell.setdefault(session_id, shell_id)
         self._error = ""
         self._audit("shell.spawn", id=shell_id, kind=self._interp.kind, ok=True)
@@ -315,11 +345,20 @@ class ShellManager(IShellManager):
         self._emit_list()
 
     def close_session(self, session_id: str) -> None:
-        """会话删除时关闭其派生的默认 shell（避免悬挂进程）。"""
-        bound = self._session_shell.pop(session_id, "")
-        if bound:
-            self.close(bound, reason="session_deleted")
-        else:
+        """会话删除/迁移时关闭其全部 shell（默认及显式新建），避免 cwd 越界残留。"""
+        bound = [sid for sid, owner in self._shell_session.items() if owner == session_id]
+        for shell_id in bound:
+            self.close(shell_id, reason="session_workspace_changed")
+        self._session_shell.pop(session_id, None)
+        if not bound:
+            self._emit_list()
+
+    def close_workspace(self, workspace_id: str) -> None:
+        """root 变更/工作区移除后关闭该 workspace 下的持久 shell。"""
+        bound = [sid for sid, owner in self._shell_workspace.items() if owner == workspace_id]
+        for shell_id in bound:
+            self.close(shell_id, reason="workspace_changed")
+        if not bound:
             self._emit_list()
 
     def default_shell_of(self, session_id: str) -> str | None:
@@ -330,25 +369,43 @@ class ShellManager(IShellManager):
         self._shells.pop(shell_id, None)
         if shell_id in self._order:
             self._order.remove(shell_id)
+        self._shell_session.pop(shell_id, None)
+        self._shell_workspace.pop(shell_id, None)
         for session_id, bound in list(self._session_shell.items()):
             if bound == shell_id:
                 self._session_shell.pop(session_id, None)
 
-    def _resolve(self, args: dict, session_id: str) -> tuple[str | None, str]:
+    def _resolve(
+        self, args: dict, session_id: str, workspace_id: str | None, workspace_root: str | None
+    ) -> tuple[str | None, str]:
         """解析本次调用落在哪个 shell 上；返回 (shell_id, 错误说明)。"""
         requested = str(args.get("shell_id") or "").strip()
         want_new = bool(args.get("new"))
         if want_new:
-            created = self.spawn(cwd=args.get("cwd"), session_id=session_id)
+            created = self.spawn(
+                cwd=args.get("cwd"), session_id=session_id,
+                workspace_id=workspace_id, workspace_root=workspace_root,
+            )
             return created, ("" if created else self._error)
         if requested:
             if requested not in self._shells:
                 return None, f"未知的 shell_id：{requested}（可用：{', '.join(self._order) or '无'}）"
+            owner = self._shell_session.get(requested)
+            if owner and owner != session_id:
+                return None, "该 shell 属于另一个会话，不能跨会话复用。"
+            if self._shell_workspace.get(requested) != workspace_id:
+                return None, "该 shell 属于另一个工作区；请为当前工作区新建 shell。"
             return requested, ""
         existing = self._session_shell.get(session_id) or ""
+        if existing and self._shell_workspace.get(existing) != workspace_id:
+            self.close_session(session_id)
+            existing = ""
         if existing and existing in self._shells and self._shells[existing].alive:
             return existing, ""
-        created = self.spawn(cwd=args.get("cwd"), session_id=session_id)
+        created = self.spawn(
+            cwd=args.get("cwd"), session_id=session_id,
+            workspace_id=workspace_id, workspace_root=workspace_root,
+        )
         return created, ("" if created else self._error)
 
     # ---------- 工具执行 ----------
@@ -358,7 +415,14 @@ class ShellManager(IShellManager):
         if not command.strip():
             return _result_error(ErrorCode.TOOL_INVALID_ARGS, "命令不能为空。")
         session_id = str(getattr(ctx, "session_id", "") or "")
-        shell_id, why = self._resolve(args, session_id)
+        workspace_id: str | None = None
+        workspace_root: str | None = None
+        if session_id:
+            try:
+                workspace_id, workspace_root = self._resolve_workspace(session_id)
+            except Exception:  # noqa: BLE001 - workspace 解析失败退回既有 cwd 配置
+                log.exception("解析会话工作区失败，回退 shell.cwd 配置")
+        shell_id, why = self._resolve(args, session_id, workspace_id, workspace_root)
         if shell_id is None:
             return _result_error(ErrorCode.TOOL_INVALID_ARGS, why or "无法取得可用 shell。")
         proc = self._shells[shell_id]
@@ -436,20 +500,61 @@ class ShellManager(IShellManager):
         finally:
             self._emit_list()
 
+    def run_user_command(self, command: str, cwd: str, workspace_id: str,
+                         timeout_ms: int) -> dict:
+        """显式用户动作（工作区构建）：共用持久 shell 进程实现，但不注册为模型工具/不走 gate。
+
+        命令由界面逐次确认后提交；审计仅记工作区、退出码与耗时，不记命令原文。
+        """
+        text = str(command or "").strip("\n")
+        if not text.strip():
+            raise ValueError("构建命令不能为空。")
+        shell_id = self.spawn(cwd=cwd, workspace_id=workspace_id, workspace_root=cwd)
+        if shell_id is None:
+            raise RuntimeError(self._error or "无法启动构建终端。")
+        proc = self._shells[shell_id]
+        started = time.monotonic()
+        try:
+            run = proc.run(text, timeout_ms=self._timeout_of({"timeout_ms": timeout_ms}))
+            self._audit(
+                "workspace.build.exec", workspace_id=workspace_id,
+                ok=True, exit=run.exit_code, duration_ms=run.duration_ms,
+            )
+            return {
+                "ok": run.exit_code == 0,
+                "exit_code": run.exit_code,
+                "duration_ms": run.duration_ms,
+                "output": redact(run.output or "") or "",
+            }
+        except Exception as exc:  # noqa: BLE001 - build result consumes safe error summary
+            duration = int((time.monotonic() - started) * 1000)
+            self._audit(
+                "workspace.build.exec", workspace_id=workspace_id,
+                ok=False, error=type(exc).__name__, duration_ms=duration,
+            )
+            return {
+                "ok": False,
+                "exit_code": None,
+                "duration_ms": duration,
+                "output": redact(str(exc)) or "构建执行失败。",
+            }
+        finally:
+            self.close(shell_id, reason="workspace_build")
+
     # ---------- 查询与状态 ----------
     def last_error(self) -> str:
         return self._error
 
     def list_status(self) -> list[dict]:
         """池快照（供终端页监控）：附上「所属会话」，便于用户分辨是谁开的。"""
-        reverse = {shell_id: session for session, shell_id in self._session_shell.items()}
         out: list[dict] = []
         for shell_id in self._order:
             proc = self._shells.get(shell_id)
             if proc is None:
                 continue
             info = proc.info()
-            info["session"] = reverse.get(shell_id, "")
+            info["session"] = self._shell_session.get(shell_id, "")
+            info["workspace_id"] = self._shell_workspace.get(shell_id)
             out.append(info)
         return out
 
@@ -486,7 +591,7 @@ class ShellManager(IShellManager):
     def _emit_output(self, shell_id: str, chunk: str) -> None:
         from shared.envelope import ShellOutput
 
-        self._emit(ShellOutput(id=shell_id, chunk=chunk))
+        self._emit(ShellOutput(id=shell_id, chunk=redact(chunk) or ""))
 
 
 __all__ = [

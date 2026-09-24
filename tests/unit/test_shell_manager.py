@@ -38,7 +38,9 @@ def _interp(kind: str = "bash") -> Interpreter:
 class _Harness:
     """把 manager + executor + 审计/关卡记录装在一起，便于逐条断言。"""
 
-    def __init__(self, tmp_path, kind: str = "bash", shell: ShellConfig | None = None):
+    def __init__(
+        self, tmp_path, kind: str = "bash", shell: ShellConfig | None = None, resolve_workspace=None
+    ):
         self.store = ConfigStore(tmp_path)
         if shell is not None:
             self.store.save("modules", ModulesConfig(shell=shell))
@@ -52,6 +54,7 @@ class _Harness:
             audit=lambda action, **fields: self.audits.append((action, fields)),
             emit=self.events.append,
             interp=_interp(kind),
+            resolve_workspace=resolve_workspace,
         )
         self.manager.load()
         self.executor = ToolExecutor(
@@ -111,6 +114,89 @@ def test_description_names_the_interpreter_kind(tmp_path):
 
 def test_default_permission_is_confirm(h):
     assert h.manager.effective_permission() == "confirm"
+
+
+def test_workspace_root_is_default_cwd_but_explicit_cwd_wins(tmp_path):
+    workspace = tmp_path / "workspace-a"
+    explicit = tmp_path / "explicit"
+    workspace.mkdir()
+    explicit.mkdir()
+    harness = _Harness(
+        tmp_path / "data",
+        resolve_workspace=lambda sid: ("ws_a", str(workspace)),
+    )
+    try:
+        harness.exec("echo workspace")
+        first = harness.manager.list_status()[0]
+        assert pathlib.Path(first["cwd"]) == workspace
+        assert first["workspace_id"] == "ws_a"
+
+        harness.exec("echo explicit", new=True, cwd=str(explicit))
+        second = harness.manager.list_status()[1]
+        assert pathlib.Path(second["cwd"]) == explicit
+        assert second["workspace_id"] == "ws_a"
+    finally:
+        harness.close()
+
+
+def test_shell_config_cwd_remains_fallback_when_session_has_no_workspace(tmp_path):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    harness = _Harness(
+        tmp_path / "data",
+        shell=ShellConfig(cwd=str(configured)),
+        resolve_workspace=lambda _sid: (None, None),
+    )
+    try:
+        harness.exec("echo config")
+        assert pathlib.Path(harness.manager.list_status()[0]["cwd"]) == configured
+    finally:
+        harness.close()
+
+
+def test_run_user_command_shares_pool_but_never_registers_a_tool(tmp_path):
+    """构建走用户手动通道：共用 shell 实现、命令执行后关闭，且不新增注册工具。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    harness = _Harness(tmp_path / "data")
+    try:
+        before = {spec.name for spec in harness.registry.snapshot()}
+        result = harness.manager.run_user_command("echo built", str(workspace), "ws_1", 5000)
+        assert result["ok"] is True
+        assert result["exit_code"] == 0
+        assert "built" in result["output"]
+        assert harness.gates == []  # 用户通道不过关卡
+        assert harness.manager.list_status() == []  # 构建用的 shell 已回收
+        assert {spec.name for spec in harness.registry.snapshot()} == before  # 能力面零扩张
+        assert "workspace.build.exec" in harness.actions()
+    finally:
+        harness.close()
+
+
+def test_run_user_command_reports_failure_without_raising(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    harness = _Harness(tmp_path / "data")
+    try:
+        result = harness.manager.run_user_command("fail", str(workspace), "ws_1", 5000)
+        assert result["ok"] is False
+        assert result["exit_code"] == 1
+        assert harness.manager.list_status() == []
+    finally:
+        harness.close()
+
+
+def test_close_workspace_closes_every_shell_associated_with_it(tmp_path):
+    harness = _Harness(tmp_path)
+    try:
+        assert harness.manager.spawn(session_id="sess_a", workspace_id="ws_a")
+        assert harness.manager.spawn(session_id="sess_b", workspace_id="ws_a")
+        assert harness.manager.spawn(session_id="sess_c", workspace_id="ws_b")
+        harness.manager.close_workspace("ws_a")
+        remaining = harness.manager.list_status()
+        assert [row["session"] for row in remaining] == ["sess_c"]
+    finally:
+        harness.close()
 
 
 def test_permission_override_from_config(tmp_path):

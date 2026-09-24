@@ -153,6 +153,33 @@ def safe_child(root: str | Path, relative: str) -> Path:
     return abs_path(Path(root) / text)
 
 
+def resolve_relative_file(root: str | Path, relative: str, *, must_exist: bool) -> Path:
+    """把相对 root 的文件子路径解析为绝对路径；拒绝绝对路径/`..`/符号链接/越界。
+
+    `must_exist=False` 用于新建写；此时不要求文件已存在，但仍逐段拒绝符号链接。
+    """
+    text = str(relative or "").strip().replace("\\", "/")
+    if not text:
+        raise WorkspacePathError("文件名不能为空。")
+    candidate = Path(text)
+    if candidate.is_absolute() or candidate.drive or candidate.root:
+        raise WorkspacePathError("只接受相对工作区根目录的文件路径。")
+    if ".." in candidate.parts:
+        raise WorkspacePathError("文件路径不得包含 ..。")
+    base = abs_path(root)
+    current = base
+    for part in candidate.parts:
+        current = current / part
+        if current.is_symlink():
+            raise WorkspacePathError("文件路径不得包含符号链接。")
+    target = abs_path(base / text)
+    if not is_under(target, base):
+        raise WorkspacePathError("文件路径越出工作区根目录。")
+    if must_exist and not target.is_file():
+        raise WorkspacePathError("目标不是已存在的普通文件。")
+    return target
+
+
 def unique_paths(paths: list[Path]) -> list[Path]:
     """按物理路径去重**并保序**（记忆级联用：`active == default` 时两层的同一文件只留一次）。
 

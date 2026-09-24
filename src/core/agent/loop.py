@@ -30,6 +30,7 @@ from shared.redact import redact
 from shared.tokens import estimate_tokens
 
 from core.agent.cancel import CancelToken
+from core.agent.attachments import AttachmentError, load_attachments
 from core.agent.context import (
     DEFAULT_SYSTEM_PROMPT,
     ConfigSnapshot,
@@ -174,6 +175,8 @@ class AgentLoop(IAgentLoop):
         assembler: ContextAssembler | None = None,
         personas: "PersonaStore | None" = None,
         executor: IToolExecutor | None = None,
+        workspace_memory_paths: Callable[[str], list[Path]] | None = None,
+        workspace_root: Callable[[str], Path | None] | None = None,
     ) -> None:
         self.store = store
         self.gateway = gateway
@@ -185,6 +188,9 @@ class AgentLoop(IAgentLoop):
         self.personas = personas
         # rev42：工具执行器（None = 无工具，行为与首期一致）
         self.executor = executor
+        # 工作区级联路径由 app 注入，避免 core.agent 反向依赖 core.workspace。
+        self._workspace_memory_paths = workspace_memory_paths
+        self._workspace_root = workspace_root
         self._active: dict[str, CancelToken] = {}
         # v0.0.1：最近一次装配用量（供阈值自动压缩判定「占用」）
         self._usage_by_session: dict[str, ContextUsage] = {}
@@ -526,7 +532,9 @@ class AgentLoop(IAgentLoop):
             return
 
         payloads = self._tool_payloads()
-        messages = self._prepare_context(session_id, turn_seq, model_id, meta, payloads)
+        messages = self._prepare_context(
+            session_id, turn_seq, model_id, meta, payloads, user_message.attachments
+        )
         if messages is None:
             return  # 超窗：_prepare_context 内已上报 context_overflow
 
@@ -627,6 +635,27 @@ class AgentLoop(IAgentLoop):
             lines.append(f"{name} — {desc}" if desc else name)
         return lines
 
+    def _btcm_policy_lines(self, payloads: list[dict] | None) -> list[str]:
+        """自动档副思考链：环境声明挂一条**明示**策略（非隐藏注入，可审计）。
+
+        仅当副思考链已启用、档位为自动、且 `btcm.think` 在当前可见工具中才挂载；
+        默认极少触发（由模型自判「严重矛盾」，不设硬阈值）。
+        """
+        if not payloads or self.executor is None:
+            return []
+        if not any((p.get("function") or {}).get("name") == "btcm.think" for p in payloads):
+            return []
+        try:
+            modules = self.config_store.load("modules")
+        except Exception:  # noqa: BLE001 - 策略行非关键路径，读失败即不挂
+            return []
+        if getattr(modules.features, "btcm", False) and modules.btcm.trigger == "auto":
+            return [
+                "当判断问题存在严重矛盾、或需要多角度对抗检验时，可调用 btcm.think 发起一次"
+                "中级思考（effort=standard）；其余情况不调用。"
+            ]
+        return []
+
     def _run_tools(
         self,
         session_id: str,
@@ -664,7 +693,8 @@ class AgentLoop(IAgentLoop):
             )
 
     def _prepare_context(
-        self, session_id: str, turn_seq: int, model_id: str, meta, payloads: list[dict] | None = None
+        self, session_id: str, turn_seq: int, model_id: str, meta,
+        payloads: list[dict] | None = None, attachments: list[str] | None = None,
     ) -> list[dict] | None:
         """按会话策略组装回合上下文；超窗时上报并返回 None（rev22 抽取 / rev24 改策略）。
 
@@ -682,16 +712,48 @@ class AgentLoop(IAgentLoop):
         use_memory, _compress, _auto = effective_switches(meta, self.config_store.load("memory"))
         memory_meta = self.store.read_memory(session_id) if use_memory else None
         memory_text = self.store.read_memory_text(session_id) if memory_meta is not None else ""
+        try:
+            workspace_dirs = (
+                self._workspace_memory_paths(session_id)
+                if self._workspace_memory_paths is not None else None
+            )
+        except Exception:  # noqa: BLE001 - 记忆路径缺层不得阻断基础对话
+            log.exception("解析工作区记忆级联路径失败")
+            workspace_dirs = []
+        files: list[tuple[str, str]] = []
+        if attachments:
+            try:
+                workspace_root = (
+                    Path(self._workspace_root(session_id))
+                    if self._workspace_root is not None else self.root / "workspace"
+                )
+                files = load_attachments(
+                    workspace_root,
+                    attachments,
+                    self.root / "workspace" / "files",
+                )
+            except AttachmentError as exc:
+                self._fail(
+                    session_id, turn_seq, ErrorCode.INVALID_REQUEST.value,
+                    redact(f"附件不可用：{exc}") or "附件不可用。",
+                )
+                return None
+            except Exception:  # noqa: BLE001 - 读取故障不允许静默遗漏挂载
+                log.exception("读取附件失败")
+                self._fail(session_id, turn_seq, ErrorCode.STORAGE_ERROR.value, "读取附件失败。")
+                return None
         config = ConfigSnapshot(
             system_prompt=system_prompt,
-            memory=read_cascade(self.root, session_id),
+            memory=read_cascade(self.root, session_id, workspace_dirs),
             session_memory=memory_text,
+            files=files,
             reserve=effective_reserve(_DEFAULT_RESERVE, window),
             file_truncate=effective_file_cap(_DEFAULT_FILE, window),
             window=window,
             main_model=model_id,
             tool_lines=self._tool_lines(payloads),
             tools_tokens=(self.executor.tools_tokens() if (payloads and self.executor) else 0),
+            policy_lines=self._btcm_policy_lines(payloads),
         )
         budget = config.window - config.reserve if config.window else _UNBOUNDED
         snapshot = self.store.resume(session_id)

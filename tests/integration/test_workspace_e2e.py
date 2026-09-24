@@ -17,21 +17,28 @@ from shared.envelope import (
     MoveSession,
     NewSession,
     ResumeSession,
+    SendMessage,
+    ShellSpawn,
     SettingsUpdate,
     WorkspaceCreate,
     WorkspaceDelete,
     WorkspaceDetail,
+WorkspaceMemoryWrite,
+    WorkspaceBuild,
     WorkspaceRefresh,
     WorkspaceSwitch,
     WorkspaceUpdate,
 )
 from shared.ids import WS_DEFAULT
+from shared.schema import ModulesConfig, ShellConfig
 from tests.mocks.gateway import MockGateway
+from core.store.config_store import ConfigStore
 
 
-def _boot(tmp_path, monkeypatch):
+def _boot(tmp_path, monkeypatch, gateway=None):
     monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "ymtdata")
-    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda _store: MockGateway())
+    gateway = gateway or MockGateway()
+    ctx = bootstrap_mod.bootstrap(gateway_factory=lambda _store: gateway)
     events: list = []
     ctx.bridge.event_received.connect(events.append)
     return ctx, events
@@ -180,6 +187,202 @@ def test_move_session_between_workspaces(tmp_path, monkeypatch):
     ctx.controller.handle(NewSession(title="先放默认"))
     session_id = ctx.controller.current_session_id
     assert _meta_of(ctx, session_id)["workspace_id"] is None
+
+
+def test_workspace_memory_write_scope_append_replace_and_redaction(tmp_path, monkeypatch):
+    ctx, events = _boot(tmp_path, monkeypatch)
+    external = tmp_path / "memory-project"
+    external.mkdir()
+    ctx.controller.handle(WorkspaceCreate(name="记忆项目", root_kind="external", root=str(external)))
+    workspace_id = _last(events, "workspace.list").current
+    target = external / ".ymtdata" / "AGENTS.md"
+
+    ctx.controller.handle(
+        WorkspaceMemoryWrite(scope="current", mode="append", text="Use the project conventions.")
+    )
+    assert "Use the project conventions." in target.read_text(encoding="utf-8")
+    assert _last(events, "workspace.memory.result").ok is True
+
+    ctx.controller.handle(
+        WorkspaceMemoryWrite(
+            scope="specific", workspace_id=workspace_id, mode="append",
+            text="api_key=sk-abc123456789 must be redacted.",
+        )
+    )
+    saved = target.read_text(encoding="utf-8")
+    assert "sk-abc123456789" not in saved
+    assert "Use the project conventions." in saved
+    assert target.with_suffix(".md.bak").exists()
+
+    ctx.controller.handle(
+        WorkspaceMemoryWrite(scope="specific", workspace_id=workspace_id,
+                             mode="replace", text="Only the replacement remains.")
+    )
+    saved = target.read_text(encoding="utf-8")
+    assert saved.strip() == "Only the replacement remains."
+    assert target.with_suffix(".md.bak").read_text(encoding="utf-8").find("Use the project conventions.") >= 0
+
+
+def test_workspace_memory_cascade_reaches_model_in_general_to_specific_order(tmp_path, monkeypatch):
+    gateway = MockGateway()
+    ctx, events = _boot(tmp_path, monkeypatch, gateway)
+    external = tmp_path / "project-memory"
+    external.mkdir()
+    try:
+        ctx.controller.handle(WorkspaceMemoryWrite(scope="default", text="DEFAULT-RULE"))
+        ctx.controller.handle(WorkspaceCreate(name="Project", root_kind="external", root=str(external)))
+        workspace_id = _last(events, "workspace.list").current
+        ctx.controller.handle(WorkspaceMemoryWrite(scope="current", text="ACTIVE-RULE"))
+        ctx.controller.handle(NewSession(title="scoped", workspace_id=workspace_id))
+        ctx.controller.handle(SendMessage(text="test memory order"))
+
+        system = gateway.calls[-1]["messages"][0]["content"]
+        assert "DEFAULT-RULE" in system and "ACTIVE-RULE" in system
+        assert system.index("DEFAULT-RULE") < system.index("ACTIVE-RULE")
+    finally:
+        ctx.worker.stop()
+
+
+def test_workspace_build_runs_in_workspace_and_writes_artifacts(tmp_path, monkeypatch):
+    """切片 4：构建命令在 A 的 root 执行、日志落 artifacts/<ts>/、审计不记命令原文。"""
+    import sys
+
+    from core.shell import manager as shell_module
+    from core.shell.process import Interpreter
+
+    fake = Path(__file__).resolve().parents[1] / "mocks" / "fake_shell.py"
+    interpreter = Interpreter(kind="bash", path=sys.executable, argv=(sys.executable, "-u", str(fake)))
+    monkeypatch.setattr(shell_module, "detect", lambda _kind="auto": interpreter)
+    ctx, events = _boot(tmp_path, monkeypatch)
+    external = tmp_path / "build-project"
+    external.mkdir()
+    try:
+        ctx.controller.handle(
+            WorkspaceCreate(name="构建项目", root_kind="external", root=str(external),
+                            build_cmd="echo building-artifact")
+        )
+        workspace_id = _last(events, "workspace.list").current
+        ctx.controller.handle(WorkspaceBuild(id=workspace_id))
+
+        result = _last(events, "workspace.build.result")
+        assert result is not None and result.ok is True
+        assert result.exit_code == 0
+        assert "building-artifact" in result.output
+        log_path = Path(result.log_path)
+        assert log_path.exists() and "building-artifact" in log_path.read_text(encoding="utf-8")
+        metadata = json.loads((log_path.parent / "build.json").read_text(encoding="utf-8"))
+        assert metadata["command"] == "echo building-artifact"
+        assert metadata["exit_code"] == 0
+        # 审计不记命令原文（沿 shell 先例）
+        audit_text = (Path(ctx.root) / "logs" / "audit.jsonl").read_text(encoding="utf-8")
+        assert "building-artifact" not in audit_text
+        assert "workspace.build" in audit_text
+    finally:
+        ctx.worker.stop()
+
+
+def test_workspace_build_without_command_reports_readable_error(tmp_path, monkeypatch):
+    ctx, events = _boot(tmp_path, monkeypatch)
+    try:
+        ctx.controller.handle(WorkspaceCreate(name="无命令"))
+        workspace_id = _last(events, "workspace.list").current
+        count = len([e for e in events if e.type == "error"])
+        ctx.controller.handle(WorkspaceBuild(id=workspace_id))
+        errors = [e for e in events if e.type == "error"]
+        assert len(errors) > count
+        assert errors[-1].code == "invalid_request"
+        assert not [e for e in events if e.type == "workspace.build.result"]
+    finally:
+        ctx.worker.stop()
+
+
+def test_workspace_attachments_are_resolved_and_injected_as_bounded_text(tmp_path, monkeypatch):
+    gateway = MockGateway()
+    ctx, events = _boot(tmp_path, monkeypatch, gateway)
+    external = tmp_path / "attachment-project"
+    external.mkdir()
+    (external / "notes.txt").write_text("ATTACHMENT-CONTENT api_key=sk-abc123456789", encoding="utf-8")
+    try:
+        ctx.controller.handle(WorkspaceCreate(name="Files", root_kind="external", root=str(external)))
+        workspace_id = _last(events, "workspace.list").current
+        ctx.controller.handle(NewSession(title="attachment", workspace_id=workspace_id))
+        session_id = ctx.controller.current_session_id
+        ctx.controller.handle(SendMessage(text="read this", attachments=["notes.txt"]))
+
+        system = gateway.calls[-1]["messages"][0]["content"]
+        assert "ATTACHMENT-CONTENT" in system
+        assert "notes.txt" in system
+        assert "sk-abc123456789" not in system
+        usage = [
+            event for event in ctx.session_store.sink.read_events(session_id)
+            if event.get("type") == "ctx.usage"
+        ][-1]
+        assert usage["payload"]["segments"]["files"] > 0
+
+        calls_before = len(gateway.calls)
+        ctx.controller.handle(SendMessage(text="escape", attachments=["../outside.txt"]))
+        error = _last(events, "error")
+        assert error is not None and error.code == "invalid_request"
+        assert len(gateway.calls) == calls_before
+    finally:
+        ctx.worker.stop()
+
+
+def test_shell_exec_and_manual_spawn_start_in_session_workspace(tmp_path, monkeypatch):
+    """slice 2：模型 shell.exec 与终端页手动 spawn 都以所属 workspace root 起壳。"""
+    import sys
+
+    from core.shell import manager as shell_module
+    from core.shell.process import Interpreter
+
+    fake = Path(__file__).resolve().parents[1] / "mocks" / "fake_shell.py"
+    interpreter = Interpreter(
+        kind="bash", path=sys.executable, argv=(sys.executable, "-u", str(fake))
+    )
+    monkeypatch.setattr(shell_module, "detect", lambda _kind="auto": interpreter)
+    gateway = MockGateway(
+        tool_call_rounds=[
+            [{"id": "call_workspace_shell", "name": "shell.exec",
+              "arguments": json.dumps({"command": "pwd"})}]
+        ]
+    )
+    ConfigStore(tmp_path / "ymtdata").save(
+        "modules", ModulesConfig(shell=ShellConfig(tool_permissions={"shell.exec": "safe"}))
+    )
+    ctx, events = _boot(tmp_path, monkeypatch, gateway)
+    root_a = tmp_path / "project-a"
+    root_a.mkdir()
+    root_b = tmp_path / "project-b"
+    root_b.mkdir()
+    try:
+        ctx.controller.handle(WorkspaceCreate(name="A", root_kind="external", root=str(root_a)))
+        workspace_id = _last(events, "workspace.list").current
+        ctx.controller.handle(NewSession(title="A session", workspace_id=workspace_id))
+        session_id = ctx.controller.current_session_id
+        ctx.controller.handle(SendMessage(text="where am I?"))
+
+        shell = ctx.features.host("shell")
+        assert shell is not None
+        status = shell.list_status()[0]
+        assert Path(status["cwd"]) == root_a
+        assert status["workspace_id"] == workspace_id
+        tool_result = next(
+            event for event in reversed(ctx.session_store.sink.read_events(session_id))
+            if event.get("type") == "tool.result"
+        )
+        assert str(root_a) in tool_result["payload"]["output"]
+
+        ctx.controller.handle(ShellSpawn())
+        assert len(shell.list_status()) == 2
+        assert {row["workspace_id"] for row in shell.list_status()} == {workspace_id}
+
+        # 更换 root 后关闭旧 cwd 的持久 shell；下一次调用再按新 root 惰性重建。
+        ctx.controller.handle(
+            WorkspaceUpdate(id=workspace_id, name="A", root=str(root_b))
+        )
+        assert shell.list_status() == []
+    finally:
+        ctx.worker.stop()
 
     ctx.controller.handle(MoveSession(session_id=session_id, workspace_id=workspace_id))
     assert _meta_of(ctx, session_id)["workspace_id"] == workspace_id

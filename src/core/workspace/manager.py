@@ -23,9 +23,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from shared.ids import WS, WS_DEFAULT, new_id
+from shared.redact import redact
 from shared.schema import WorkspaceIndex, WorkspaceRecord, WorkspaceSettings
 
-from core.store.atomic import atomic_write_json, atomic_write_text
+from core.store.atomic import atomic_write_json, atomic_write_text, backup_file
 
 from core.workspace import layout
 from core.workspace.layout import WorkspaceDenied, WorkspacePathError
@@ -70,6 +71,9 @@ class IWorkspaceManager(ABC):
     def current(self) -> str: ...
 
     @abstractmethod
+    def root_of(self, workspace_id: str | None) -> Path: ...
+
+    @abstractmethod
     def exists(self, workspace_id: str) -> bool: ...
 
     @abstractmethod
@@ -105,6 +109,22 @@ class IWorkspaceManager(ABC):
 
     @abstractmethod
     def detail(self, workspace_id: str, path: str = "") -> dict: ...
+
+    @abstractmethod
+    def write_memory(self, scope: str, workspace_id: str | None, mode: str, text: str) -> dict: ...
+
+    @abstractmethod
+    def build_spec(self, workspace_id: str) -> dict: ...
+
+    @abstractmethod
+    def write_build_result(self, workspace_id: str, command: str, started_at: str,
+                           exit_code: int | None, duration_ms: int, output: str) -> dict: ...
+
+    @abstractmethod
+    def read_file(self, workspace_id: str, path: str) -> dict: ...
+
+    @abstractmethod
+    def write_file(self, workspace_id: str, path: str, content: str, create: bool = False) -> dict: ...
 
     @abstractmethod
     def collapse(self, workspace_id: str, collapsed: bool) -> list[str]: ...
@@ -399,7 +419,7 @@ class WorkspaceManager(IWorkspaceManager):
             data_home_kind=home_kind,
             data_home=home_value,
             created_at=_utcnow(),
-            build_cmd=(build_cmd or "")[:MAX_BUILD_CMD] or None,
+            build_cmd=(redact((build_cmd or "")[:MAX_BUILD_CMD]) or "") or None,
             note=(note or None),
         )
         self._ensure_dirs(record)
@@ -423,7 +443,7 @@ class WorkspaceManager(IWorkspaceManager):
         builtin = record.id == WS_DEFAULT
         record.name = self._clean_name(name)
         record.note = note.strip() or None
-        record.build_cmd = (build_cmd or "")[:MAX_BUILD_CMD] or None
+        record.build_cmd = (redact((build_cmd or "")[:MAX_BUILD_CMD]) or "") or None
 
         changed: list[str] = []
         if root is not None and not builtin:
@@ -550,6 +570,152 @@ class WorkspaceManager(IWorkspaceManager):
         result["entries"] = entries
         result["truncated"] = truncated
         return result
+
+    def write_memory(self, scope: str, workspace_id: str | None, mode: str, text: str) -> dict:
+        """用户显式写入工作区 AGENTS.md；原子写 + 一代备份，审计不含正文/路径。"""
+        if scope == "default":
+            target_id = WS_DEFAULT
+        elif scope == "current":
+            target_id = self._current
+        elif scope == "specific":
+            if not workspace_id:
+                raise WorkspacePathError("指定工作区写入必须提供 workspace_id。")
+            target_id = workspace_id
+        else:
+            raise WorkspacePathError("记忆写入 scope 无效。")
+        record = self._record(target_id)
+        if mode not in {"append", "replace"}:
+            raise WorkspacePathError("记忆写入 mode 必须为 append 或 replace。")
+        content = str(redact(str(text or "")) or "")
+        if not content.strip():
+            raise WorkspacePathError("记忆内容不能为空。")
+        if len(content) > 20_000:
+            raise WorkspacePathError("单次记忆写入不能超过 20000 个字符。")
+        self._ensure_dirs(record)
+        root = layout.resolve_root(record.root_kind, record.root, self._data_root)
+        if record.root_kind == "external" and not root.is_dir():
+            raise WorkspacePathError("外部工作区目录不存在；为防止误建空目录，已拒绝写入。")
+        data_home = layout.resolve_data_home(
+            record.data_home_kind, record.data_home, root, self._data_root
+        )
+        target = data_home / "AGENTS.md"
+        if target.is_symlink():
+            raise WorkspaceDenied("工作区 AGENTS.md 不能是符号链接。")
+        previous = ""
+        if mode == "append" and target.exists():
+            if target.stat().st_size > 1_000_000:
+                raise WorkspacePathError("现有记忆文件超过 1 MB，拒绝追加以避免失控增长。")
+            previous = target.read_text(encoding="utf-8")
+        combined = content if mode == "replace" else (
+            previous.rstrip() + ("\n\n" if previous.strip() else "") + content
+        )
+        if len(combined) > 1_000_000:
+            raise WorkspacePathError("工作区记忆文件上限为 1 MB。")
+        backup_file(target)
+        atomic_write_text(target, combined + ("\n" if not combined.endswith("\n") else ""))
+        self._audit("workspace.memory_write", workspace_id=target_id, scope=scope, mode=mode, chars=len(content))
+        return {"workspace_id": target_id, "scope": scope, "mode": mode, "chars": len(content)}
+
+    def build_spec(self, workspace_id: str) -> dict:
+        record = self._record(workspace_id)
+        root = layout.resolve_root(record.root_kind, record.root, self._data_root)
+        if not root.is_dir():
+            raise WorkspacePathError("工作区目录不存在，无法运行构建。")
+        command = str(record.build_cmd or "").strip()
+        if not command:
+            raise WorkspacePathError("该工作区尚未设置构建命令。")
+        return {
+            "id": workspace_id,
+            "name": record.name,
+            "root": root,
+            "data_home": self.data_home_of(workspace_id),
+            "command": command,
+        }
+
+    def write_build_result(
+        self,
+        workspace_id: str,
+        command: str,
+        started_at: str,
+        exit_code: int | None,
+        duration_ms: int,
+        output: str,
+    ) -> dict:
+        """写入有界、脱敏的构建结果；审计只记状态，不记命令与路径。"""
+        record = self._record(workspace_id)
+        home = self.data_home_of(workspace_id)
+        if record.root_kind == "external" and not layout.resolve_root(
+            record.root_kind, record.root, self._data_root
+        ).is_dir():
+            raise WorkspacePathError("外部工作区目录不存在，拒绝写入构建日志。")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        artifact_dir = home / "artifacts" / stamp
+        artifact_dir.mkdir(parents=True, exist_ok=False)
+        safe_output = str(redact(output or "") or "")[:250_000]
+        safe_command = str(redact(command or "") or "")[:2_000]
+        log_path = artifact_dir / "build.log"
+        atomic_write_text(log_path, safe_output)
+        metadata = {
+            "schema_version": 1,
+            "workspace_id": workspace_id,
+            "command": safe_command,
+            "root": str(layout.resolve_root(record.root_kind, record.root, self._data_root)),
+            "exit_code": exit_code,
+            "duration_ms": max(0, int(duration_ms)),
+            "started_at": started_at,
+        }
+        atomic_write_json(artifact_dir / "build.json", metadata)
+        self._audit(
+            "workspace.build", workspace_id=workspace_id,
+            ok=exit_code == 0, exit=exit_code, duration_ms=max(0, int(duration_ms)),
+        )
+        return {"log_path": str(log_path), "artifact_dir": str(artifact_dir), "exit_code": exit_code}
+
+    # ---------- 文本文件读写（GUI 编辑器；不注册为模型工具） ----------
+    MAX_FILE_BYTES = 262_144
+
+    def read_file(self, workspace_id: str, path: str) -> dict:
+        record = self._record(workspace_id)
+        root = layout.resolve_root(record.root_kind, record.root, self._data_root)
+        if not root.is_dir():
+            raise WorkspacePathError("工作区目录不存在。")
+        target = layout.resolve_relative_file(root, path, must_exist=True)
+        try:
+            if target.stat().st_size > self.MAX_FILE_BYTES:
+                raise WorkspacePathError("文件超过 256 KB，编辑器不予打开（避免把大文件载入内存）。")
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise WorkspacePathError("该文件不是 UTF-8 文本，无法编辑。") from exc
+        except OSError as exc:
+            raise WorkspacePathError("读取文件失败。") from exc
+        self._audit("workspace.file_read", workspace_id=workspace_id, bytes=len(content.encode("utf-8")))
+        return {
+            "id": workspace_id, "path": path, "ok": True, "is_write": False,
+            "content": content, "bytes": len(content.encode("utf-8")),
+            "truncated": False, "error": "",
+        }
+
+    def write_file(self, workspace_id: str, path: str, content: str, create: bool = False) -> dict:
+        record = self._record(workspace_id)
+        root = layout.resolve_root(record.root_kind, record.root, self._data_root)
+        if not root.is_dir():
+            raise WorkspacePathError("工作区目录不存在。")
+        data = str(redact(str(content or "")) or "")
+        if len(data.encode("utf-8")) > self.MAX_FILE_BYTES:
+            raise WorkspacePathError("内容超过 256 KB，拒绝写入。")
+        target = layout.resolve_relative_file(root, path, must_exist=not create)
+        if target.exists() and not target.is_file():
+            raise WorkspacePathError("目标不是普通文件。")
+        if not target.parent.is_dir():
+            raise WorkspacePathError("目标目录不存在。")
+        backup_file(target)
+        atomic_write_text(target, data)
+        size = len(data.encode("utf-8"))
+        self._audit("workspace.file_write", workspace_id=workspace_id, bytes=size, created=create)
+        return {
+            "id": workspace_id, "path": path, "ok": True, "is_write": True,
+            "content": "", "bytes": size, "truncated": False, "error": "",
+        }
 
     # ---------- 状态 ----------
     def last_error(self) -> str:

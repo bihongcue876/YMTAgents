@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QPlainTextEdit,
     QRadioButton,
     QScrollArea,
     QVBoxLayout,
@@ -162,6 +164,109 @@ class WorkspaceDialog(QDialog):
         }
 
 
+class WorkspaceMemoryDialog(QDialog):
+    """用户显式写入工作区级 `AGENTS.md`；无模型自主写入入口。"""
+
+    def __init__(self, parent: QWidget, workspaces: list[dict], current: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("写入工作区记忆")
+        self._scope = QComboBox()
+        self._scope.addItem("当前工作区", "current")
+        self._scope.addItem("默认工作区", "default")
+        self._scope.addItem("指定工作区", "specific")
+        self._workspace = QComboBox()
+        for info in workspaces:
+            self._workspace.addItem(str(info.get("name") or info["id"]), info["id"])
+        current_index = self._workspace.findData(current)
+        if current_index >= 0:
+            self._workspace.setCurrentIndex(current_index)
+        self._workspace.setEnabled(False)
+        self._mode = QComboBox()
+        self._mode.addItem("追加到末尾", "append")
+        self._mode.addItem("替换整个文件", "replace")
+        self._text = QPlainTextEdit()
+        self._text.setPlaceholderText("输入应写入 AGENTS.md 的稳定工作区规则或事实。")
+        self._text.setMinimumHeight(160)
+        self._scope.currentIndexChanged.connect(
+            lambda: self._workspace.setEnabled(self._scope.currentData() == "specific")
+        )
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.addRow("写入范围", self._scope)
+        form.addRow("目标工作区", self._workspace)
+        form.addRow("写入方式", self._mode)
+        layout.addLayout(form)
+        layout.addWidget(self._text)
+        layout.addWidget(buttons)
+
+    def _validate(self) -> None:
+        if not self._text.toPlainText().strip():
+            QMessageBox.warning(self, "内容不能为空", "请输入要写入的记忆文本。")
+            return
+        self.accept()
+
+    def payload(self) -> dict:
+        scope = str(self._scope.currentData())
+        return {
+            "scope": scope,
+            "workspace_id": self._workspace.currentData() if scope == "specific" else None,
+            "mode": self._mode.currentData(),
+            "text": self._text.toPlainText(),
+        }
+
+
+class FileEditorDialog(QDialog):
+    """工作区文本文件编辑器（GUI 专用；保存经信封回核心原子写）。
+
+    打开失败（非 UTF-8 / 超限 / 越界）时以只读提示呈现，不提供绕过核心校验的写入。
+    """
+
+    save_requested = Signal(str, str, bool)  # path, content, create
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        workspace_id: str,
+        path: str,
+        content: str,
+        *,
+        creatable: bool = False,
+        error: str = "",
+    ) -> None:
+        super().__init__(parent)
+        self._workspace_id = workspace_id
+        self._path = path
+        self._creatable = creatable
+        self.setWindowTitle(f"编辑：{path}")
+        self.resize(720, 520)
+        self._edit = QPlainTextEdit()
+        self._edit.setPlainText(content)
+        self._note = QLabel(error or "文件内容以纯文本处理，不执行其中的任何指令。")
+        self._note.setObjectName("mutedNote")
+        self._note.setWordWrap(True)
+        save = QPushButton("保存")
+        save.setObjectName("primaryButton")
+        save.clicked.connect(self._on_save)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.reject)
+        actions = QHBoxLayout()
+        actions.addWidget(self._note, 1)
+        actions.addWidget(save)
+        actions.addWidget(close)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._edit)
+        layout.addLayout(actions)
+        if error:
+            self._edit.setReadOnly(True)
+            save.setEnabled(False)
+
+    def _on_save(self) -> None:
+        self.save_requested.emit(self._path, self._edit.toPlainText(), self._creatable)
+
+
 class WorkspacesPage(QWidget):
     create_requested = Signal(dict)
     update_requested = Signal(dict)
@@ -170,6 +275,10 @@ class WorkspacesPage(QWidget):
     refresh_requested = Signal()
     detail_requested = Signal(str, str)  # workspace_id, 相对子路径
     open_dir_requested = Signal(str)  # 要在文件管理器中打开的目录路径
+    memory_write_requested = Signal(str, object, str, str)  # scope, workspace_id, mode, text
+    build_requested = Signal(str)  # workspace_id（命令原文在确认对话框完整展示）
+    file_read_requested = Signal(str, str)  # workspace_id, 相对路径
+    file_write_requested = Signal(str, str, str, bool)  # workspace_id, path, content, create
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -185,12 +294,15 @@ class WorkspacesPage(QWidget):
         new_btn = QPushButton("＋ 新建工作区")
         new_btn.setObjectName("primaryButton")
         new_btn.clicked.connect(self._on_create)
+        self._memory_btn = QPushButton("📝 写入记忆")
+        self._memory_btn.clicked.connect(self._on_memory_write)
         refresh = QPushButton("刷新")
         refresh.clicked.connect(self.refresh_requested.emit)
         head = QHBoxLayout()
         head.addWidget(self._title)
         head.addStretch(1)
         head.addWidget(new_btn)
+        head.addWidget(self._memory_btn)
         head.addWidget(refresh)
 
         self._cards = QVBoxLayout()
@@ -206,9 +318,10 @@ class WorkspacesPage(QWidget):
         files_card, files_box = card()
         self._files_title = section_label("文件")
         self._files = QListWidget()
-        self._files_note = QLabel("选中一个工作区的「文件」即可查看（列表有深度与数量上限）。")
+        self._files_note = QLabel("双击文件可在内置编辑器中打开（仅 UTF-8 文本）；打开「文件」即可查看。")
         self._files_note.setWordWrap(True)
         self._files_note.setObjectName("mutedNote")
+        self._files.itemDoubleClicked.connect(self._on_file_open)
         files_box.addWidget(self._files_title)
         files_box.addWidget(self._files)
         files_box.addWidget(self._files_note)
@@ -227,6 +340,7 @@ class WorkspacesPage(QWidget):
         self._workspaces: list[dict] = []
         self._current = ""
         self._default_managed_kind = "inline"
+        self._editors: dict[str, FileEditorDialog] = {}
         self._files.setMinimumHeight(60)
 
     def set_default_managed_kind(self, kind: str) -> None:
@@ -271,6 +385,7 @@ class WorkspacesPage(QWidget):
                 mark = "📁" if entry.get("dir") else "📄"
                 item = QListWidgetItem(f"{'    ' * depth}{mark} {entry.get('name', '')}")
                 item.setData(Qt.UserRole, f"{entry.get('path', '')}")
+                item.setData(Qt.UserRole + 1, bool(entry.get("dir")))
                 item.setToolTip(entry.get("path", ""))
                 self._files.addItem(item)
             suffix = "（已达上限，仅显示前若干条）" if result.truncated else ""
@@ -282,6 +397,41 @@ class WorkspacesPage(QWidget):
             if info.get("id") == workspace_id:
                 return str(info.get("name") or workspace_id)
         return workspace_id
+
+    # -- 文本文件编辑 ------------------------------------------------------
+    def _on_file_open(self, item: QListWidgetItem) -> None:
+        if item.data(Qt.UserRole + 1):  # 目录不打开编辑器
+            return
+        path = str(item.data(Qt.UserRole) or "")
+        if path and self._current:
+            self.file_read_requested.emit(self._current, path)
+
+    def on_file_result(self, event) -> None:
+        """`workspace.file.result` 到达：读 → 打开编辑器；写 → 提示并刷新列表。"""
+        if event.is_write:
+            if not event.ok:
+                QMessageBox.warning(self, "保存失败", event.error or "保存失败。")
+                return
+            self._files_note.setText(f"已保存：{event.path}（{event.bytes} 字节）")
+            editor = self._editors.pop(event.path, None)
+            if editor is not None:
+                editor.accept()
+            self.detail_requested.emit(event.id, "")
+            return
+        if not event.ok:
+            QMessageBox.warning(self, "无法打开", event.error or "无法打开该文件。")
+            return
+        dialog = FileEditorDialog(self, event.id, event.path, event.content)
+        dialog.save_requested.connect(
+            lambda path, content, create, wid=event.id: self.file_write_requested.emit(
+                wid, path, content, create
+            )
+        )
+        self._editors[event.path] = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._editors.pop(event.path, None)
 
     def refresh_metrics(self) -> None:
         """字号档位切换后重算文件区高度（样式表字号不参与 sizeHint）。"""
@@ -342,6 +492,11 @@ class WorkspacesPage(QWidget):
         files = QPushButton("文件")
         files.clicked.connect(lambda _=False, wid=info["id"]: self.detail_requested.emit(wid, ""))
         actions.addWidget(files)
+        build = QPushButton("运行构建")
+        build.setEnabled(bool(info.get("build_cmd")) and not info.get("missing"))
+        build.setToolTip("逐次确认后在当前工作区运行登记的构建命令")
+        build.clicked.connect(lambda _=False, item=info: self._on_build(item))
+        actions.addWidget(build)
         open_dir = QPushButton("打开目录")
         open_dir.setEnabled(bool(info.get("root")) and not info.get("missing"))
         open_dir.setToolTip("在文件管理器中打开该工作区目录")
@@ -365,6 +520,31 @@ class WorkspacesPage(QWidget):
         if dialog.exec() != QDialog.Accepted:
             return
         self.create_requested.emit(dialog.payload())
+
+    def _on_memory_write(self) -> None:
+        dialog = WorkspaceMemoryDialog(self, self._workspaces, self._current)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.payload()
+            self.memory_write_requested.emit(
+                data["scope"], data["workspace_id"], data["mode"], data["text"]
+            )
+
+    def _on_build(self, info: dict) -> None:
+        """运行构建：命令原文完整展示、逐次显式同意（用户即主决策者，不过模型关卡）。
+
+        与 `docs/09` B4 的知情要求一致：命令是用户自己填的、自己点的，故完整展示后执行。
+        """
+        command = str(info.get("build_cmd") or "").strip()
+        if not command:
+            return
+        answer = QMessageBox.question(
+            self,
+            "运行构建",
+            f"将在「{info.get('name')}」的目录下运行这条命令：\n\n{command}\n\n"
+            "命令由你自己填写；运行期间可访问任意路径、可出网（工作区不是安全边界）。",
+        )
+        if answer == QMessageBox.Yes:
+            self.build_requested.emit(str(info["id"]))
 
     def _on_edit(self, info: dict) -> None:
         dialog = WorkspaceDialog(self, info, self._default_managed_kind)

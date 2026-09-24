@@ -58,6 +58,7 @@ class TerminalPage(QWidget):
         self._allow_restricted = False
         self._selected = ""
         self._titles: dict[str, str] = {}
+        self._workspace_names: dict[str, str] = {}
         self._buffers: dict[str, list[str]] = {}
         self._dirty = False
         self._theme: str | None = theme.DEFAULT_THEME
@@ -141,6 +142,14 @@ class TerminalPage(QWidget):
         self._titles = dict(titles or {})
         self._rebuild()
 
+    def set_workspaces(self, workspaces: list[dict]) -> None:
+        """工作区 id → 展示名；shell 卡片标出初始 cwd 所属工作区。"""
+        self._workspace_names = {
+            str(row.get("id")): str(row.get("name") or row.get("id"))
+            for row in workspaces or [] if row.get("id")
+        }
+        self._rebuild()
+
     def update_shells(self, shells: list[dict], max_shells: int, permission: str,
                       allow_restricted: bool) -> None:
         self._shells = list(shells or [])
@@ -213,6 +222,8 @@ class TerminalPage(QWidget):
 
         session_id = str(shell.get("session") or "")
         session_text = self._titles.get(session_id) or (session_id or "（手动）")
+        workspace_id = str(shell.get("workspace_id") or "")
+        workspace_text = self._workspace_names.get(workspace_id, workspace_id or "未关联")
         view = QPushButton("查看")
         view.setEnabled(shell_id != self._selected)
         view.clicked.connect(lambda _=False, sid=shell_id: self._select(sid))
@@ -227,7 +238,7 @@ class TerminalPage(QWidget):
         row.addWidget(close)
 
         detail = QLabel(
-            f"会话：{session_text}　·　PID {shell.get('pid') or '-'}　·　cwd {shell.get('cwd') or '-'}"
+            f"会话：{session_text}　·　工作区：{workspace_text}　·　PID {shell.get('pid') or '-'}　·　cwd {shell.get('cwd') or '-'}"
         )
         detail.setObjectName("mutedNote")
         detail.setWordWrap(True)
