@@ -74,6 +74,10 @@ class UISettings(BaseModel):
     #: 属 UI 偏好，与 theme/font_size 同族 —— 走既有 `settings.update(section="ui")`，
     #: **不新增请求/事件类型**；每一项是工作区 id（非名称，名称不参与任何状态键）。
     collapsed_workspaces: list[str] = Field(default_factory=list)
+    #: v0.0.11（切片 E）：消息流内的复制按钮（复制 MD / 复制原文）是否显示。
+    #: 与 theme/font_size 同族 UI 偏好 —— 走既有 `settings.update(section="ui")`，
+    #: **不新增请求/事件类型**。
+    copy_buttons: bool = True
 
 
 # ---------------------------------------------------------------------------

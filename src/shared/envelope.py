@@ -549,6 +549,14 @@ class McpServersRefresh(Envelope):
     type: Literal["mcp.server.refresh"] = "mcp.server.refresh"
 
 
+class BuiltinToolToggle(Envelope):
+    """v0.0.11（D-1）：内置工具开关（plugins.json -> builtin；关 = 真卸载）。"""
+
+    type: Literal["tool.builtin.toggle"] = "tool.builtin.toggle"
+    name: str
+    enabled: bool
+
+
 class McpScan(Envelope):
     """手动触发一次 MCP 服务器安全体检（v0.0.9）。
 
@@ -1040,6 +1048,9 @@ class GateRequest(Envelope):
     name: str
     args: dict = Field(default_factory=dict)
     permission: str = "confirm"
+    #: v0.0.11（对照模式）：只给 UI 看的**预览**（如写族的 old / new 文本），
+    #: 由 ToolSpec.preview 生成；**不进 tool.call 事件**，不影响模型可见内容。
+    preview: dict = Field(default_factory=dict)
 
 
 class GateResult(Envelope):
@@ -1049,6 +1060,13 @@ class GateResult(Envelope):
     call_id: str
     decision: str = "deny"
     decider: str = "policy"
+
+
+class BuiltinToolState(Envelope):
+    """v0.0.11（D-1）：内置工具清单与快照（items = {name,permission,enabled}；面板一次拉全量）。"""
+
+    type: Literal["tool.builtin.state"] = "tool.builtin.state"
+    items: list[dict] = Field(default_factory=list)
 
 
 class McpScanResult(Envelope):
@@ -1274,6 +1292,7 @@ WorkspaceMemoryWrite,
         FeatureToggle,
         BtcmUpdate,
         BtcmRun,
+        BuiltinToolToggle,
     ],
     Field(discriminator="type"),
 ]
@@ -1326,6 +1345,7 @@ WorkspaceMemoryResult,
         BtcmState,
         ThinkDelta,
         ThinkIteration,
+        BuiltinToolState,
     ],
     Field(discriminator="type"),
 ]
