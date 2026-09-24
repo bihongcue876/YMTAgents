@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QHBoxLayout,
@@ -142,9 +143,13 @@ class SettingsPage(QWidget):
         for name in theme.font_size_names():
             self._font_size.addItem(theme.font_level(name).label, name)
         self._font_size.currentIndexChanged.connect(self._on_font_size_changed)
+        self._copy_buttons = QCheckBox("显示复制按钮")
+        self._copy_buttons.setChecked(True)
+        self._copy_buttons.toggled.connect(self._on_copy_buttons_toggled)
         form = QFormLayout()
         form.addRow("主题", self._theme)
         form.addRow("字号", self._font_size)
+        form.addRow("复制按钮", self._copy_buttons)
         return form
 
     def _build_whitelist(self) -> QVBoxLayout:
@@ -225,6 +230,11 @@ class SettingsPage(QWidget):
         if name:
             self.settings_update.emit("ui", {"font_size": name})
 
+    def _on_copy_buttons_toggled(self, checked: bool) -> None:
+        if self._loading:
+            return
+        self.settings_update.emit("ui", {"copy_buttons": bool(checked)})
+
     # -- 白名单 ------------------------------------------------------------
     def load_settings(self, data: dict) -> None:
         self._loading = True
@@ -233,6 +243,7 @@ class SettingsPage(QWidget):
         self._theme.setCurrentIndex(theme_index if theme_index >= 0 else 0)
         font_index = self._font_size.findData(ui.get("font_size", theme.DEFAULT_FONT_SIZE))
         self._font_size.setCurrentIndex(font_index if font_index >= 0 else 0)
+        self._copy_buttons.setChecked(bool(ui.get("copy_buttons", True)))
         self._level.setCurrentText(data.get("logging", {}).get("level", "INFO"))
         self._whitelist.clear()
         for rule in data.get("network", {}).get("whitelist", []):

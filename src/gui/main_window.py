@@ -51,6 +51,8 @@ from shared.envelope import (
     McpServerDelete,
     McpServerReconnect,
     McpServerToggle,
+    BuiltinToolToggle,
+    BuiltinToolState,
     McpServerUpsert,
     McpServersRefresh,
     McpScan,
@@ -95,7 +97,7 @@ from gui.chat.view import ChatView
 from gui.pages.models import ModelsPage
 from gui.pages.library import LibraryPage
 from gui.pages.personas import PersonasPage
-from gui.pages.plugins import GateDialog, PluginsPage
+from gui.pages.plugins import PluginsPage
 from gui.pages.settings import SettingsPage
 from gui.pages.skills import SkillsPage
 from gui.pages.terminal import TerminalPage
@@ -264,6 +266,12 @@ class MainWindow(QMainWindow):
         c.command_run.connect(self._on_command)
         c.command_error.connect(lambda message: QMessageBox.information(self, "命令", message))
         c.cancel_turn.connect(lambda: self.bus.submit(CancelTurn()))
+        # v0.0.11：关卡卡片在对话内裁决，直接回发（core 侧仍在泵取队列等待）
+        c.gates.decided.connect(
+            lambda call_id, allow: self.bus.submit(
+                GateRespond(call_id=call_id, decision="allow" if allow else "deny")
+            )
+        )
         c.switch_model.connect(lambda mid: self.bus.submit(SwitchModel(slot="main", model_id=mid)))
         c.switch_persona.connect(
             lambda pid: self.bus.submit(PersonaSwitch(persona_id=pid))
@@ -312,6 +320,10 @@ class MainWindow(QMainWindow):
         pl.reconnect_requested.connect(lambda sid: self.bus.submit(McpServerReconnect(id=sid)))
         pl.refresh_requested.connect(lambda: self.bus.submit(McpServersRefresh()))
         pl.scan_requested.connect(lambda sid: self.bus.submit(McpScan(server_id=sid)))
+        # v0.0.11（D-1）：内置工具开关（真值 plugins.json -> builtin；关 = 真卸载）
+        pl.builtin_toggle_requested.connect(
+            lambda name, enabled: self.bus.submit(BuiltinToolToggle(name=name, enabled=enabled))
+        )
 
         sk = self.skills_page
         sk.toggle_requested.connect(
@@ -715,8 +727,11 @@ class MainWindow(QMainWindow):
             self.chat.on_status(event)
         elif t == "tool.call":
             self.chat.on_tool_call(event)
+        elif t == "tool.builtin.state":
+            self.plugins_page.update_builtin(event.items)
         elif t == "tool.result":
             self.chat.on_tool_result(event)
+            self._settle_gate(event)
             if str(getattr(event, "call_id", "")).startswith("btcm-page-"):
                 output = event.output if event.ok else (
                     (event.error or {}).get("message", "") if event.error else ""
@@ -730,6 +745,8 @@ class MainWindow(QMainWindow):
             self.thinking_page.on_delta(event.agent, event.kind, event.text)
         elif t == "think.iteration":
             self.thinking_page.on_iteration(event.iteration, event.verdict, event.decision)
+        elif t == "gate.result":
+            self._on_gate_result(event)
         elif t == "error":
             self.chat.on_error(event)
             if event.scope == "library":
@@ -753,6 +770,7 @@ class MainWindow(QMainWindow):
         elif t == "settings.state":
             ui = event.data.get("ui", {})
             self._apply_appearance(ui.get("theme"), ui.get("font_size"))
+            self.chat.set_copy_buttons(bool(ui.get("copy_buttons", True)))
             self.settings.load_settings(event.data)
             self.workspaces_page.set_default_managed_kind(
                 (event.data.get("workspace") or {}).get("default_data_home_kind", "inline")
@@ -903,9 +921,28 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "目录不存在", f"该目录不存在或不可访问：\n{path}")
 
     def _on_gate_request(self, event) -> None:
-        """工具调用关卡：弹出确认卡片，用户裁决后回发 GateRespond（core 侧正泵取队列等待）。"""
-        dialog = GateDialog(event, self)
-        dialog.exec()
-        self.bus.submit(
-            GateRespond(call_id=event.call_id, decision="allow" if dialog.decision() else "deny")
+        """工具调用关卡：**在对话框内**出示确认卡片（非模态，不跳页、不阻塞界面）。
+
+        裁决由卡片回发 GateRespond，core 侧仍在泵取队列等待；用户放行后的结果由
+        tool.result 收尾（卡片就地塌缩为记录），策略拒绝 / 超时由 gate.result 收尾。
+        """
+        self.stack.setCurrentWidget(self.chat)
+        self.chat.gates.show_gate(event)
+
+    def _on_gate_result(self, event) -> None:
+        """关卡结果：只收「非用户放行」的收尾（放行等 tool.result 给准确摘要）。"""
+        if str(getattr(event, "decision", "deny")) == "allow":
+            return
+        decider = str(getattr(event, "decider", "") or "")
+        reason = "已拒绝（策略）" if decider == "policy" else "已拒绝（超时或未裁决）"
+        self.chat.gates.resolve(event.call_id, reason, ok=False)
+
+    def _settle_gate(self, event) -> None:
+        """工具结果回填关卡卡片：塌缩为一行摘要（如「已修改 x（+1 / -1）」）。"""
+        summary = event.output if event.ok else (
+            (event.error or {}).get("message", "") if event.error else ""
+        )
+        first = (str(summary or "").splitlines() or [""])[0].strip()
+        self.chat.gates.resolve(
+            event.call_id, first, ok=bool(event.ok)
         )

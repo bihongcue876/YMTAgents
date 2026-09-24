@@ -157,12 +157,69 @@ blockquote { border-left: 3px solid; margin: 0; padding-left: 10px; }
 .tool pre { margin: 6px 0 2px; }
 .tool .tool-label { opacity: 0.7; }
 /* 终端监视区（v0.0.5）：等宽、不换行截断（横向滚动），上下留白归零 */
-pre.term { margin: 0; padding: 6px 8px; min-height: 100%; }"""
+pre.term { margin: 0; padding: 6px 8px; min-height: 100%; }
+/* v0.0.11 切片 E：复制按钮（悬停显示；设置页可整体关闭 -> body.no-copy） */
+.copy-bar { display: flex; justify-content: flex-end; gap: 8px; margin: 2px 0; }
+.msg .copy-bar { opacity: 0; }
+.msg:hover .copy-bar { opacity: 1; }
+.copy-link { color: rgba(107,114,128,1); text-decoration: none;
+        border: 1px solid rgba(128,128,128,0.45); border-radius: 4px; padding: 0 6px; }
+body.no-copy .copy-bar { display: none; }"""
+
+#: v0.0.11 切片 E：复制按钮方案（CSP 禁脚本 -> 自定义链接 + 宿主侧拦截）。
+COPY_SCHEME = "ymtcopy:"
+
+#: 代码围栏（chr(96) = 反引号：源码里不写连续反引号，避免与 Markdown 文档串扰）。
+_FENCE = chr(96) * 3
+
+_COPY_LABELS = {
+    "msg-md": "复制 MD",
+    "msg-raw": "复制原文",
+    "think-md": "复制 MD",
+    "think-raw": "复制原文",
+    "tool-md": "复制 MD",
+    "tool-raw": "复制原文",
+}
+
+
+def _copy_bar(index: int, kinds: tuple[str, ...]) -> str:
+    """复制按钮条（纯链接：CSP 禁脚本，点击由 RendererView 拦截后写剪贴板）。"""
+    links = "".join(
+        f'<a class="copy-link" href="{COPY_SCHEME}{kind}:{index}">{_COPY_LABELS[kind]}</a>'
+        for kind in kinds
+    )
+    return f'<div class="copy-bar">{links}</div>' if links else ""
+
+
+def tool_copy_text(message: dict, markdown: bool = False) -> str:
+    """工具块的可复制文本：原文 = 输出 / 错误原样；MD = 围栏包裹（含入参）。"""
+    name = str(message.get("name") or "tool")
+    args = message.get("args")
+    output = message.get("output")
+    error = message.get("error")
+    if markdown:
+        parts = [f"### 工具调用 · {name}"]
+        if args:
+            parts.append(_FENCE + "json\n" + json.dumps(args, ensure_ascii=False, indent=2) + "\n" + _FENCE)
+        if output:
+            parts.append(_FENCE + "\n" + str(output) + "\n" + _FENCE)
+        if error:
+            code = str(error.get("code", ""))
+            detail = str(error.get("message", ""))
+            parts.append(_FENCE + "\n" + code + " " + detail + "\n" + _FENCE)
+        return "\n".join(parts)
+    plain: list[str] = []
+    if output:
+        plain.append(str(output))
+    if error:
+        plain.append(str(error.get("code", "")) + " " + str(error.get("message", "")))
+    return "\n".join(plain)
+
 
 _TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src http: https: data:;">
-<style>{base_css}{shell_bg}</style></head><body><div id="stream">{inner}</div></body></html>"""
+<style>{base_css}{shell_bg}</style></head><body class="{body_class}"><div id="stream">{inner}</div></body></html>"""
 
 
 def _inner(theme: str | None, body: str, css: str, font_size: str | None) -> str:
@@ -170,7 +227,7 @@ def _inner(theme: str | None, body: str, css: str, font_size: str | None) -> str
     return f"<style>\n{markdown_css(theme, font_size)}\n{css}\n</style>\n{body}"
 
 
-def assemble(inner: str, bg: str | None = None) -> str:
+def assemble(inner: str, bg: str | None = None, body_class: str = "") -> str:
     """流片段 → 完整文档（QTextBrowser 降级路径与 WebEngine 初始壳共用）。
 
     rev35：`bg` 为页面底色；写进壳 CSS 后，首帧原生表面即带主题底色，
@@ -178,12 +235,14 @@ def assemble(inner: str, bg: str | None = None) -> str:
     壳本体无底色，首帧仍可能透出白底。
     """
     shell_bg = f"\nhtml, body {{ background: {bg}; }}" if bg else ""
-    return _TEMPLATE.format(base_css=_BASE_CSS, shell_bg=shell_bg, inner=inner)
+    return _TEMPLATE.format(
+        base_css=_BASE_CSS, shell_bg=shell_bg, body_class=body_class, inner=inner
+    )
 
 
-def stub_doc(bg: str | None = None) -> str:
+def stub_doc(bg: str | None = None, body_class: str = "") -> str:
     """空壳文档：WebEngine 初始加载用它（恒小于 setHtml 的 2MB data: URL 上限）。"""
-    return assemble("", bg)
+    return assemble("", bg, body_class)
 
 
 
@@ -221,8 +280,11 @@ def _block_assistant(
     if reasoning:
         parts.append(
             '<details class="think"><summary>思考过程</summary>'
+            f"{_copy_bar(index, ('think-md', 'think-raw'))}"
             f'<div class="think-body">{_html.escape(reasoning)}</div></details>'
         )
+    if text:
+        parts.append(_copy_bar(index, ("msg-md", "msg-raw")))
     parts.append(_md().render(text or ""))
     parts.append("</div>")
     meta: list[str] = []
@@ -256,6 +318,7 @@ def _block_tool(message: dict, index: int = 0, theme: str | None = DEFAULT_THEME
     parts = [
         f'<div class="msg tool" id="m{index}">',
         f'<details><summary>工具调用 · {name}（{permission}）· {status}</summary>',
+        _copy_bar(index, ("tool-md", "tool-raw")),
     ]
     args = message.get("args")
     if args:

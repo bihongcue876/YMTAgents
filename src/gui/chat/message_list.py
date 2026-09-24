@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
 from gui import theme as theme_module
 from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME
@@ -23,6 +23,7 @@ class MessageList(QWidget):
         self._theme = DEFAULT_THEME
         self._font_size = DEFAULT_FONT_SIZE
         self._renderer = RendererView(self)
+        self._renderer.copy_requested.connect(self._on_copy)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._renderer)
@@ -42,6 +43,10 @@ class MessageList(QWidget):
             self._theme = name
             self._font_size = font_size
             self._render()
+
+    def set_copy_buttons(self, on: bool) -> None:
+        """复制按钮显示开关（D-3）：只影响渲染层，不动消息数据。"""
+        self._renderer.set_copy_buttons(on)
 
     # -- 渲染 --------------------------------------------------------------
     def _stream_ready(self) -> bool:
@@ -92,6 +97,29 @@ class MessageList(QWidget):
 
     def _last_is_assistant(self) -> bool:
         return bool(self._messages) and self._messages[-1].get("role") == "assistant"
+
+    # -- 复制（v0.0.11 切片 E）：<kind>:<index> -> 文本（不缓存，避免双份真值） ----
+    def _on_copy(self, spec: str) -> None:
+        text = self._copy_text(spec)
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def _copy_text(self, spec: str) -> str:
+        kind, _, raw = str(spec or "").partition(":")
+        try:
+            msg = self._messages[int(raw)]
+        except (ValueError, IndexError):
+            return ""
+        if kind in ("msg-md", "msg-raw"):
+            return str(msg.get("content") or "")
+        if kind == "think-raw":
+            return str(msg.get("reasoning") or "")
+        if kind == "think-md":
+            body = str(msg.get("reasoning") or "")
+            return "\n".join("> " + line for line in body.splitlines())
+        if kind in ("tool-md", "tool-raw"):
+            return md.tool_copy_text(msg, markdown=(kind == "tool-md"))
+        return ""
 
     # -- 操作 --------------------------------------------------------------
     def is_empty(self) -> bool:

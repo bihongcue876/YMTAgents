@@ -502,14 +502,16 @@ def test_renderer_view_fallback_html_carries_background(monkeypatch, qapp):
     """回归锚点（rev35）：降级路径整文档写入主题底色（暗色下防首帧白闪）。"""
     captured: dict = {}
 
-    def spy(inner, bg=None):
+    def spy(inner, bg=None, body_class=""):
         captured["bg"] = bg
+        captured["body_class"] = body_class
         return "<html><body></body></html>"
 
     monkeypatch.setattr("gui.widgets.render.view.assemble", spy)
     view = RendererView()
     view.set_stream("<p>x</p>", "#26282C")
     assert captured["bg"] == "#26282C", "壳/整文档必须带底色"
+    assert captured["body_class"] in ("", "no-copy"), "复制开关经 body_class 随帧下发"
 
 
 def test_renderer_view_replays_hidden_updates(qapp):

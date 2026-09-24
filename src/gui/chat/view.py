@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
 
 from gui.chat.empty_state import EmptyState
+from gui.chat.gate_card import GateStack
 from gui.chat.header import ChatHeader
 from gui.chat.input_bar import InputBar
 from gui.chat.message_list import MessageList
@@ -23,6 +24,7 @@ class ChatView(QWidget):
     new_session_in = Signal(str)  # rev58：新建会话指定工作区（header ▾ 菜单）
     add_model = Signal()  # 空状态 CTA：跳模型配置页（rev9 §6）
     toggle_detail = Signal()  # rev24：会话详情右栏
+    gate_decided = Signal(str, bool)  # v0.0.11：关卡卡片裁决（call_id, allow）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -30,6 +32,8 @@ class ChatView(QWidget):
         self.messages = MessageList()
         self.empty = EmptyState()
         self.input = InputBar()
+        # v0.0.11：关卡卡片就挂在消息流下、输入区上（非模态；不跳页）
+        self.gates = GateStack()
 
         # rev25：瞬态提示条（如「正在探测思考能力」）——不进入消息流、不落盘
         self._notice = QLabel()
@@ -45,6 +49,7 @@ class ChatView(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.header)
         layout.addWidget(self._stack, 1)
+        layout.addWidget(self.gates)
         layout.addWidget(self._notice)
         layout.addWidget(self.input)
 
@@ -58,6 +63,7 @@ class ChatView(QWidget):
         self.input.command_run.connect(self.command_run.emit)
         self.input.command_error.connect(self.command_error.emit)
         self.input.cancel.connect(self.cancel_turn.emit)
+        self.gates.decided.connect(self.gate_decided.emit)
         self.empty.add_model.connect(self.add_model.emit)
         self.empty.start_chat.connect(self.input.focus)
         self._current_model: str | None = None
@@ -98,9 +104,14 @@ class ChatView(QWidget):
         """外观切换：消息流需整帧重渲染，其余控件由全局 QSS 换肤/重排。"""
         self.messages.set_theme(name, font_size)
 
+    def set_copy_buttons(self, on: bool) -> None:
+        """复制按钮显示开关（D-3）：只影响消息流渲染。"""
+        self.messages.set_copy_buttons(on)
+
     def clear(self) -> None:
         """清空消息流（新建会话时），并回到空状态。"""
         self.messages.clear()
+        self.gates.clear()
         self._refresh_empty()
 
     def load_session(self, title: str, events: list[dict]) -> None:

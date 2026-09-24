@@ -22,12 +22,12 @@ import importlib.util
 import json
 import os
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QTextBrowser, QVBoxLayout, QWidget
 
 from gui.theme import DEFAULT_FONT_SIZE, DEFAULT_THEME
-from gui.widgets.render.md import assemble, markdown_inner, stub_doc
+from gui.widgets.render.md import COPY_SCHEME, assemble, markdown_inner, stub_doc
 
 
 def webengine_available() -> bool:
@@ -40,7 +40,17 @@ def _open_external(url: QUrl) -> None:
     QDesktopServices.openUrl(url)
 
 
-def _make_external_page(parent) -> object:
+def _on_anchor(url: QUrl, on_copy=None) -> None:
+    """QTextBrowser 降级路径的链接分流：复制方案走宿主，其余交系统浏览器。"""
+    text = url.toString()
+    if text.startswith(COPY_SCHEME):
+        if on_copy is not None:
+            on_copy(text[len(COPY_SCHEME):])
+        return
+    _open_external(url)
+
+
+def _make_external_page(parent, on_copy=None) -> object:
     """构造「链接点击 → 系统浏览器」的页面（rev22：提到模块级，避免每次建视图都定义类）。
 
     嵌入方 API：QWebEnginePage 只在此处 import（WebEngine 缺失时整个分支不会走到）。
@@ -50,6 +60,12 @@ def _make_external_page(parent) -> object:
     class _ExternalPage(QWebEnginePage):
         def acceptNavigationRequest(self, url, ntype, is_main_frame):  # noqa: N802
             if is_main_frame and ntype == QWebEnginePage.NavigationTypeLinkClicked:
+                text = url.toString()
+                if text.startswith(COPY_SCHEME):
+                    # v0.0.11 切片 E：复制按钮（CSP 禁脚本 -> 链接 + 宿主拦截）
+                    if on_copy is not None:
+                        on_copy(text[len(COPY_SCHEME):])
+                    return False
                 _open_external(url)
                 return False
             return super().acceptNavigationRequest(url, ntype, is_main_frame)
@@ -62,6 +78,8 @@ NEAR_BOTTOM_PX = 64
 
 
 class RendererView(QWidget):
+    copy_requested = Signal(str)  # 复制按钮被点击（携带 <kind>:<index>）
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.using_webengine = webengine_available()
@@ -72,6 +90,8 @@ class RendererView(QWidget):
         self._loaded = False  # WebEngine：初始壳 loadFinished 已到
         self._loading = False  # 初始壳加载中（期间的新帧排队）
         self._pending: str | None = None
+        #: v0.0.11 切片 E：复制按钮显示开关（body.no-copy）；默认显示。
+        self._copy_buttons = True
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
 
@@ -90,7 +110,7 @@ class RendererView(QWidget):
                 from PySide6.QtWebEngineWidgets import QWebEngineView
 
                 view = QWebEngineView(self)
-                view.setPage(_make_external_page(view))
+                view.setPage(_make_external_page(view, self.copy_requested.emit))
                 settings = view.settings()
                 # JS 必须开：局部更新通道走 runJavaScript；内容侧脚本由 CSP 拦（default-src 'none'）
                 settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
@@ -100,16 +120,16 @@ class RendererView(QWidget):
                 self._view = view
             except Exception:  # noqa: BLE001 - 运行期初始化失败则降级
                 self.using_webengine = False
-                self._view = self._make_browser()
+                self._view = self._make_browser(self.copy_requested.emit)
         else:
-            self._view = self._make_browser()
+            self._view = self._make_browser(self.copy_requested.emit)
         self._layout.addWidget(self._view)
 
     @staticmethod
-    def _make_browser() -> QTextBrowser:
+    def _make_browser(on_copy=None) -> QTextBrowser:
         browser = QTextBrowser()
         browser.setOpenLinks(False)  # 不得在应用内导航
-        browser.anchorClicked.connect(_open_external)
+        browser.anchorClicked.connect(lambda url: _on_anchor(url, on_copy))
         return browser
 
     # -- 内容 --------------------------------------------------------------
@@ -141,10 +161,10 @@ class RendererView(QWidget):
                 self._pending = (inner, jump_bottom)  # 壳加载中：最新帧排队
             else:
                 self._loading = True
-                self._view.setHtml(stub_doc(self._bg))  # 空壳恒小于 2MB 上限（rev35：带底色）
+                self._view.setHtml(stub_doc(self._bg, self._body_class()))  # 空壳恒小于 2MB 上限（rev35：带底色）
                 self._pending = (inner, jump_bottom)
         else:
-            self._view.setHtml(assemble(inner, self._bg))
+            self._view.setHtml(assemble(inner, self._bg, self._body_class()))
             self._scroll_bottom()
             self._view.update()
 
@@ -235,9 +255,36 @@ class RendererView(QWidget):
     def _on_load_finished(self, ok: bool) -> None:
         self._loading = False
         self._loaded = True
+        self._apply_copy_class()
         if self._pending is not None:
             (inner, jump), self._pending = self._pending, None
             self._run_update(inner, jump)
+
+    # -- 复制按钮（v0.0.11 切片 E / 设置 D-3） ------------------------------
+    def _body_class(self) -> str:
+        return "" if self._copy_buttons else "no-copy"
+
+    def set_copy_buttons(self, on: bool) -> None:
+        """显示开关：WebEngine 切 body 类（不重载）；QTextBrowser 整文档重排。"""
+        on = bool(on)
+        if on == self._copy_buttons:
+            return
+        self._copy_buttons = on
+        if self._view is None:
+            return
+        if self.using_webengine:
+            if self._loaded:
+                self._apply_copy_class()
+        else:
+            self._view.setHtml(assemble(self._inner, self._bg, self._body_class()))
+
+    def _apply_copy_class(self) -> None:
+        if self._view is None:
+            return
+        flag = "true" if not self._copy_buttons else "false"
+        self._view.page().runJavaScript(
+            "document.body.classList.toggle('no-copy', " + flag + ");"
+        )
 
     # -- 外观 --------------------------------------------------------------
     def _apply_background(self) -> None:
@@ -252,7 +299,7 @@ class RendererView(QWidget):
                 pass
             if self._loading:
                 # rev35：壳尚未落地时换主题 —— 用新底色重设壳，否则壳本体仍是旧底色
-                self._view.setHtml(stub_doc(self._bg))
+                self._view.setHtml(stub_doc(self._bg, self._body_class()))
         elif self._view is not None:
             self._view.setStyleSheet(f"QTextBrowser {{ background: {self._bg}; }}")
 
@@ -271,8 +318,8 @@ class RendererView(QWidget):
                 self._run_update(self._inner)
             else:
                 self._loading = True
-                self._view.setHtml(stub_doc(self._bg))
+                self._view.setHtml(stub_doc(self._bg, self._body_class()))
                 self._pending = (self._inner, False)
         else:
-            self._view.setHtml(assemble(self._inner, self._bg))
+            self._view.setHtml(assemble(self._inner, self._bg, self._body_class()))
             self._view.update()
