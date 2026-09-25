@@ -26,7 +26,8 @@ ALLOWED: dict[str, set[str] | None] = {
     "core.registry": {"shared", "core.bus"},
     "core.mcp": {"shared", "core.registry"},
     "core.shell": {"shared", "core.registry"},
-    "core.skills": {"shared", "core.registry"},
+    # 安全修订轮：skills 复用 core.store.atomic（原子写单源）+ git 出口过 Whitelist
+    "core.skills": {"shared", "core.registry", "core.store", "core.gateway"},
     "core.memory": {"shared", "core.bus"},
     "core.workspace": {"shared", "core.store", "core.files"},
     "core.files": {"shared", "core.bus", "core.registry", "core.store"},

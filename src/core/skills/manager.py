@@ -21,9 +21,11 @@ from pathlib import Path
 from shared.ids import SKL, new_id
 from shared.redact import redact
 
+from core.gateway.whitelist import Whitelist, domain_of
 from core.registry.registry import Registry, ToolResult
 from core.registry.toolspec import ToolSpec
 from core.skills.loader import SkillMeta, parse_skill_md
+from core.store.atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -31,9 +33,9 @@ _ORIGIN_FILE = "skill.origin.json"
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    """原子写（安全修订轮 F11）：统一走 core.store.atomic——
+    固定「X.tmp」名会被并发导入互相覆盖（store/atomic 用 pid 后缀修的坑）。"""
+    atomic_write_text(path, text)
 
 
 def _is_git_source(source: str) -> bool:
@@ -331,8 +333,25 @@ class SkillManager:
         return items
 
     # -- 内部 ---------------------------------------------------------------
+    def _check_git_source(self, source: str) -> None:
+        """git 来源出口审查（安全修订轮 F7）：非本机必须 https，且域名须在出口白名单内。
+
+        白名单默认拒绝（docs 09 §7），与模型出口同一口径；`update_skill` 按
+        `skill.origin.json` 重拉时同样过此关——origin 文件可被改成任意地址。
+        """
+        if source.lower().startswith("http://"):
+            raise ValueError("git 来源必须使用 https://（明文传输不安全）。")
+        settings = self.config_store.load("settings")
+        rules = list(getattr(getattr(settings, "network", None), "whitelist", None) or [])
+        if not Whitelist(rules).is_allowed(source):
+            self.audit("skill.git.blocked", source_kind="git", host=domain_of(source))
+            raise ValueError(
+                "git 来源域名不在网络出口白名单内（默认拒绝）；请先在设置的网络白名单中放行该域名。"
+            )
+
     def _git_checkout(self, source: str, workdir: Path) -> Path:
         """浅克隆 git 来源到 workdir/repo；失败抛 ValueError（可读、去敏）。"""
+        self._check_git_source(source)
         dest = workdir / "repo"
         try:
             proc = subprocess.run(  # noqa: S603 - 固定参数列表，无 shell

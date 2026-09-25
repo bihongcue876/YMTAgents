@@ -156,3 +156,22 @@ def test_delete_removes_and_protects_preset(env, tmp_path):
     assert [s.name for s in registry.snapshot()] == []
     with pytest.raises(ValueError):
         manager.delete("skl_ymt_demo")  # 预置不可删
+
+
+# ---- 安全修订轮（F7：git 来源出口审查）--------------------------------------
+
+
+def test_git_source_requires_https_and_whitelist(env):
+    store, _registry, manager, _root = env
+    # 白名单默认空（默认拒绝）：任何远程 git 来源都拒绝
+    with pytest.raises(ValueError):
+        manager._check_git_source("https://evil.example/org/skill.git")
+    # 放行域名后 https 通过
+    settings = store.load("settings")
+    settings.network.whitelist = ["evil.example"]
+    store.save("settings", settings)
+    manager._check_git_source("https://evil.example/org/skill.git")
+    manager._check_git_source("git@evil.example:org/skill.git")  # ssh 形态同样过域名
+    # http 明文：即使已放行域名也拒绝
+    with pytest.raises(ValueError):
+        manager._check_git_source("http://evil.example/org/skill.git")
