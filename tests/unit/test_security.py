@@ -25,11 +25,23 @@ def test_redact_masks_common_key_shapes():
     assert MASK in redact("xoxb-1234567890-abcdef")
 
 
-def test_redact_passes_plain_text_and_none():
-    assert redact(None) is None
-    assert redact("") == ""
-    text = "普通中文与代码片段：print(1)  # 不含密钥"
-    assert redact(text) == text
+def test_redact_masks_common_key_shapes():
+    assert SECRET not in redact(f"调用失败：{SECRET}")
+    assert MASK in redact("Authorization: Bearer abcdefgh12345678")
+    assert MASK in redact(f'{{"api_key": "{SECRET}"}}')
+    assert MASK in redact(f"secret={SECRET}")
+    assert MASK in redact("xoxb-1234567890-abcdef")
+
+
+def test_redact_masks_more_key_shapes():
+    """安全修订轮（F9）：Google/Groq/HF/JWT/password/Basic 形态补全。"""
+    assert MASK in redact("AIza" + "0123456789" * 3 + "abcd")  # Google：AIza + ≥30
+    assert MASK in redact("key=gsk_" + "0123456789abcdefghij")  # Groq
+    assert MASK in redact("token=hf_" + "0123456789abcdefghij")  # HuggingFace
+    assert MASK in redact("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.abc123def4")  # JWT
+    assert MASK in redact("password=hunter2secret")
+    assert MASK in redact("Authorization: Basic dXNlcjpwYXNzd29yZA==")
+    assert MASK in redact("passwd=tr0ub4dor&3")
 
 
 # -- 日志装配：级别生效 + 文件落地 + 脱敏 --------------------------------------

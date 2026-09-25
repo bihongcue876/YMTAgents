@@ -21,7 +21,9 @@ _REPLACE_DELAYS = (0.05, 0.10, 0.20)
 
 
 def _tmp_path(path: Path) -> Path:
-    return path.with_suffix(path.suffix + ".tmp")
+    # 临时名带 pid（安全修订轮）：固定「X.tmp」会与用户真实同名文件相撞——
+    # os.replace 那一步会把用户的 X.tmp 文件覆盖掉。
+    return path.with_name(f"{path.name}.tmp{os.getpid()}")
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -84,6 +86,19 @@ def eol_of_file(path: Path, *, sample: int = 65536) -> str:
 def atomic_write_json(path: Path, obj: Any) -> None:
     """原子写入 JSON（缩进 2，非 ASCII 原样）。"""
     atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
+
+
+def fsync_file(path: Path) -> None:
+    """把已落盘的文件刷到物理介质（关键持久化补 fsync，安全修订轮 F11）。
+
+    只读介质 / 不支持场景静默放弃（尽力而为，不改变调用方语义）。
+    """
+    try:
+        with path.open("rb+") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
 
 
 def backup_file(path: Path) -> None:

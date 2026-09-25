@@ -20,14 +20,25 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?:sk|pk|rk|xox[baprs])[-_][A-Za-z0-9_\-]{4,}"), MASK),
     # Authorization: Bearer <token>
     (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{8,}"), r"\1 " + MASK),
-    # key=value / "api_key": "value" / api-key: value
+    # key=value / "api_key": "value" / api-key: value（password 族：安全修订轮 F9 补全）
     (
         re.compile(
-            r"(?i)\b(api[_-]?key|apikey|access[_-]?token|secret)\b\s*[\"']?\s*[:=]\s*[\"']?"
-            r"([^\s\"',}]{4,})"
+            r"(?i)\b(api[_-]?key|apikey|access[_-]?token|secret|password|passwd|passphrase)\b"
+            r"\s*[\"']?\s*[:=]\s*[\"']?([^\s\"',}]{4,})"
         ),
         r"\1=" + MASK,
     ),
+    # Google API key（安全修订轮 F9）
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{30,}"), MASK),
+    # Groq / HuggingFace 形态（安全修订轮 F9）
+    (re.compile(r"\b(?:gsk|hf)_[A-Za-z0-9]{20,}"), MASK),
+    # 裸 JWT（header.payload[.signature]，安全修订轮 F9）
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}(?:\.[A-Za-z0-9_\-]{10,})?"),
+        MASK,
+    ),
+    # Authorization: Basic <b64>（Bearer 已有；安全修订轮 F9 补 Basic）
+    (re.compile(r"(?i)\b(authorization)\s*:\s*basic\s+[A-Za-z0-9+/=]{8,}"), r"\1: " + MASK),
 )
 
 

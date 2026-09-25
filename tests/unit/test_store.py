@@ -24,6 +24,32 @@ def test_atomic_write_and_backup(tmp_path):
     assert json.loads(bak.read_text(encoding="utf-8")) == {"x": 1}
 
 
+def test_tmp_files_use_pid_suffix(tmp_path):
+    """安全修订轮：固定「X.tmp」会与用户真实同名文件相撞——临时名必须带 pid。"""
+    import os
+
+    from core.store.atomic import atomic_write_text, _tmp_path
+
+    target = tmp_path / "doc.txt"
+    target.write_text("user real .tmp", encoding="utf-8")
+    (tmp_path / "doc.txt.tmp").write_text("user real .tmp", encoding="utf-8")
+    atomic_write_text(target, "new content")
+    assert target.read_text(encoding="utf-8") == "new content"
+    assert (tmp_path / "doc.txt.tmp").read_text(encoding="utf-8") == "user real .tmp"
+    assert str(os.getpid()) in _tmp_path(target).name
+
+
+def test_session_dir_rejects_malformed_session_id(tmp_path):
+    """安全修订轮：会话标识直接拼路径——穿越 / 分隔符形态必须拒绝。"""
+    from core.bus.sink import EventSink
+
+    sink = EventSink(tmp_path)
+    for bad in ("", ".", "..", "a/b", "a\\b", "x\x00y"):
+        with pytest.raises(ValueError):
+            sink.session_dir(bad)
+    assert sink.session_dir("sea_ok").name == "sea_ok"
+
+
 def test_config_store_defaults_and_degrade(tmp_path):
     store = ConfigStore(tmp_path)
     store.ensure_defaults()

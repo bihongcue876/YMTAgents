@@ -17,7 +17,7 @@ from typing import Any, Literal
 from core.security.audit import AuditFn, safe_audit
 from core.security.dpapi import ENTROPY_VAULT
 from core.security.errors import SecretError, SecretUnavailable
-from core.store.atomic import atomic_write_text
+from core.store.atomic import atomic_write_text, fsync_file
 
 _API_KEY_PREFIX = "api_key/"
 
@@ -140,5 +140,6 @@ class Vault(ISecretStore):
             raise SecretError("secret_write_failed", "机密库写入失败") from exc
         try:
             atomic_write_text(self.path, base64.b64encode(blob).decode("ascii"))
+            fsync_file(self.path)  # 整库单 blob：崩溃留半写不可解，故落盘即 fsync（F11）
         except OSError as exc:
             raise SecretError("secret_write_failed", "机密库写入失败") from exc
