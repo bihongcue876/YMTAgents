@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
+from core.httputil import MAX_RESPONSE_BYTES, NO_REDIRECT_OPENER, NoRedirect as _NoRedirect
+from core.httputil import open_bounded as _open_bounded
 from shared.errors import ErrorCode
 from shared.net import is_secure_transport
 from shared.schema import McpServerConfig
@@ -46,36 +48,13 @@ log = logging.getLogger(__name__)
 
 _PYTHON_COMMANDS = {"python", "pythonw", "python3", "pythonw3", "py"}
 
-#: 单次响应体 / SSE 行 / stdio 行的字节上限（安全修订轮 F4）：
+#: SSE 行 / stdio 行的字节上限（安全修订轮 F4）：
 #: 恶意服务器不得用无限长响应打满内存。
-MAX_RESPONSE_BYTES = 8_388_608
+#: （响应体上限 MAX_RESPONSE_BYTES 与禁重定向 opener 已提炼到 core.httputil 共用。）
 MAX_SSE_LINE_BYTES = 1_048_576
 MAX_STDIO_LINE_BYTES = 8_388_608
 
 SecretResolver = Callable[[str], str | None]
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """拒绝一切重定向（安全修订轮 F2）。
-
-    urllib 默认跟随重定向且把原请求头（含 vault 凭据头）带到重定向目标，
-    HTTPS→HTTP 降级重定向也被跟随——等于凭据外泄与内网 SSRF 的通道。
-    禁用后，重定向会以 HTTPError 形态浮出，交由既有错误分支处理。
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
-
-
-def _open_bounded(req: urllib.request.Request, timeout: float, limit: int) -> tuple[str, Any]:
-    """禁重定向 + 限量读取地打开响应；返回 (正文文本, 响应头对象)。"""
-    with _OPENER.open(req, timeout=timeout) as resp:
-        body = resp.read(limit).decode("utf-8", "replace")
-        headers = resp.headers
-    return body, headers
 
 
 class McpTransportError(RuntimeError):
@@ -515,7 +494,7 @@ class SseMCPClient(MCPClient):
             req = urllib.request.Request(
                 self.config.url, headers=self._build_headers(), method="GET"
             )
-            with _OPENER.open(req, timeout=self._timeout()) as resp:
+            with NO_REDIRECT_OPENER.open(req, timeout=self._timeout()) as resp:
                 event = ""
                 data = ""
                 while True:

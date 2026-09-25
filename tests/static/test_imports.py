@@ -24,13 +24,17 @@ ALLOWED: dict[str, set[str] | None] = {
     "core.security": {"shared", "core.store"},
     "core.gateway": {"shared", "core.bus", "core.store", "core.security"},
     "core.registry": {"shared", "core.bus"},
-    "core.mcp": {"shared", "core.registry"},
+    # 检索模块轮：MCP 与 retrieval 共用 core.httputil（禁重定向 + 限量读取，单源）
+    "core.mcp": {"shared", "core.registry", "core.httputil"},
     "core.shell": {"shared", "core.registry"},
     # 安全修订轮：skills 复用 core.store.atomic（原子写单源）+ git 出口过 Whitelist
     "core.skills": {"shared", "core.registry", "core.store", "core.gateway"},
     "core.memory": {"shared", "core.bus"},
     "core.workspace": {"shared", "core.store", "core.files"},
     "core.files": {"shared", "core.bus", "core.registry", "core.store"},
+    # 检索模块（spec-2026-09-25-retrieval）：httputil 为 core 内共用抓取层；
+    # 密钥经注入 resolver，不 import core.security。
+    "core.retrieval": {"shared", "core.registry", "core.gateway", "core.store", "core.httputil", "core.modules"},
     "core.agent": {
         "shared",
         "core.bus",
