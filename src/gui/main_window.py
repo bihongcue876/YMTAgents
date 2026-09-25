@@ -763,6 +763,10 @@ class MainWindow(QMainWindow):
             self.models.on_models_result(event)
         elif t == "feature.state":
             self.settings.set_features(event.features)
+        elif t == "retrieval.state":
+            self.settings.set_retrieval_state(event.engines, event.default_engines, event.module_state)
+        elif t == "retrieval.test.result":
+            self.settings.set_retrieval_test_result(event.engine, event.findings, event.summary)
             dpim = next((item for item in event.features if item.get("name") == "dpim"), {})
             self.library_page.set_available(
                 bool(dpim.get("enabled")), str(dpim.get("state", "disabled"))

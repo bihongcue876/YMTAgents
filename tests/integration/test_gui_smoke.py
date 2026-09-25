@@ -873,11 +873,12 @@ def test_settings_feature_switches_toggle_and_reflect_state(tmp_path, monkeypatc
 
         switches = window.settings.findChildren(Switch)
         # 所有配置项均展示；DPIM 宿主已接入，但默认关闭，且未启用时不 import 实现。
-        assert len(switches) == 5
+        # rev68：+retrieval（默认关，出网能力保守取向）。
+        assert len(switches) == 6
         assert sum(1 for s in switches if s.isChecked()) == 3
-        assert sum(1 for s in switches if not s.isChecked()) == 2
+        assert sum(1 for s in switches if not s.isChecked()) == 3
         by_name = {str(s.property("featureName")): s for s in switches}
-        assert set(by_name) == {"mcp", "shell", "skills", "btcm", "dpim"}
+        assert set(by_name) == {"mcp", "shell", "skills", "btcm", "dpim", "retrieval"}
         assert by_name["dpim"].isEnabled() is True
         assert by_name["dpim"].isChecked() is False
         dpim_badge = next(
@@ -893,7 +894,7 @@ def test_settings_feature_switches_toggle_and_reflect_state(tmp_path, monkeypatc
             str(s.property("featureName")): s
             for s in window.settings.findChildren(Switch)
         }
-        assert len(refreshed) == 5
+        assert len(refreshed) == 6
         assert {name: id(switch) for name, switch in refreshed.items()} == original_ids
 
         window.settings.feature_toggle.emit("shell", False)

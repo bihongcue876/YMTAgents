@@ -161,6 +161,16 @@ def bootstrap(
     features.register("skills", _skills_factory)
     features.register("btcm", _btcm_factory)
     features.register("dpim", _dpim_factory)
+
+    def _retrieval_factory():
+        # 检索模块（spec-2026-09-25-retrieval）：关档不 import；密钥经注入 vault。
+        from core.retrieval.manager import RetrievalManager
+
+        return RetrievalManager(
+            registry, config_store, secret_store, audit=sink.append_audit, emit=bridge.emit_event
+        )
+
+    features.register("retrieval", _retrieval_factory)
     features.load()
 
     def _session_root(session_id: str) -> Path | None:

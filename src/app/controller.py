@@ -47,6 +47,11 @@ from shared.envelope import (
     BranchSession,
     BuiltinToolState,
     BuiltinToolToggle,
+    RetrievalRefresh,
+    RetrievalConfigUpdate,
+    RetrievalKeySet,
+    RetrievalState,
+    RetrievalTest,
     RevertSession,
     SwitchBranch,
     SessionBranches,
@@ -249,9 +254,10 @@ class CoreController:
 
     def refresh_modules(self) -> None:
         """把附加功能宿主态同步进 supervisor（切片 0 起统一走 `features`；卸载即 disabled）。"""
-        for name in ("mcp", "shell", "btcm", "dpim"):
+        for name in ("mcp", "shell", "btcm", "dpim", "retrieval"):
             host = self.features.host(name) if self.features is not None else None
             self.supervisor.set_state(name, host.host_state() if host is not None else "disabled")
+        self._emit_retrieval()  # 检索分区首帧（关档也发空态，界面据 module_state 渲染）
 
     def _emit_features(self) -> None:
         if self.features is not None:
@@ -290,6 +296,8 @@ class CoreController:
             self._emit_btcm()
         elif name == "dpim":
             self._emit_libraries()
+        elif name == "retrieval":
+            self._emit_retrieval()
         self._emit_features()
         self._emit_health()
 
@@ -306,6 +314,41 @@ class CoreController:
                 ready=bool(payload.get("ready", True)),
             )
         )
+
+    # -- Retrieval（检索模块，spec-2026-09-25-retrieval） ------------------------
+    def _retrieval_host(self):
+        """取检索宿主；模块关档 → invalid_request（不 import 实现，同 feature 先例）。"""
+        host = self.features.host("retrieval") if self.features is not None else None
+        if host is None:
+            self._report("system", ErrorCode.INVALID_REQUEST.value, "检索模块未启用。", None)
+        return host
+
+    def _emit_retrieval(self) -> None:
+        host = self.features.host("retrieval") if self.features is not None else None
+        if host is None:
+            self.emit(RetrievalState(engines=[], default_engines=[], module_state="disabled"))
+            return
+        host.state_event()
+
+    def _on_retrieval_refresh(self, request) -> None:
+        host = self._retrieval_host()
+        if host is not None:
+            host.state_event()
+
+    def _on_retrieval_config(self, request) -> None:
+        host = self._retrieval_host()
+        if host is not None:
+            host.config_update(request.engines, request.default_engines)
+
+    def _on_retrieval_key(self, request) -> None:
+        host = self._retrieval_host()
+        if host is not None:
+            host.key_set(request.engine, request.value)
+
+    def _on_retrieval_test(self, request) -> None:
+        host = self._retrieval_host()
+        if host is not None:
+            host.test_engine(request.engine)
 
     def _emit_libraries(self) -> None:
         """DPIM 关闭时只发空态，不触碰 library data subtree。"""
@@ -1028,37 +1071,64 @@ error="写入失败；请检查工作区目录与记忆文件。",
             )
         )
 
-    def _on_builtin_toggle(self, request) -> None:
-        """内置工具开关（v0.0.11 D-1）：未知名归 tool_unknown，非法值归 tool_invalid_args。
+    def _retrieval_builtin(self):
+        """检索宿主的内置工具面（模块关档即 None，面板不出现 search.* 项）。"""
+        if self.features is None:
+            return None
+        host = self.features.host("retrieval")
+        if host is None or not hasattr(host, "KNOWN_BUILTIN_TOOLS"):
+            return None
+        return host
 
-        先改配置真值（plugins.json -> builtin），再刷新工具面（真卸载），最后回推快照。
+    def _builtin_items(self) -> list[dict]:
+        items: list[dict] = []
+        if self.files_manager is not None and hasattr(self.files_manager, "state"):
+            items.extend(self.files_manager.state())
+        retrieval = self._retrieval_builtin()
+        if retrieval is not None:
+            items.extend(retrieval.state())
+        return items
+
+    def _on_builtin_toggle(self, request) -> None:
+        """内置工具开关（v0.0.11 D-1；检索模块轮扩至 search.*）：
+
+        未知名归 tool_unknown，非法值归 tool_invalid_args。先改配置真值
+        （plugins.json -> builtin），再刷新工具面（真卸载），最后回推合并快照。
         """
-        known = self.files_manager is None or not hasattr(self.files_manager, "toggle_builtin")
-        if not known and request.name not in self.files_manager.KNOWN_BUILTIN_TOOLS:
+        files_ready = self.files_manager is not None and hasattr(self.files_manager, "toggle_builtin")
+        retrieval = self._retrieval_builtin()
+        in_files = files_ready and request.name in self.files_manager.KNOWN_BUILTIN_TOOLS
+        in_retrieval = retrieval is not None and request.name in retrieval.KNOWN_BUILTIN_TOOLS
+        if not in_files and not in_retrieval:
             self._report("config", ErrorCode.TOOL_UNKNOWN.value, "该内置工具不存在。", f"name={request.name}")
             return
-        if known:
-            self._report("system", ErrorCode.INVALID_REQUEST.value, "内置文件工具未启用。", None)
-            return
+        if in_retrieval:
+            try:
+                retrieval.toggle_builtin(request.name, bool(request.enabled))
+            except ValueError as exc:
+                self._report("config", ErrorCode.TOOL_INVALID_ARGS.value, str(exc), f"name={request.name}")
+                return
+        else:
+            try:
+                self.files_manager.toggle_builtin(request.name, bool(request.enabled))
+            except ValueError as exc:
+                # 非法值按契约归 invalid_args（一码一义）；未知名已在入口归 tool_unknown
+                self._report("config", ErrorCode.TOOL_INVALID_ARGS.value, str(exc), f"name={request.name}")
+                return
+        self.emit(BuiltinToolState(items=self._builtin_items()))
         try:
-            self.files_manager.toggle_builtin(request.name, bool(request.enabled))
-        except ValueError as exc:
-            # 非法值按契约归 invalid_args（一码一义）；未知名已在入口归 tool_unknown
-            self._report("config", ErrorCode.TOOL_INVALID_ARGS.value, str(exc), f"name={request.name}")
-            return
-        self.emit(
-            BuiltinToolState(items=self.files_manager.state())
-        )
-        try:
-            self.files_manager.refresh()
+            if in_files:
+                self.files_manager.refresh()
         except Exception:  # noqa: BLE001 - 刷新失败不计入开关结果
-            log.exception("文件工具面刷新失败")
+            log.exception("内置工具面刷新失败")
 
     def _emit_builtin(self) -> None:
-        """内置工具快照（D-1；无文件工具面时不发，避免假空清单）。"""
-        if self.files_manager is None or not hasattr(self.files_manager, "state"):
+        """内置工具快照（D-1；文件工具面存在或检索模块开启时发，避免假空清单）。"""
+        files_ready = self.files_manager is not None and hasattr(self.files_manager, "state")
+        retrieval = self._retrieval_builtin()
+        if not files_ready and retrieval is None:
             return
-        self.emit(BuiltinToolState(items=self.files_manager.state()))
+        self.emit(BuiltinToolState(items=self._builtin_items()))
 
     def _on_gate_respond(self, request) -> None:
         # 正常路径下 gate.respond 多被 _gate_handler 泵取命中；此处登记以兜底竞态。
@@ -1376,6 +1446,14 @@ error="写入失败；请检查工作区目录与记忆文件。",
             self._on_btcm_update(request)
         elif t == "btcm.run":
             self._on_btcm_run(request)
+        elif t == "retrieval.refresh":
+            self._on_retrieval_refresh(request)
+        elif t == "retrieval.config.update":
+            self._on_retrieval_config(request)
+        elif t == "retrieval.key.set":
+            self._on_retrieval_key(request)
+        elif t == "retrieval.test":
+            self._on_retrieval_test(request)
         elif t == "gate.respond":
             self._on_gate_respond(request)
         else:
