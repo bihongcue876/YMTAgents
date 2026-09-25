@@ -61,6 +61,7 @@ class ProviderSpec(BaseModel):
     models: list[ModelSpec] = Field(default_factory=list)
     key_status: Literal["stored", "missing", "error"] = "missing"
     local: bool = False  # 本地模型服务：免密钥（spec rev10 §1）
+    enabled: bool = True  # rev68：供应商启停（禁用 = 模型不再可解析，槽位保留可逆）
 
 
 class SessionParams(BaseModel):
@@ -242,6 +243,14 @@ class ProviderUpsert(Envelope):
 class ProviderDelete(Envelope):
     type: Literal["provider.delete"] = "provider.delete"
     provider_id: str
+
+
+class ProviderToggle(Envelope):
+    """供应商启用/禁用（rev68；用户裁决）：禁用 = 其模型不再可解析，槽位保留可逆。"""
+
+    type: Literal["provider.toggle"] = "provider.toggle"
+    provider_id: str
+    enabled: bool
 
 
 class TestConnection(Envelope):
@@ -1153,6 +1162,8 @@ class RetrievalState(Envelope):
 
     type: Literal["retrieval.state"] = "retrieval.state"
     engines: list[dict] = Field(default_factory=list)
+    #:工具级开关快照（rev68 界面优化）：{name, title, permission, enabled}（与内置工具面板同真值）。
+    tools: list[dict] = Field(default_factory=list)
     default_engines: list[str] = Field(default_factory=list)
     module_state: str = "disabled"
 
@@ -1307,6 +1318,7 @@ Request = Annotated[
         SwitchBranch,
         ProviderUpsert,
         ProviderDelete,
+        ProviderToggle,
         TestConnection,
         FetchModels,
         SettingsUpdate,

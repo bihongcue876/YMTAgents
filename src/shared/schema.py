@@ -38,6 +38,9 @@ class ProviderConfig(BaseModel):
     base_url: str
     key_ref: str | None = None  # vault://<prv_id>；None = 未设置密钥（v0.0.2：本地加密机密库）
     local: bool = False  # 本地模型服务：免密钥（spec rev10 §1）
+    #: 启用/禁用（用户裁决 2026-09-25：不想用的供应商不得被用到）。缺省 True = 存量配置零迁移。
+    #: 禁用 = 该供应商的模型不再可解析（调用归 model_not_found，槽位绑定保留、可逆）。
+    enabled: bool = True
     models: list[ModelConfig] = Field(default_factory=list)
 
 

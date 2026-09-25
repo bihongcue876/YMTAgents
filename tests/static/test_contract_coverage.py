@@ -80,7 +80,7 @@ def test_dpim_contracts_are_in_discriminated_unions():
     # 检索模块（spec-2026-09-25-retrieval）：+4 请求 +2 事件 → 68/47 → 72/49
     assert {"RetrievalRefresh", "RetrievalConfigUpdate", "RetrievalKeySet", "RetrievalTest"} <= requests
     assert {"RetrievalState", "RetrievalTestResult"} <= events
-    assert (len(REQUEST_MODELS), len(EVENT_MODELS)) == (72, 49)
+    assert (len(REQUEST_MODELS), len(EVENT_MODELS)) == (73, 49)
 
 
 def test_workspace_slice_contracts_are_in_discriminated_unions():

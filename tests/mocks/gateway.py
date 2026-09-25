@@ -59,6 +59,14 @@ class MockGateway(IModelGateway):
         self._providers.append(stored)
         return stored
 
+    def toggle_provider(self, provider_id: str, enabled: bool) -> bool:
+        """rev68：可脚本化替身同步启停（未知供应商返回 False）。"""
+        for i, p in enumerate(self._providers):
+            if p.id == provider_id:
+                self._providers[i] = p.model_copy(update={"enabled": bool(enabled)})
+                return True
+        return False
+
     def delete_provider(self, provider_id: str) -> bool:
         before = len(self._providers)
         self._providers = [p for p in self._providers if p.id != provider_id]
