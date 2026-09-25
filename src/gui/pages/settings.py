@@ -34,6 +34,7 @@ _FEATURE_LABELS = {
     "skills": "技能（Skills）",
     "btcm": "副思考链（BTCM）",
     "dpim": "小图书馆（DPIM）",
+    "retrieval": "检索",
 }
 _FEATURE_DESCRIPTIONS = {
     "mcp": "连接外部 MCP 服务器并使用其工具",
