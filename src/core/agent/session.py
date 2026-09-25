@@ -150,6 +150,10 @@ class ISessionStore(ABC):
         """就地改名（spec rev3 `session.rename`）。"""
 
     @abstractmethod
+    def set_toolset(self, session_id: str, tools: list[str] | None) -> SessionMeta:
+        """会话工具白名单（rev68）：写 meta.toolset 并落 `session.toolset` 事件。"""
+
+    @abstractmethod
     def set_model(self, session_id: str, model_id: str | None, slot: str = "main") -> SessionMeta:
         """会话级模型切换，落 `model.switch` 事件（docs 03 §3.1）。"""
 
@@ -707,6 +711,14 @@ class SessionStore(ISessionStore):
         from_ = meta.main_model
         self.append(session_id, "user", "model.switch", {"slot": slot, "from": from_, "to": model_id})
         meta.main_model = model_id
+        self._touch(meta)
+        return meta
+
+    def set_toolset(self, session_id: str, tools: list[str] | None) -> SessionMeta:
+        """会话工具白名单（rev68）：写 meta.toolset 并落 `session.toolset` 事件。"""
+        meta = self._read_meta(session_id)
+        self.append(session_id, "user", "session.toolset", {"enabled": tools})
+        meta.toolset = tools
         self._touch(meta)
         return meta
 

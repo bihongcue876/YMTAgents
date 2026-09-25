@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
 from shared.envelope import ContextUsage, SessionBranches, SessionDetailResult
 
 from gui import theme
+from gui.widgets import section_label
+from gui.widgets.switch import Switch
 
 #: 三态 → 文字后缀（rev35：强化可辨性）。
 _TRI_LABEL = {
@@ -108,11 +110,15 @@ class SessionPanel(QWidget):
     revert_requested = Signal(int)  # 退回到此前：该提问的原始序号（rev31）
     branch_requested = Signal(int)  # 从此处分支：该提问的原始序号（rev31）
     branch_switch_requested = Signal(str)  # 切换活动分支（rev31）
+    toolset_requested = Signal(object)  # rev68：list[str] | None（None = 全部可用）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._session_id: str | None = None
         self._question_texts: list[str] = []
+        self._tool_items: list[dict] = []
+        self._tool_state: dict[str, bool] = {}
+        self._tool_switches: dict[str, Switch] = {}
         # 拖拽宽度下限（rev29 裁决 340）：MainWindow 的按钮展开路径本就钳 380–720，
         # 但 QSplitter 自由拖拽不受那条钳制 —— 不设下限时可拖到极窄，表单与
         # 问题列表挤压变形。与侧栏 PANEL_MIN/MAX 同款纪律，交由 Qt 统一落实。
@@ -131,19 +137,22 @@ class SessionPanel(QWidget):
 
         content = QWidget()
         body = QVBoxLayout(content)
+        body.setSpacing(10)  # rev68：分组间距与配置页一致
         body.addLayout(self._build_status())
-        body.addWidget(QLabel("上下文用量"))
+        body.addWidget(section_label("上下文用量"))
         body.addLayout(self._build_usage())
-        body.addWidget(QLabel("记忆"))
+        body.addWidget(section_label("记忆"))
         body.addLayout(self._build_memory())
-        body.addWidget(QLabel("本会话策略"))
+        body.addWidget(section_label("本会话策略"))
         body.addLayout(self._build_policy())
-        body.addWidget(QLabel("模型参数"))
+        body.addWidget(section_label("模型参数"))
         body.addLayout(self._build_params())
+        body.addWidget(section_label("工具权限"))
+        body.addLayout(self._build_toolset())
         self._save = QPushButton("保存本会话设置")
         self._save.clicked.connect(self._on_save)
         body.addLayout(_action_row(self._save))
-        body.addWidget(QLabel("分支"))
+        body.addWidget(section_label("分支"))
         body.addLayout(self._build_branches())
         body.addLayout(self._build_questions())
         body.addStretch(1)
@@ -159,6 +168,84 @@ class SessionPanel(QWidget):
         layout.addWidget(scroll, 1)
 
     # -- 构建 --------------------------------------------------------------
+    def _build_toolset(self) -> QVBoxLayout:
+        """工具权限（rev68；用户裁决）：本对话可用哪些工具，运行中可改。
+
+        数据源 = `tool.catalog`（当前注册的全部可见工具）；开关改动本地暂存，
+        「应用」一次提交（避免逐项开关反复写盘）；全部可用时提交 None。
+        """
+        self._toolset_hint = QLabel("列出当前已注册的工具；改动后点「应用」生效，对话流会出现灰色提示。")
+        self._toolset_note = _muted("")
+        self._tools_box = QVBoxLayout()
+        self._tools_box.setContentsMargins(0, 0, 0, 0)
+        self._tools_box.setSpacing(2)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._tool_apply = QPushButton("应用工具权限")
+        self._tool_apply.setEnabled(False)
+        self._tool_apply.clicked.connect(self._on_toolset_apply)
+        self._tool_all = QPushButton("全部可用")
+        self._tool_all.setToolTip("恢复本对话全部工具可用（提交 None）")
+        self._tool_all.clicked.connect(self._on_toolset_all)
+        row.addWidget(self._tool_apply)
+        row.addWidget(self._tool_all)
+        row.addStretch(1)
+        box = QVBoxLayout()
+        box.addWidget(self._toolset_note)
+        box.addLayout(self._tools_box)
+        box.addLayout(row)
+        return box
+
+    def set_tools(self, items: list[dict]) -> None:
+        """接收 tool.catalog 快照；按既有期望态渲染开关。"""
+        self._tool_items = list(items or [])
+        self._render_tool_rows()
+        self._tool_apply.setEnabled(True)
+
+    def _render_tool_rows(self) -> None:
+        while self._tools_box.count():
+            self._tools_box.takeAt(0)
+        self._tool_switches = {}
+        for item in self._tool_items:
+            name = str(item.get("name"))
+            sw = Switch()
+            sw.setObjectName("toolsetSwitch")
+            sw.setProperty("toolName", name)
+            sw.setChecked(bool(self._tool_state.get(name, True)))
+            sw.toggled.connect(lambda checked, n=name: self._tool_state.__setitem__(n, checked))
+            self._tool_switches[name] = sw
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            label = QLabel(name)
+            perm = QLabel(str(item.get("permission", "")))
+            perm.setObjectName("mutedNote")
+            row.addWidget(sw)
+            row.addWidget(label)
+            row.addWidget(perm)
+            row.addStretch(1)
+            self._tools_box.addLayout(row)
+        self._update_toolset_note()
+
+    def _update_toolset_note(self) -> None:
+        if not self._tool_items:
+            self._toolset_note.setText("当前没有已注册的工具。")
+            return
+        all_on = all(self._tool_state.get(str(i.get("name")), True) for i in self._tool_items)
+        self._toolset_note.setText("当前：全部工具可用" if all_on else "当前：自定义白名单（仅勾选工具可用）")
+
+    def _on_toolset_apply(self) -> None:
+        all_on = all(self._tool_state.get(str(i.get("name")), True) for i in self._tool_items)
+        tools = None if all_on else sorted(
+            str(i.get("name")) for i in self._tool_items if self._tool_state.get(str(i.get("name")), True)
+        )
+        self.toolset_requested.emit(tools)
+
+    def _on_toolset_all(self) -> None:
+        for sw in self._tool_switches.values():
+            sw.setChecked(True)
+        self.toolset_requested.emit(None)
+
     def _build_status(self) -> QFormLayout:
         self._role = QLabel("—")
         self._model = QLabel("—")
@@ -451,6 +538,11 @@ class SessionPanel(QWidget):
         self._created.setText(meta.created_at.astimezone().strftime("%Y-%m-%d %H:%M"))
         self._updated.setText(meta.updated_at.astimezone().strftime("%Y-%m-%d %H:%M"))
         self._size.setText(format_bytes(result.data_bytes))
+        # rev68：会话工具白名单期望态（None = 全部可用；名单外 = 关）
+        self._tool_state = {
+            str(t): True for t in (meta.toolset or [])
+        } if meta.toolset is not None else {}
+        self._render_tool_rows()
 
         if not self._name.hasFocus():
             self._name.setText(meta.title)

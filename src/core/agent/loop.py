@@ -534,7 +534,7 @@ class AgentLoop(IAgentLoop):
             )
             return
 
-        payloads = self._tool_payloads()
+        payloads = self._tool_payloads(session_id)
         messages = self._prepare_context(
             session_id, turn_seq, model_id, meta, payloads, user_message.attachments
         )
@@ -612,11 +612,14 @@ class AgentLoop(IAgentLoop):
             # rev59：新会话（首轮）后自动生成标题（模型优先 + 截断回退；不在回复路径上）。
             self._maybe_auto_title(session_id, meta)
 
-    def _tool_payloads(self) -> list[dict]:
-        """当前可见工具的 function calling 定义（无执行器则返回空，行为同首期）。"""
+    def _tool_payloads(self, session_id: str | None = None) -> list[dict]:
+        """当前可见工具的 function calling 定义（无执行器则返回空，行为同首期）。
+
+        rev68：按会话工具白名单过滤（None 名单 = 全部可用）。
+        """
         if self.executor is None:
             return []
-        return self.executor.tool_payloads()
+        return self.executor.tool_payloads(session_id)
 
     @staticmethod
     def _tool_lines(payloads: list[dict] | None) -> list[str]:
@@ -638,15 +641,16 @@ class AgentLoop(IAgentLoop):
             lines.append(f"{name} — {desc}" if desc else name)
         return lines
 
-    def _tool_guide_lines(self) -> tuple[list[str], int]:
+    def _tool_guide_lines(self, session_id: str | None = None) -> tuple[list[str], int]:
         """工具使用指引段：随开关动态增删，超预算按 内置 > 技能 > MCP 截断。
 
         截断只影响提示词、**不影响工具可用性**，且只记一次日志（不打扰用户）。
+        rev68：按会话工具白名单过滤。
         """
         if self.executor is None:
             return [], 0
         try:
-            blocks = self.executor.tool_prompt_blocks()
+            blocks = self.executor.tool_prompt_blocks(session_id)
         except Exception:  # noqa: BLE001 - 指引段非关键路径
             log.exception("读取工具使用指引失败")
             return [], 0
@@ -772,7 +776,7 @@ class AgentLoop(IAgentLoop):
                 log.exception("读取附件失败")
                 self._fail(session_id, turn_seq, ErrorCode.STORAGE_ERROR.value, "读取附件失败。")
                 return None
-        guide_lines, _guide_dropped = self._tool_guide_lines()
+        guide_lines, _guide_dropped = self._tool_guide_lines(session_id)
         config = ConfigSnapshot(
             system_prompt=system_prompt,
             memory=read_cascade(self.root, session_id, workspace_dirs),
@@ -783,7 +787,7 @@ class AgentLoop(IAgentLoop):
             window=window,
             main_model=model_id,
             tool_lines=self._tool_lines(payloads),
-            tools_tokens=(self.executor.tools_tokens() if (payloads and self.executor) else 0),
+            tools_tokens=(self.executor.tools_tokens(session_id) if (payloads and self.executor) else 0),
             policy_lines=self._btcm_policy_lines(payloads),
             tool_guide_lines=guide_lines,
         )

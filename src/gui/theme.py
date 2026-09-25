@@ -455,6 +455,7 @@ a {{ color: {p.accent}; }}
 .attachments {{ color: {p.muted}; font-size: {fs["caption"]}px; margin-top: 6px; }}
 .usage, .tag {{ color: {p.muted}; font-size: {fs["caption"]}px; }}
 .error {{ background: {p.danger_bg}; border-color: {p.danger_border}; color: {p.danger}; }}
+    .note {{ color: {p.muted}; font-size: {fs["caption"]}px; }}
 """
 
 

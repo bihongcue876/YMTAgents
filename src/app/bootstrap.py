@@ -192,6 +192,14 @@ def bootstrap(
         registry, store=session_store, emit=bridge.emit_event, audit=sink.append_audit
     )
 
+    def _session_toolset(session_id: str):
+        try:
+            return session_store.get_meta(session_id).toolset
+        except Exception:  # noqa: BLE001 - 无效/旧会话按无限制
+            return None
+
+    executor.set_session_toolset(_session_toolset)
+
     def _workspace_memory_paths(session_id: str) -> list[Path]:
         meta = session_store.get_meta(session_id)
         return workspace_manager.cascade_dirs(meta.workspace_id)

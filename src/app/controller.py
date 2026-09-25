@@ -40,6 +40,12 @@ from shared.envelope import (
     SendMessage,
     SessionCreated,
     SessionDetail,
+    SessionNote,
+    SessionToolset,
+    ToolCatalog,
+    SessionNote,
+    SessionToolset,
+    ToolCatalog,
     SessionDetailResult,
     SessionEvents,
     SessionIndex,
@@ -300,6 +306,7 @@ class CoreController:
         elif name == "retrieval":
             self._emit_retrieval()
         self._emit_features()
+        self._emit_tool_catalog()
         self._emit_health()
 
     def _emit_btcm(self) -> None:
@@ -580,6 +587,7 @@ class CoreController:
         self._emit_btcm()
         self._emit_builtin()  # v0.0.11（D-1）：插件页「内置工具」分区首屏快照
         self._emit_retrieval()  # rev68：检索页首屏（关档也发空态，页面据 module_state 引导）
+        self._emit_tool_catalog()  # rev68：会话详情「工具权限」区数据源
 
     # -- 工作区（v0.0.6） -----------------------------------------------------
     def _session_counts(self) -> dict[str, int]:
@@ -1460,6 +1468,8 @@ error="写入失败；请检查工作区目录与记忆文件。",
             self._on_retrieval_test(request)
         elif t == "gate.respond":
             self._on_gate_respond(request)
+        elif t == "session.toolset":
+            self._on_session_toolset(request)
         else:
             # 未知类型**不得静默**：此前只写一条 warning，调用方拿不到任何反馈（spec rev9 §1）。
             log.warning("未知请求类型：%s", t)
@@ -1518,6 +1528,10 @@ error="写入失败；请检查工作区目录与记忆文件。",
         # 无会话时仍写全局默认：那是「为下一个对话选默认」的合法入口。
         if self.current_session_id:
             self.store.set_model(self.current_session_id, request.model_id, request.slot)
+            self._session_note(
+                self.current_session_id,
+                f"已切换模型 → {request.model_id or "（未绑定）"}",
+            )
             self._emit_index()  # 侧栏/下拉缓存随会话级选择刷新（rev23）
         elif request.model_id != self.gateway.get_slots().get("main"):
             self._persist(
@@ -1781,6 +1795,40 @@ error="写入失败；请检查工作区目录与记忆文件。",
             "供应商删除失败：请检查数据目录是否可写。",
         )
         self._emit_providers()
+
+    def _emit_tool_catalog(self) -> None:
+        """当前注册的全部可见工具快照（rev68）：会话详情「工具权限」区数据源。"""
+        items = [
+            {"name": spec.name, "title": spec.title, "permission": str(getattr(spec.permission, "value", spec.permission))}
+            for spec in self.registry.list_tools()
+        ]
+        self.emit(ToolCatalog(items=items))
+
+    def _session_note(self, session_id: str, text: str) -> None:
+        """会话流灰色小字（rev68）：落盘（回放可见）+ 经桥即时推送。"""
+        event = SessionNote(session_id=session_id, text=text)
+        self.store.append_event(session_id, event)
+        self.emit(event)
+
+    def _on_session_toolset(self, request: SessionToolset) -> None:
+        """本会话工具白名单（rev68；运行中可随时变更）。"""
+        sid = self.current_session_id
+        if not sid:
+            self._report("session", ErrorCode.INVALID_REQUEST.value, "当前没有活动会话。", None)
+            return
+        try:
+            self.store.set_toolset(sid, request.tools)
+        except Exception as exc:  # noqa: BLE001
+            self._report("session", ErrorCode.STORAGE_ERROR.value, "工具权限保存失败。", str(exc)[:200])
+            return
+        n = len(request.tools) if request.tools else 0
+        text = (
+            "工具权限已更新：全部工具可用"
+            if request.tools is None or not request.tools
+            else f"工具权限已更新：启用 {n} 项工具"
+        )
+        self._session_note(sid, text)
+        self._emit_detail(sid)
 
     def _on_provider_toggle(self, request: ProviderToggle) -> None:
         """供应商启停（rev68；用户裁决）：禁用 = 其模型不再可解析，槽位保留可逆。"""

@@ -99,6 +99,9 @@ class SessionMeta(BaseModel):
     workspace_id: str | None = None
     # rev59：是否已被用户手动重命名/保存（手动命名优先；True 后不再被自动标题覆盖）
     title_manual: bool = False
+    #: rev68：本会话工具白名单（用户裁决 2026-09-25：每个对话可选哪些工具/插件，作权限）。
+    #: None = 全部可用（默认，存量零迁移）；非空 = 仅名单内的工具（精确名）。
+    toolset: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +579,16 @@ class McpScan(Envelope):
     type: Literal["mcp.scan"] = "mcp.scan"
     server_id: str
     checks: list[str] | None = None
+
+
+class SessionToolset(Envelope):
+    """本会话工具白名单（rev68）：tools=None = 全部可用；非空 = 精确工具名列表。
+
+    运行中可随时变更：变更即落盘 + 在对话流写一条灰色提示（session.note）。
+    """
+
+    type: Literal["session.toolset"] = "session.toolset"
+    tools: list[str] | None = None
 
 
 class GateRespond(Envelope):
@@ -1107,6 +1120,27 @@ class GateResult(Envelope):
     decider: str = "policy"
 
 
+class SessionNote(Envelope):
+    """会话流内的灰色小字提示（rev68）：工具权限变更 / 模型切换等系统事实。
+
+    落 events.jsonl（回放可见）+ 经桥推 UI（即时可见）。
+    """
+
+    type: Literal["session.note"] = "session.note"
+    session_id: str
+    text: str
+
+
+class ToolCatalog(Envelope):
+    """当前注册的全部可见工具清单（rev68）：会话详情「工具权限」区的数据源。
+
+    items = {name, title, permission}；不含 MCP 服务器健康细节（插件页另有 tool.list）。
+    """
+
+    type: Literal["tool.catalog"] = "tool.catalog"
+    items: list[dict] = Field(default_factory=list)
+
+
 class BuiltinToolState(Envelope):
     """v0.0.11（D-1）：内置工具清单与快照（items = {name,permission,enabled}；面板一次拉全量）。"""
 
@@ -1336,6 +1370,7 @@ Request = Annotated[
         McpServersRefresh,
         McpScan,
         GateRespond,
+        SessionToolset,
         SkillToggle,
         SkillImport,
         SkillUpdate,
@@ -1428,6 +1463,8 @@ WorkspaceMemoryResult,
         BuiltinToolState,
         RetrievalState,
         RetrievalTestResult,
+        SessionNote,
+        ToolCatalog,
     ],
     Field(discriminator="type"),
 ]

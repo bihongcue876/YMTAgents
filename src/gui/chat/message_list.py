@@ -174,6 +174,11 @@ class MessageList(QWidget):
         # 只就地更新这条助手节点（content / usage / interrupted / thinking / 折叠）
         self._paint_last()
 
+    def add_note(self, text: str) -> None:
+        """灰色小字提示行（rev68）：工具权限 / 模型切换等系统事实。"""
+        self._messages.append({"role": "note", "content": text})
+        self._paint_new_tail()
+
     def add_error(self, message: str, detail: str | None = None) -> None:
         self._messages.append({"role": "error", "content": message, "detail": detail})
         self._paint_new_tail()
@@ -304,6 +309,15 @@ class MessageList(QWidget):
                         "interrupted": bool(payload.get("interrupted")),
                     }
                 )
+            elif t == "session.note":
+                self._messages.append({"role": "note", "content": payload.get("text", "")})
+            elif t == "model.switch":
+                to = payload.get("to") or "（未绑定）"
+                self._messages.append({"role": "note", "content": f"已切换模型 → {to}"})
+            elif t == "session.toolset":
+                enabled = payload.get("enabled")
+                note = "工具权限已更新：全部工具可用" if not enabled else f"工具权限已更新：启用 {len(enabled)} 项工具"
+                self._messages.append({"role": "note", "content": note})
             elif t == "error":
                 self._messages.append(
                     {"role": "error", "content": payload.get("message", ""), "detail": payload.get("detail")}

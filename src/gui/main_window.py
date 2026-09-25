@@ -43,6 +43,7 @@ from shared.envelope import (
     SetSlot,
     SettingsUpdate,
     FeatureToggle,
+    SessionToolset,
     RetrievalRefresh,
     RetrievalConfigUpdate,
     RetrievalKeySet,
@@ -491,6 +492,9 @@ class MainWindow(QMainWindow):
         self.detail.revert_requested.connect(self._on_revert)
         self.detail.branch_requested.connect(self._on_branch)
         self.detail.branch_switch_requested.connect(self._on_switch_branch)
+        self.detail.toolset_requested.connect(
+            lambda tools: self.bus.submit(SessionToolset(tools=tools))
+        )
 
     # -- 会话详情（rev24） --------------------------------------------------
     def _on_feature_toggle(self, name: str, enabled: bool) -> None:
@@ -760,6 +764,10 @@ class MainWindow(QMainWindow):
             self.chat.on_tool_call(event)
         elif t == "tool.builtin.state":
             self.plugins_page.update_builtin(event.items)
+        elif t == "tool.catalog":
+            self.detail.set_tools(event.items)  # rev68：会话详情「工具权限」数据源
+        elif t == "session.note":
+            self.chat.messages.add_note(event.text)
         elif t == "tool.result":
             self.chat.on_tool_result(event)
             self._settle_gate(event)

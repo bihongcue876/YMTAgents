@@ -297,6 +297,12 @@ def _block_assistant(
     return "".join(parts)
 
 
+def _block_note(text: str, index: int = 0) -> str:
+    """灰色小字提示行（rev68）：工具权限变更 / 模型切换等系统事实，非对话内容。"""
+    safe = _html.escape(text or "")
+    return f'<div class="msg note" id="m{index}">{safe}</div>'
+
+
 def _block_error(message: str, detail: str | None, index: int = 0) -> str:
     text = _html.escape(message or "错误")
     if detail:
@@ -363,6 +369,8 @@ def message_row(msg: dict, index: int = 0, theme: str | None = DEFAULT_THEME) ->
         )
     if role == "error":
         return _block_error(msg.get("content", ""), msg.get("detail"), index)
+    if role == "note":
+        return _block_note(msg.get("content", ""), index)
     if role == "tool":
         return _block_tool(msg, index, theme)
     return ""

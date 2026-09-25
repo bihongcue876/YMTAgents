@@ -73,15 +73,19 @@ class IToolExecutor(ABC):
         """注入关卡裁决回调（app 层装配后回填）。"""
 
     @abstractmethod
-    def tool_payloads(self) -> list[dict]:
-        """当前可见工具的 OpenAI function calling 定义列表。"""
+    def set_session_toolset(self, resolver: Callable[[str], list[str] | None] | None) -> None:
+        """注入会话工具白名单解析器（rev68；None 名单 = 全部可用）。"""
 
     @abstractmethod
-    def tools_tokens(self) -> int:
+    def tool_payloads(self, session_id: str | None = None) -> list[dict]:
+        """当前可见工具的 OpenAI function calling 定义列表（可按会话白名单过滤）。"""
+
+    @abstractmethod
+    def tools_tokens(self, session_id: str | None = None) -> int:
         """工具定义的输入侧 token 估算（单列预算段）。"""
 
     @abstractmethod
-    def tool_prompt_blocks(self) -> list[tuple[str, str]]:
+    def tool_prompt_blocks(self, session_id: str | None = None) -> list[tuple[str, str]]:
         """当前可见工具的**使用指引**（名字, prompt_block），按 内置 > 技能 > MCP 排序。"""
 
     @abstractmethod
@@ -123,10 +127,27 @@ class ToolExecutor(IToolExecutor):
         self.emit = emit or (lambda _event: None)
         self.audit = audit or (lambda *_a, **_k: None)
         self._gate = gate
+        #: rev68：会话工具白名单解析器（注入；core.registry 不反向依赖 core.agent）。
+        self._session_toolset: Callable[[str], list[str] | None] | None = None
 
     def set_gate(self, gate: GateHandler | None) -> None:
         """注入关卡裁决回调（由 app 层在装配后回填，core 不依赖 app）。"""
         self._gate = gate
+
+    def set_session_toolset(self, resolver: Callable[[str], list[str] | None] | None) -> None:
+        """注入会话工具白名单解析器（rev68；None 或名单为空语义见 _allowed）。"""
+        self._session_toolset = resolver
+
+    def _allowed(self, session_id: str | None) -> set[str] | None:
+        """会话白名单集合；None = 不限制（默认）。名单内条目 = 精确工具名。"""
+        if session_id is None or self._session_toolset is None:
+            return None
+        try:
+            tools = self._session_toolset(session_id)
+        except Exception:  # noqa: BLE001 - 解析失败 fail-closed（按无限制处理？否——不阻断）
+            log.exception("读取会话工具白名单失败")
+            return None
+        return set(str(t) for t in tools) if tools else None
 
     # -- 可见性与定义 ------------------------------------------------------
     def _is_visible(self, spec: ToolSpec) -> bool:
@@ -138,12 +159,21 @@ class ToolExecutor(IToolExecutor):
         except Exception:  # noqa: BLE001 - 可用性回调异常时 fail-closed（不可见）
             return False
 
-    def visible_specs(self) -> list[ToolSpec]:
-        return self.registry.list_tools(self._is_visible)
+    def visible_specs(self, session_id: str | None = None) -> list[ToolSpec]:
+        allowed = self._allowed(session_id)
 
-    def tool_payloads(self) -> list[dict]:
+        def predicate(spec: ToolSpec) -> bool:
+            if not self._is_visible(spec):
+                return False
+            if allowed is not None and spec.name not in allowed:
+                return False
+            return True
+
+        return self.registry.list_tools(predicate)
+
+    def tool_payloads(self, session_id: str | None = None) -> list[dict]:
         payloads: list[dict] = []
-        for spec in self.visible_specs():
+        for spec in self.visible_specs(session_id):
             payloads.append(
                 {
                     "type": "function",
@@ -157,20 +187,20 @@ class ToolExecutor(IToolExecutor):
             )
         return payloads
 
-    def tools_tokens(self) -> int:
+    def tools_tokens(self, session_id: str | None = None) -> int:
         # 粗略估算：工具名 + 描述 + 入参 schema 的字符量。
         total = 0
-        for payload in self.tool_payloads():
+        for payload in self.tool_payloads(session_id):
             total += estimate_tokens(json.dumps(payload, ensure_ascii=False))
         return total
 
-    def tool_prompt_blocks(self) -> list[tuple[str, str]]:
+    def tool_prompt_blocks(self, session_id: str | None = None) -> list[tuple[str, str]]:
         """可见工具的 prompt_block（缺省空的工具不进指引段）。
 
         排序即**截断优先级**：内置（0）> 技能（1）> MCP（2），同级按名字稳定排序。
         """
         items: list[tuple[int, str, str]] = []
-        for spec in self.visible_specs():
+        for spec in self.visible_specs(session_id):
             block = " ".join(str(getattr(spec, "prompt_block", "") or "").split())
             if not block:
                 continue
@@ -220,6 +250,13 @@ class ToolExecutor(IToolExecutor):
         spec = self._find_spec(name)
         if spec is None or not self._is_visible(spec):
             result = self._error(ErrorCode.TOOL_UNAVAILABLE)
+            self._persist(call_id, name, args, Permission.CONFIRM.value, result, ctx)
+            return result
+        # rev68：会话工具白名单（纵深防线——下发名单已过滤，此处兜住绕过面）。
+        session_id = ctx.session_id if ctx is not None else None
+        allowed = self._allowed(session_id)
+        if allowed is not None and name not in allowed:
+            result = self._error(ErrorCode.TOOL_DENIED, "本对话未启用该工具（工具权限）")
             self._persist(call_id, name, args, Permission.CONFIRM.value, result, ctx)
             return result
 
