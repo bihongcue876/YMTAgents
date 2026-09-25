@@ -110,7 +110,7 @@ class Sidebar(QWidget):
         self._plugins_btn = _rail_button("🔌 插件", "MCP 插件与工具")
         self._terminal_btn = _rail_button("⌨ 终端", "本机终端（shell 会话与监视）")
         self._thinking_btn = _rail_button("🧠 思考", "副思考链（BTCM）")
-        self._library_btn = _rail_button("📚 小图书馆", "本地书库与来源检索（DPIM）")
+        self._library_btn = _rail_button("💾 存储", "本地书库与来源检索（DPIM）")
         self._retrieval_btn = _rail_button("🔍 检索", "联网检索（搜索 · 抓取 · 引擎开关 · 连通测试）")
         self._settings_btn = _rail_button("🛠 设置", "系统设置")
 
