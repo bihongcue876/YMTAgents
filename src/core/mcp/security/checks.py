@@ -219,7 +219,9 @@ def check_credentials(config, client=None) -> ItemResult:
     hits += _scan_header_refs(config.headers_ref or {})
     if not hits:
         return _r("A3", "pass", "未在 env / URL / 请求头引用中发现明文凭证", "凭证应仅以 vault:// 引用存放")
-    lines = [f"{where}.{key}={P.mask(value)}" for where, key, value in hits]
+    # 安全修订轮 F10：evidence 只记「位置.键名」事实，不回显值的任何前缀——
+    # 短值曾全量回显，且非标准形态密钥可能不被 scanner 的 redact 命中。
+    lines = [f"{where}.{key}" for where, key, _value in hits]
     return _r("A3", "fail", "发现明文凭证：" + "；".join(lines), "建议改用本地加密库（vault://）引用")
 
 
@@ -280,7 +282,8 @@ _STACK_REGEX = [re.compile(p) for p in _STACK_PATTERNS]
 
 def check_handshake(config, client=None) -> ItemResult:
     """A4：协议握手 + 错误响应是否泄露内部信息（主动探测，需活连接）。"""
-    if client is None or not getattr(client, "connected", False):
+    # 安全修订轮：MCPClient 的属性是 _connected（读 connected 曾致主动探测恒 skip）
+    if client is None or not getattr(client, "_connected", False):
         return _r("A4", "skip", "无已连接客户端，主动探测不适用", "连接服务器后就地复检")
     version = str(getattr(client, "protocol_version", "") or "").strip()
     if not version:
@@ -349,7 +352,7 @@ def _probe_error_leakage(client) -> tuple[bool, str]:
 # B 组：工具元数据 / 响应
 # ---------------------------------------------------------------------------
 def _safe_list_tools(client):
-    if client is None or not getattr(client, "connected", False):
+    if client is None or not getattr(client, "_connected", False):
         return None
     try:
         return list(client.list_tools())

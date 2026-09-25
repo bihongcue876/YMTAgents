@@ -25,7 +25,7 @@ class _ToolsClient:
 
     def __init__(self, tools, *, connected=True, protocol_version="2026-07-28"):
         self._tools = list(tools)
-        self.connected = connected
+        self._connected = connected  # 与真实 MCPClient 属性同名（安全修订轮对齐）
         self.protocol_version = protocol_version
         self.call_result = {"content": [{"type": "text", "text": "hello"}]}
 
@@ -75,8 +75,11 @@ def test_a3_detects_inline_secret_masked():
     )
     result = check_credentials(cfg)
     assert result.status == "fail"
-    assert "sk-abcdef123456" not in result.evidence  # 完整密钥绝不出现在证据里
-    assert "***" in result.evidence
+    # 安全修订轮 F10：evidence 只记「位置.键名」事实——完整密钥与任何前缀都不回显
+    assert "sk-abcdef123456" not in result.evidence
+    assert "Bearer" not in result.evidence
+    assert "***" not in result.evidence
+    assert "env.API_KEY" in result.evidence
 
 
 def test_a3_vault_ref_is_clean_and_inline_header_is_not():

@@ -26,7 +26,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from shared.errors import ErrorCode
 from shared.net import is_secure_transport
@@ -46,7 +46,36 @@ log = logging.getLogger(__name__)
 
 _PYTHON_COMMANDS = {"python", "pythonw", "python3", "pythonw3", "py"}
 
+#: 单次响应体 / SSE 行 / stdio 行的字节上限（安全修订轮 F4）：
+#: 恶意服务器不得用无限长响应打满内存。
+MAX_RESPONSE_BYTES = 8_388_608
+MAX_SSE_LINE_BYTES = 1_048_576
+MAX_STDIO_LINE_BYTES = 8_388_608
+
 SecretResolver = Callable[[str], str | None]
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """拒绝一切重定向（安全修订轮 F2）。
+
+    urllib 默认跟随重定向且把原请求头（含 vault 凭据头）带到重定向目标，
+    HTTPS→HTTP 降级重定向也被跟随——等于凭据外泄与内网 SSRF 的通道。
+    禁用后，重定向会以 HTTPError 形态浮出，交由既有错误分支处理。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open_bounded(req: urllib.request.Request, timeout: float, limit: int) -> tuple[str, Any]:
+    """禁重定向 + 限量读取地打开响应；返回 (正文文本, 响应头对象)。"""
+    with _OPENER.open(req, timeout=timeout) as resp:
+        body = resp.read(limit).decode("utf-8", "replace")
+        headers = resp.headers
+    return body, headers
 
 
 class McpTransportError(RuntimeError):
@@ -279,12 +308,11 @@ class HttpMCPClient(MCPClient):
             self.config.url, data=data, headers=self._build_headers(), method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout()) as resp:
-                body = resp.read().decode("utf-8", "replace")
-                content_type = resp.headers.get("Content-Type", "")
-                sid = resp.headers.get("mcp-session-id")
-                if sid:
-                    self._session_id = sid
+            body, resp_headers = _open_bounded(req, self._timeout(), MAX_RESPONSE_BYTES)
+            content_type = resp_headers.get("Content-Type", "")
+            sid = resp_headers.get("mcp-session-id")
+            if sid:
+                self._session_id = sid
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:200]
             raise McpTransportError(f"MCP HTTP错误[{e.code}]: {detail}") from e
@@ -413,6 +441,25 @@ class StdioMCPClient(MCPClient):
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
 
+    def _read_bounded_line(self) -> bytes:
+        """带行长上限的读取（安全修订轮 F4）：恶意服务器单行塞 GB 级数据不得耗尽内存。
+
+        注：超限按「协议被破坏」处理——先摘杀子进程再抛错；
+        「连接不断但不发数据」的停滞阻塞由 executor 侧超时策略兜底（本期同轮记录）。
+        """
+        buf = bytearray()
+        stream = self._process.stdout
+        while True:
+            chunk = stream.readline(65536)
+            if not chunk:
+                return bytes(buf) if buf else b""
+            buf.extend(chunk)
+            if chunk.endswith(b"\n"):
+                return bytes(buf)
+            if len(buf) > MAX_STDIO_LINE_BYTES:
+                self._abort("STDIO 单行超长，疑似恶意服务器")
+                raise McpTransportError(self._abort_error)
+
     def disconnect(self) -> None:
         super().disconnect()
         self._abort()
@@ -438,6 +485,15 @@ class SseMCPClient(MCPClient):
         headers.setdefault("Accept", "text/event-stream")
         return headers
 
+    def _same_origin(self, endpoint: str) -> bool:
+        """端点与配置 URL 同 origin（scheme + host:port 均一致，大小写不敏感）。"""
+        base = urlparse(self.config.url or "")
+        target = urlparse(endpoint)
+        return (base.scheme.lower(), base.netloc.lower()) == (
+            target.scheme.lower(),
+            target.netloc.lower(),
+        )
+
     def connect(self) -> bool:
         self.last_error = ""
         self._stop.clear()
@@ -450,6 +506,8 @@ class SseMCPClient(MCPClient):
             self._abort()
             self.last_error = "SSE连接失败：未获取到消息端点"
             return False
+        if self._stop.is_set():  # 端点被同源校验拒绝：直接失败，不走握手
+            return False
         return super().connect()
 
     def _read_loop(self) -> None:
@@ -457,11 +515,12 @@ class SseMCPClient(MCPClient):
             req = urllib.request.Request(
                 self.config.url, headers=self._build_headers(), method="GET"
             )
-            with urllib.request.urlopen(req, timeout=self._timeout()) as resp:
+            with _OPENER.open(req, timeout=self._timeout()) as resp:
                 event = ""
                 data = ""
-                for raw in resp:
-                    if self._stop.is_set():
+                while True:
+                    raw = resp.readline(MAX_SSE_LINE_BYTES)
+                    if not raw or self._stop.is_set():
                         break
                     line = raw.decode("utf-8", "replace").rstrip("\r\n")
                     if line == "":
@@ -478,7 +537,16 @@ class SseMCPClient(MCPClient):
 
     def _handle_event(self, event: str, data: str) -> None:
         if event == "endpoint" and data:
-            self._msg_endpoint = urljoin(self.config.url or "", data)
+            endpoint = urljoin(self.config.url or "", data)
+            if not self._same_origin(endpoint):
+                # 安全修订轮（F1）：服务端可给绝对 URL——urljoin 原样放行会让携带
+                # vault 凭据头的 POST 发往任意主机/任意协议。只接受同 origin 端点。
+                self._msg_endpoint = ""
+                self.last_error = "SSE 消息端点与服务器地址不同源，已拒绝"
+                self._stop.set()
+                self._endpoint_ready.set()
+                return
+            self._msg_endpoint = endpoint
             self._endpoint_ready.set()
         elif event == "message" and data:
             try:
@@ -499,9 +567,8 @@ class SseMCPClient(MCPClient):
             self._msg_endpoint, data=data, headers=self._build_headers(), method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout()) as resp:
-                body = resp.read().decode("utf-8", "replace")
-                content_type = resp.headers.get("Content-Type", "")
+            body, _resp_headers = _open_bounded(req, self._timeout(), MAX_RESPONSE_BYTES)
+            content_type = _resp_headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:200]
             raise McpTransportError(f"MCP SSE错误[{e.code}]: {detail}") from e

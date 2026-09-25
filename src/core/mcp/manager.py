@@ -119,7 +119,8 @@ class McpManager:
         self._clients[server_id] = client
         if not client.connect():
             self._states[server_id] = STATE_ERROR
-            self._errors[server_id] = client.last_error or "连接失败"
+            # 服务器可控文本（错误消息 / HTTPError 体）过脱敏再入事件（安全修订轮 F3）
+            self._errors[server_id] = redact(client.last_error) or "连接失败"
             self._unregister_server(server_id)
             self._audit("mcp.server.start", id=server_id, transport=cfg.transport, ok=False)
             self._emit_status(server_id)
@@ -129,7 +130,7 @@ class McpManager:
         except McpTransportError as e:
             client.disconnect()
             self._states[server_id] = STATE_ERROR
-            self._errors[server_id] = str(e)
+            self._errors[server_id] = redact(str(e)) or "连接失败"
             self._unregister_server(server_id)
             self._audit("mcp.server.start", id=server_id, transport=cfg.transport, ok=False)
             self._emit_status(server_id)
@@ -332,7 +333,8 @@ class McpManager:
             except McpTransportError as e:
                 self._audit("tool.call", server=server_id, tool=original, ok=False, code=e.code)
                 return ToolResult(
-                    ok=False, error={"code": e.code, "message": str(e)}, duration_ms=_ms(start)
+                    ok=False, error={"code": e.code, "message": redact(str(e)) or ""},
+                    duration_ms=_ms(start),
                 )
             except Exception as e:  # noqa: BLE001 - 后端异常统一归码
                 self._audit(
@@ -345,6 +347,8 @@ class McpManager:
                     duration_ms=_ms(start),
                 )
             output, is_error = _extract_output(result if isinstance(result, dict) else {})
+            # MCP 工具输出是持久化通道（tool.result → events.jsonl）：必须接入三层脱敏（F5）
+            output = redact(output) or output
             self._audit(
                 "tool.call", server=server_id, tool=original, ok=not is_error,
                 code=ErrorCode.TOOL_BACKEND_ERROR.value if is_error else None,
@@ -373,7 +377,7 @@ class McpManager:
                 id=server_id,
                 state=self._states.get(server_id, STATE_STOPPED),
                 tools=list(self._owned.get(server_id, [])),
-                error=self._errors.get(server_id) or None,
+                error=redact(self._errors.get(server_id)) or None,  # 防御性再脱敏（F3）
             )
         )
 

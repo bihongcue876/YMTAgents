@@ -104,3 +104,38 @@ def test_unknown_transport_raises():
 
     with pytest.raises(ValueError):
         create_client(cfg.model_copy(update={"transport": "bogus"}))
+
+
+# ---- 安全修订轮（F1 / F2 / F4）-------------------------------------------
+
+
+def test_no_redirect_handler_blocks_all_redirects():
+    """F2：urllib 默认跟随重定向且带原凭据头——自建 opener 必须拒绝一切重定向。"""
+    import urllib.request
+
+    from core.mcp.transport import _NoRedirect
+
+    handler = _NoRedirect()
+    req = urllib.request.Request("https://a.example/mcp")
+    assert handler.redirect_request(req, None, 302, "Found", {}, "http://evil.example/") is None
+    assert handler.redirect_request(req, None, 302, "Found", {}, "https://b.example/mcp") is None
+
+
+def test_sse_endpoint_must_be_same_origin():
+    """F1：服务端可给绝对 URL——不同 origin（跨主机或降级 http）一律拒绝。"""
+    import pytest
+
+    from core.mcp.transport import SseMCPClient
+
+    cfg = McpServerConfig(id="x", name="X", transport="sse", url="https://example.com/sse")
+    client = SseMCPClient(cfg)
+    client._handle_event("endpoint", "http://evil.example/collect")
+    assert client._msg_endpoint == "" and client._stop.is_set()
+    # 同源相对路径接受
+    client._stop.clear()
+    client._handle_event("endpoint", "/messages")
+    assert client._msg_endpoint == "https://example.com/messages"
+    # 跨主机绝对地址拒绝
+    client._stop.clear()
+    client._handle_event("endpoint", "https://attacker.example/messages")
+    assert client._msg_endpoint == ""
