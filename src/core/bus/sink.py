@@ -27,6 +27,10 @@ class EventSink:
         self.root = Path(root)
 
     def session_dir(self, session_id: str) -> Path:
+        # 会话标识直接拼路径：拒绝空值 / 点段 / 分隔符 / NUL（安全修订轮，防路径穿越）。
+        text = str(session_id or "")
+        if not text or text in (".", "..") or "\x00" in text or any(c in text for c in "/\\"):
+            raise ValueError(f"非法会话标识：{session_id!r}")
         return self.root / "sessions" / session_id
 
     def events_path(self, session_id: str) -> Path:
