@@ -619,6 +619,42 @@ class SkillsRefresh(Envelope):
 
     type: Literal["skill.refresh"] = "skill.refresh"
 
+# ---------------------------------------------------------------------------
+# Retrieval（检索模块，spec-2026-09-25-retrieval）：管理面请求
+# ---------------------------------------------------------------------------
+class RetrievalRefresh(Envelope):
+    """重读检索配置并重发 retrieval.state（文件即配置，手工编辑 modules.json 后生效）。"""
+
+    type: Literal["retrieval.refresh"] = "retrieval.refresh"
+
+
+class RetrievalConfigUpdate(Envelope):
+    """整态更新检索引擎开关与默认序（界面提交完整期望状态）。
+
+    engines 键 = 引擎名（宿主常量集合，未知键 → invalid_request）；
+    default_engines 含未启用项时该项被跳过（spec §5）。
+    """
+
+    type: Literal["retrieval.config.update"] = "retrieval.config.update"
+    engines: dict[str, bool] | None = None
+    default_engines: list[str] | None = Field(default=None, max_length=16)
+
+
+class RetrievalKeySet(Envelope):
+    """设置/清除某引擎的 API key（值立即进 Vault；请求信封不落盘，值过 bus 内存一次即弃）。"""
+
+    type: Literal["retrieval.key.set"] = "retrieval.key.set"
+    engine: Literal["webfetch", "duckduckgo", "baidu", "bing", "arxiv", "exa", "tavily"]
+    #: None = 清除已存密钥；上限 4096 字符（超长即非法，防滥用）。
+    value: str | None = Field(default=None, max_length=4096)
+
+
+class RetrievalTest(Envelope):
+    """手动触发单引擎节点安全检测（R1–R5，spec §10）；结果只读展示。"""
+
+    type: Literal["retrieval.test"] = "retrieval.test"
+    engine: Literal["webfetch", "duckduckgo", "baidu", "bing", "arxiv", "exa", "tavily"]
+
 
 # ---------------------------------------------------------------------------
 # Shell（v0.0.5）：本地 shell 宿主（docs 07 §4.1 / 09 §2）
@@ -1105,6 +1141,34 @@ class SkillImported(Envelope):
     updated: bool = False
     error: str | None = None
 
+# ---------------------------------------------------------------------------
+# Retrieval 事件（检索模块）
+# ---------------------------------------------------------------------------
+class RetrievalState(Envelope):
+    """检索模块引擎态快照（**不落盘**：配置真值在 modules.json，运行态不入盘）。
+
+    engines 元素 = {name, enabled, needs_key, key_state, endpoints}；
+    key_state ∈ stored/missing/error（**绝不含 key 值**）。
+    """
+
+    type: Literal["retrieval.state"] = "retrieval.state"
+    engines: list[dict] = Field(default_factory=list)
+    default_engines: list[str] = Field(default_factory=list)
+    module_state: str = "disabled"
+
+
+class RetrievalTestResult(Envelope):
+    """单引擎节点安全检测结果（spec §10；证据过 redact，只读展示，不参与权限/派发）。
+
+    findings 元素 = {id, status, evidence, suggestion}（status ∈ pass/warn/fail/skip）。
+    """
+
+    type: Literal["retrieval.test.result"] = "retrieval.test.result"
+    engine: str
+    findings: list[dict] = Field(default_factory=list)
+    summary: dict = Field(default_factory=dict)
+    tested_at: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Shell 事件（v0.0.5）
@@ -1293,6 +1357,10 @@ WorkspaceMemoryWrite,
         BtcmUpdate,
         BtcmRun,
         BuiltinToolToggle,
+        RetrievalRefresh,
+        RetrievalConfigUpdate,
+        RetrievalKeySet,
+        RetrievalTest,
     ],
     Field(discriminator="type"),
 ]
@@ -1346,6 +1414,8 @@ WorkspaceMemoryResult,
         ThinkDelta,
         ThinkIteration,
         BuiltinToolState,
+        RetrievalState,
+        RetrievalTestResult,
     ],
     Field(discriminator="type"),
 ]

@@ -77,8 +77,10 @@ def test_dpim_contracts_are_in_discriminated_unions():
             "LibraryRefresh", "LibraryDetail", "LibraryIngest", "LibraryQuery"} <= requests
     assert {"LibraryList", "LibraryDetailResult", "LibraryIngestResult",
             "LibraryQueryResult", "LibraryGraphResult"} <= events
-    # v0.0.11（D-1）：+1 请求（tool.builtin.toggle）+1 事件（tool.builtin.state）→ 68/47
-    assert (len(REQUEST_MODELS), len(EVENT_MODELS)) == (68, 47)
+    # 检索模块（spec-2026-09-25-retrieval）：+4 请求 +2 事件 → 68/47 → 72/49
+    assert {"RetrievalRefresh", "RetrievalConfigUpdate", "RetrievalKeySet", "RetrievalTest"} <= requests
+    assert {"RetrievalState", "RetrievalTestResult"} <= events
+    assert (len(REQUEST_MODELS), len(EVENT_MODELS)) == (72, 49)
 
 
 def test_workspace_slice_contracts_are_in_discriminated_unions():

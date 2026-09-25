@@ -316,6 +316,8 @@ class FeaturesConfig(BaseModel):
     skills: bool = True
     btcm: bool = False
     dpim: bool = False
+    #: 检索模块（spec-2026-09-25-retrieval）：出网能力，默认关（保守取向，用户裁决 2026-09-25）。
+    retrieval: bool = False
 
 
 class ShellConfig(BaseModel):
@@ -374,6 +376,28 @@ class McpConfig(BaseModel):
     servers: list[McpServerConfig] = Field(default_factory=list)
 
 
+class EngineToggle(BaseModel):
+    """单个检索引擎的开关（spec-2026-09-25-retrieval §5）。
+
+    引擎端点是宿主常量，白名单随开关自动增删（用户裁决 W1）——
+    故落盘配置只需开关，不含端点与密钥（密钥 = vault 确定性命名 api_key/retrieval.<engine>）。
+    """
+
+    enabled: bool = False
+
+
+class RetrievalConfig(BaseModel):
+    """检索模块配置（modules.json → retrieval 段；不新增配置文件）。
+
+    - engines：逐引擎开关（默认全关；模块总开关开 ≠ 任何引擎可用）。
+    - default_engines：默认引擎序（空 = 引擎注册序）；含未启用项则该项被跳过，
+      不视为配置损坏（spec §5）。
+    """
+
+    engines: dict[str, EngineToggle] = Field(default_factory=dict)
+    default_engines: list[str] = Field(default_factory=list, max_length=16)
+
+
 class ModulesConfig(BaseModel):
     schema_version: Literal[1] = 1
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
@@ -381,6 +405,7 @@ class ModulesConfig(BaseModel):
     btcm: BtcmConfig = Field(default_factory=BtcmConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
 
 
 # ---------------------------------------------------------------------------
