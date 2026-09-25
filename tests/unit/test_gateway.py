@@ -791,3 +791,33 @@ def test_upsert_provider_preserves_reasoning_detection(tmp_path):
     assert reloaded.reasoning_param_ok is True
     assert reloaded.reasoning == "off"
 
+
+
+def test_provider_toggle_disables_resolution(tmp_path):
+    """rev68：禁用供应商 -> 其模型不可解析（model_not_found，明示已停用）；槽位保留可逆。"""
+    import pytest
+
+    from core.gateway.errors import GatewayProtocolError
+
+    gateway = make_gateway(tmp_path, [_Chunk("好"), _Chunk(usage=_Usage(5, 1))])
+    assert gateway.list_providers()[0].enabled is True  # 存量缺省启用
+
+    assert gateway.toggle_provider("prv_1", False) is True
+    assert gateway.list_providers()[0].enabled is False
+    # 槽位绑定保留（可逆）；解析在调用处诚实失败
+    assert gateway.get_slots()["main"] == "m1"
+    with pytest.raises(GatewayProtocolError) as ei:
+        gateway.stream_chat("s", 0, "m1", [{"role": "user", "content": "hi"}], None, lambda _t: None)
+    assert ei.value.code == "model_not_found"
+    assert "已停用" in str(ei.value)
+
+    # 重启用即恢复
+    gateway.toggle_provider("prv_1", True)
+    out: list[str] = []
+    gateway.stream_chat("s", 0, "m1", [{"role": "user", "content": "hi"}], None, out.append)
+    assert "".join(out) == "好"
+
+
+def test_provider_toggle_unknown(tmp_path):
+    gateway = make_gateway(tmp_path, [_Chunk("好")])
+    assert gateway.toggle_provider("prv_missing", False) is False

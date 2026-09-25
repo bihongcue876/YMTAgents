@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -722,8 +723,24 @@ class SessionStore(ISessionStore):
         return meta
 
     def delete(self, session_id: str) -> None:
+        """删除会话（rev68 用户裁决 2026-09-25）：登记与磁盘记录一起删。
+
+        删除范围 = `sessions/<id>/` 整目录（事件流 / 记忆 / 摘要 / 分支 / 产物输出），
+        **不可恢复**。id 由应用生成；含分隔符或路径成分的 id 直接拒绝（无穿越面）。
+        删除失败即抛给调用方（不写 audit——没删干净就不记"已删"）。
+        """
+        if (
+            not session_id
+            or session_id in (".", "..")
+            or any(ch in session_id for ch in "\\/")
+            or "\x00" in session_id
+        ):
+            raise KeyError(f"session_not_found: {session_id}")
+        directory = self.session_dir(session_id)
         items = [i for i in self._load_index() if i.get("id") != session_id]
         self._save_index(items)
+        if directory.exists():
+            shutil.rmtree(directory)
         self.sink.append_audit("session_delete", session_id=session_id)
 
     def end(self, session_id: str, reason: str) -> None:

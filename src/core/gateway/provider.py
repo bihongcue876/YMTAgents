@@ -76,6 +76,10 @@ class IModelGateway(ABC):
         """删除供应商并清理其凭据；返回是否确有删除。"""
 
     @abstractmethod
+    def toggle_provider(self, provider_id: str, enabled: bool) -> bool:
+        """启用/禁用供应商（rev68）；未知供应商返回 False。"""
+
+    @abstractmethod
     def stream_chat(
         self,
         session_id: str,
@@ -249,11 +253,26 @@ class ModelGateway(IModelGateway):
                 return p
         return None
 
-    def _find_provider_for_model(self, model_id: str) -> ProviderConfig | None:
+    def _find_provider_for_model(self, model_id: str, require_enabled: bool = False) -> ProviderConfig | None:
         for p in self.models.providers:
+            if require_enabled and not getattr(p, "enabled", True):
+                continue  # rev68：禁用的供应商不参与模型解析（槽位保留、可逆）
             if any(m.id == model_id for m in p.models):
                 return p
         return None
+
+    def toggle_provider(self, provider_id: str, enabled: bool) -> bool:
+        """启用/禁用供应商（rev68；用户裁决）。
+
+        禁用**不**清槽位绑定（可逆，重启用即恢复）；其模型在解析处（stream_chat /
+        槽位下拉）不再可见与可用。未知供应商返回 False。
+        """
+        pc = self._find_provider(provider_id)
+        if pc is None:
+            return False
+        pc.enabled = bool(enabled)
+        self.store.save("models", self.models)
+        return True
 
     def _to_spec(self, pc: ProviderConfig) -> ProviderSpec:
         return ProviderSpec(
@@ -272,6 +291,7 @@ class ModelGateway(IModelGateway):
             ],
             key_status=self.secrets.status(secret_name(pc.id)) if not pc.local else "missing",
             local=pc.local,
+            enabled=getattr(pc, "enabled", True),
         )
 
     def _api_key_for(self, pc: ProviderConfig) -> str | None:
@@ -579,8 +599,13 @@ class ModelGateway(IModelGateway):
         tools: list[dict] | None = None,
         on_tool_calls: Callable[[list[dict]], None] | None = None,
     ) -> Usage:
-        provider = self._find_provider_for_model(model_id)
+        provider = self._find_provider_for_model(model_id, require_enabled=True)
         if provider is None:
+            if self._find_provider_for_model(model_id) is not None:
+                raise GatewayProtocolError(
+                    f"该模型所在供应商已停用：{model_id}（可在「模型」页启用）",
+                    code="model_not_found",
+                )
             raise GatewayProtocolError(
                 f"该模型在供应商不可用：{model_id} 不属于任何已配置的供应商",
                 code="model_not_found",

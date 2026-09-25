@@ -120,7 +120,8 @@ def test_session_lifecycle(tmp_path):
 
     store.delete(meta.id)
     assert store.list(include_archived=True) == []
-    assert (tmp_path / "sessions" / meta.id).exists()  # 目录保留
+    # rev68（用户裁决）：删除 = 连目录一起删（事件流 / 记忆 / 产物），不可恢复
+    assert not (tmp_path / "sessions" / meta.id).exists()
 
 
 def test_replay_reconstructs(tmp_path):
