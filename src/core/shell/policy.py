@@ -63,26 +63,46 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
-#: 危险删除目标：根、根下全部、家目录。
-_DANGEROUS_TARGET = re.compile(r"^(?:/|/\*|~|~/\*|\$home|\$\{home\})$")
+#: 危险删除目标：根、根下全部、家目录（含「目录名/」形态，安全修订轮 F6）。
+_DANGEROUS_TARGET = re.compile(
+    r"^(?:/|/\*|~|~/|~/\*|\$home|\$home/|\$home/\*|\$\{home\}|\$\{home\}/)$"
+)
 
-#: 可跳过的命令前缀（`sudo rm -rf /` 与 `rm -rf /` 同危）。
-_LAUNCHERS = frozenset({"sudo", "doas", "nohup"})
+#: 可跳过的命令前缀：启动器与进程外包装（安全修订轮 F6）——
+#: `sudo rm -rf /`、`env X=1 rm -rf /`、`find … | xargs rm -rf /` 同危。
+_LAUNCHERS = frozenset({"sudo", "doas", "nohup", "env", "nice", "xargs"})
+
+
+def _unquote(token: str) -> str:
+    """剥掉首尾成对引号（bash/PS 都允许把命令名或目标放进引号，安全修订轮 F6）。"""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'`":
+        return token[1:-1]
+    return token
 
 
 def _rm_removes_root(text: str) -> bool:
     """逐 token 判定「rm + 递归 + 强制 + 危险目标」。
 
-    覆盖所有等价写法（`-rf` / `-fr` / `-r -f` / `-f -r`），只认真正危险的目标。
+    覆盖所有等价写法（`-rf` / `-fr` / `-r -f` / `-f -r`），只认真正危险的目标；
+    引号包裹（`"rm" -rf /`、`rm -rf "~"`）先去引号再判；rm 不在段首但前面只是
+    启动器 / 环境赋值前缀（`sudo`、`env X=1`、`xargs` 管尾）同样命中（安全修订轮 F6）。
     """
     for segment in re.split(r"[;&|]+", text):
-        tokens = segment.split()
-        while tokens and tokens[0] in _LAUNCHERS:
-            tokens.pop(0)
-        if not tokens or tokens[0] != "rm":
+        tokens = [_unquote(tok) for tok in segment.split()]
+        index = 0
+        while index < len(tokens):
+            tok = tokens[index]
+            if tok in _LAUNCHERS:
+                index += 1
+                continue
+            if "=" in tok and index < len(tokens) - 1:
+                index += 1  # env 风格赋值前缀（如 env EDITOR=vim rm …）：继续找命令位
+                continue
+            break
+        if index >= len(tokens) or tokens[index] != "rm":
             continue
-        args = tokens[1:]
-        flags = "".join(a[1:] for a in args if a.startswith("-"))
+        args = tokens[index + 1:]
+        flags = "".join(a[1:] for a in args if a.startswith("-") and len(a) > 1)
         if "r" not in flags or "f" not in flags:
             continue
         if any(_DANGEROUS_TARGET.match(a) for a in args if not a.startswith("-")):
@@ -93,16 +113,19 @@ def _rm_removes_root(text: str) -> bool:
 def classify(command: str) -> str | None:
     """判断命令是否命中高危清单；命中返回归类名，否则 `None`。
 
-    归一化：小写 + 空白折叠成单空格 —— 纯函数，便于数据驱动测试。
+    归一化：小写 + 行内空白折叠成单空格 —— **换行是语句分隔符，逐行判**
+    （旧行为把换行折叠成空格，`echo hi\nrm -rf ~` 里的第二条命令会脱离命令位漏判，
+    安全修订轮 F6）。纯函数，便于数据驱动测试。
     """
-    text = " ".join((command or "").lower().split())
-    if not text:
-        return None
-    if _rm_removes_root(text):
-        return "递归删除根或家目录"
-    for label, pattern in RULES:
-        if pattern.search(text):
-            return label
+    for line in (command or "").lower().splitlines():
+        text = " ".join(line.split())
+        if not text:
+            continue
+        if _rm_removes_root(text):
+            return "递归删除根或家目录"
+        for label, pattern in RULES:
+            if pattern.search(text):
+                return label
     return None
 
 

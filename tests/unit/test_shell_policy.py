@@ -82,6 +82,39 @@ def test_case_and_whitespace_insensitive() -> None:
     assert policy.classify("SHUTDOWN /S") == policy.classify("shutdown /s")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hi\nrm -rf ~",                      # 换行 = 语句分隔符（安全修订轮 F6）
+        "echo a\n echo b\nRemove-Item -Recurse -Force C:\\",
+        '"rm" -rf /',                              # 引号包裹命令名
+        "rm -rf '~'",                              # 引号包裹目标
+        "rm -rf ~/",                               # 「目录名/」形态
+        "env EDITOR=vim rm -rf /",                 # env 赋值前缀
+        "env rm=x rm -rf /",                       # 同上，赋值里恰好是 rm=x
+        "sudo env nice rm -rf $HOME",              # 启动器叠加
+        "find / -type f | xargs rm -rf /",         # xargs 管尾
+    ],
+)
+def test_bypass_shapes_are_detected(command: str) -> None:
+    """包装写法不得绕过判定（安全修订轮 F6）。"""
+    assert policy.classify(command) == "递归删除根或家目录", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m 'rm -rf /'",               # 引号内是字符串字面量，非命令位
+        "echo x=1 rm",
+        "rm -f stale.txt",
+        "echo EDITOR=vim",
+    ],
+)
+def test_lookalike_lines_still_pass(command: str) -> None:
+    """加固不得误伤正常命令。"""
+    assert policy.classify(command) is None
+
+
 def test_rule_set_is_not_empty_and_labelled() -> None:
     assert policy.rule_count() >= 10
     assert policy.classify("rm -rf /") == "递归删除根或家目录"
