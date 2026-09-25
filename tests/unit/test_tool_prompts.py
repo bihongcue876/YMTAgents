@@ -14,7 +14,7 @@ class _FakeExecutor:
     def __init__(self, blocks):
         self._blocks = blocks
 
-    def tool_prompt_blocks(self):
+    def tool_prompt_blocks(self, session_id=None):  # rev68：接口加了可选会话参数
         return list(self._blocks)
 
 
