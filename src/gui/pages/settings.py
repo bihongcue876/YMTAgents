@@ -54,11 +54,6 @@ _FEATURE_STATES = {
 class SettingsPage(QWidget):
     settings_update = Signal(str, object)  # section, data
     feature_toggle = Signal(str, bool)  # name, enabled（切片 0 滑动开关）
-    # 检索模块（spec-2026-09-25-retrieval §12）：逐引擎开关 / key / 测试 / 默认序。
-    retrieval_engine = Signal(str, bool)  # engine, enabled
-    retrieval_key = Signal(str, object)  # engine, value(None=清除)
-    retrieval_test = Signal(str)  # engine
-    retrieval_order = Signal(list)  # default_engines 全序
 
     def __init__(self, data_root: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -66,9 +61,7 @@ class SettingsPage(QWidget):
         self._loading = False
         self._loading_features = False
         self._feature_rows: dict[str, tuple[QWidget, QLabel, QLabel, QLabel, Switch]] = {}
-        self._loading_retrieval = False
-        self._retrieval_rows: dict[str, dict] = {}
-        self._retrieval_engines_cache: list[dict] = []
+
 
         self._title = QLabel("系统设置")
         self._title.setObjectName("pageTitle")  # 字号与字重由 theme.stylesheet 提供
@@ -97,22 +90,6 @@ class SettingsPage(QWidget):
         self._features_box.setSpacing(0)
         features_box.addLayout(self._features_box)
         body.addWidget(features_card)
-
-        # 检索模块（spec-2026-09-25-retrieval §12）：引擎分区（用户裁决：并入设置页）。
-        retrieval_card, retrieval_box = card()
-        retrieval_box.addWidget(section_label("检索"))
-        self._retrieval_note = QLabel(
-            "联网检索（search.web / search.fetch 工具）。启用引擎会自动把其端点域名加入"
-            "网络白名单；API key 只存本机加密库，界面不回显。baidu / bing 为无 key 解析（best-effort）。"
-        )
-        self._retrieval_note.setObjectName("mutedNote")
-        self._retrieval_note.setWordWrap(True)
-        retrieval_box.addWidget(self._retrieval_note)
-        self._retrieval_box = QVBoxLayout()
-        self._retrieval_box.setContentsMargins(0, 0, 0, 0)
-        self._retrieval_box.setSpacing(0)
-        retrieval_box.addLayout(self._retrieval_box)
-        body.addWidget(retrieval_card)
 
         # rev24：全局上下文策略取消 → 改为「每会话」设置，此处只留指引
         self._context_note = QLabel(
@@ -355,123 +332,6 @@ class SettingsPage(QWidget):
         finally:
             self._loading_features = False
 
-    # -- 检索（spec-2026-09-25-retrieval §12） --------------------------------
-    def set_retrieval_state(self, engines: list, default_engines: list, module_state: str = "disabled") -> None:
-        """按 `retrieval.state` 更新引擎行；复用控件，只有消失的行销毁（rev65 纪律）。"""
-        self._loading_retrieval = True
-        self._retrieval_engines_cache = list(engines or [])
-        try:
-            order = [str(e) for e in (default_engines or [])]
-            infos = {str(e.get("name")): e for e in self._retrieval_engines_cache}
-            display = [n for n in order if n in infos] + [n for n in infos if n not in order]
-            while self._retrieval_box.count():
-                self._retrieval_box.takeAt(0)
-            for name in set(self._retrieval_rows) - set(display):
-                row = self._retrieval_rows.pop(name)["widget"]
-                row.setParent(None)
-                row.deleteLater()
-            if module_state == "disabled":
-                for parts in self._retrieval_rows.values():
-                    parts["widget"].setParent(None)
-                    parts["widget"].deleteLater()
-                self._retrieval_rows = {}
-                self._retrieval_note.setText(
-                    "联网检索模块未启用：在「附加功能」中开启后可在此配置引擎。"
-                )
-                return
-            self._retrieval_note.setText(
-                "联网检索（search.web / search.fetch 工具）。启用引擎会自动把其端点域名加入"
-                "网络白名单；API key 只存本机加密库，界面不回显。baidu / bing 为无 key 解析（best-effort）。"
-            )
-            for name in display:
-                info = infos[name]
-                row = self._retrieval_rows.get(name)
-                if row is None:
-                    row = self._build_engine_row(name, bool(info.get("needs_key")))
-                    self._retrieval_rows[name] = row
-                self._update_engine_row(row, info)
-                self._retrieval_box.addWidget(row["widget"])
-                row["widget"].show()
-        finally:
-            self._loading_retrieval = False
-
-    def _build_engine_row(self, name: str, needs_key: bool) -> dict:
-        widget = QWidget()
-        widget.setObjectName("featureRow")
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(8, 7, 8, 7)
-        layout.setSpacing(10)
-
-        copy = QVBoxLayout()
-        copy.setContentsMargins(0, 0, 0, 0)
-        copy.setSpacing(2)
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        label = QLabel(name)
-        label.setObjectName("featureName")
-        head.addWidget(label)
-        endpoints = QLabel()
-        endpoints.setObjectName("mutedNote")
-        head.addWidget(endpoints)
-        badge = QLabel()
-        badge.setObjectName("featureState")
-        head.addWidget(badge)
-        head.addStretch(1)
-        copy.addLayout(head)
-
-        switch = Switch()
-        switch.setObjectName("featureSwitch")
-        switch.toggled.connect(lambda checked, n=name: self._on_engine_toggled(n, checked))
-        test_btn = QPushButton("测试")
-        test_btn.clicked.connect(lambda _c=False, n=name: self.retrieval_test.emit(n))
-
-        layout.addLayout(copy, 1)
-        key_row: tuple | None = None
-        if needs_key:
-            key_edit = QLineEdit()
-            key_edit.setEchoMode(QLineEdit.Password)
-            key_edit.setPlaceholderText("API key（保存后不回显）")
-            key_edit.setMaximumWidth(260)
-            save = QPushButton("保存")
-            save.clicked.connect(lambda _c=False, n=name, e=key_edit: self._on_key_save(n, e))
-            clear = QPushButton("清除")
-            clear.clicked.connect(lambda _c=False, n=name: self.retrieval_key.emit(n, None))
-            key_row = (key_edit, save, clear)
-            layout.addWidget(key_edit)
-            layout.addWidget(save)
-            layout.addWidget(clear)
-        layout.addWidget(test_btn)
-        layout.addWidget(switch)
-        return {"widget": widget, "label": label, "endpoints": endpoints, "badge": badge,
-                "switch": switch, "test_btn": test_btn, "key_row": key_row, "name": name}
-
-    def _update_engine_row(self, row: dict, info: dict) -> None:
-        row["endpoints"].setText("　".join(str(d) for d in info.get("endpoints", [])))
-        key_state = str(info.get("key_state", "missing"))
-        row["badge"].setText({"stored": "key 已存", "missing": "无 key", "error": "key 库异常"}.get(key_state, key_state))
-        row["badge"].setProperty("featureState", {"stored": "ready", "missing": "disabled", "error": "error"}.get(key_state, key_state))
-        theme.restyle(row["badge"])
-        row["switch"].setChecked(bool(info.get("enabled", False)))
-
-    def _on_engine_toggled(self, name: str, checked: bool) -> None:
-        if self._loading_retrieval:
-            return
-        self.retrieval_engine.emit(name, bool(checked))
-
-    def _on_key_save(self, name: str, edit) -> None:
-        value = edit.text().strip()
-        if value:
-            self.retrieval_key.emit(name, value)
-            edit.clear()
-
-    def set_retrieval_test_result(self, engine: str, findings: list, summary: dict) -> None:
-        row = self._retrieval_rows.get(engine)
-        if row is None:
-            return
-        passed = int(summary.get("pass", 0))
-        failed = int(summary.get("fail", 0))
-        skipped = int(summary.get("skip", 0))
-        row["badge"].setText(f"测试 {passed}✓ {failed}✗ {skipped}–")
 
     def _on_feature_toggled(self, name: str, checked: bool) -> None:
         if self._loading_features:

@@ -43,6 +43,12 @@ from shared.envelope import (
     SetSlot,
     SettingsUpdate,
     FeatureToggle,
+    RetrievalRefresh,
+    RetrievalConfigUpdate,
+    RetrievalKeySet,
+    RetrievalState,
+    RetrievalTest,
+    RetrievalTestResult,
     BtcmRun,
     BtcmUpdate,
     SwitchModel,
@@ -98,6 +104,7 @@ from gui.pages.models import ModelsPage
 from gui.pages.library import LibraryPage
 from gui.pages.personas import PersonasPage
 from gui.pages.plugins import PluginsPage
+from gui.pages.retrieval import RetrievalPage
 from gui.pages.settings import SettingsPage
 from gui.pages.skills import SkillsPage
 from gui.pages.terminal import TerminalPage
@@ -142,6 +149,7 @@ class MainWindow(QMainWindow):
         self.thinking_page = ThinkingPage()
         self.library_page = LibraryPage()
         self.workspaces_page = WorkspacesPage()
+        self.retrieval_page = RetrievalPage()
         self.settings = SettingsPage(data_root)
         self._theme: str | None = None
         self._font_size: str | None = None
@@ -157,12 +165,13 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.terminal_page)
         self.stack.addWidget(self.thinking_page)
         self.stack.addWidget(self.library_page)
+        self.stack.addWidget(self.retrieval_page)
         self.stack.addWidget(self.workspaces_page)
         self.stack.addWidget(self.settings)
         # rail 导航态随页切换校准（rev55）：索引与上面的添加顺序一致
         self._page_keys: list[str | None] = [
             None, "models", "personas", "plugins", "skills", "terminal", "thinking", "library",
-            "workspaces", "settings",
+            "retrieval", "workspaces", "settings",
         ]
         self.stack.currentChanged.connect(self._on_page_changed)
 
@@ -216,7 +225,8 @@ class MainWindow(QMainWindow):
     def _sync_model_dropdown(self) -> None:
         """模型下拉同步（rev14/rev23）：显示**当前会话**的选择；无会话/未选时回落全局默认。"""
         current = self._session_models.get(self._current_session_id or "")
-        self.chat.set_models(self._providers_cache, current or self._slots_cache.get("main"))
+        enabled = [p for p in self._providers_cache if getattr(p, "enabled", True)]
+        self.chat.set_models(enabled, current or self._slots_cache.get("main"))
 
     def _sync_persona_dropdown(self) -> None:
         """角色下拉同步（rev23）：显示当前会话的角色；无会话/未选时回落全局默认角色。"""
@@ -252,6 +262,7 @@ class MainWindow(QMainWindow):
         s.open_terminal.connect(lambda: self.stack.setCurrentWidget(self.terminal_page))
         s.open_thinking.connect(lambda: self.stack.setCurrentWidget(self.thinking_page))
         s.open_library.connect(lambda: self.stack.setCurrentWidget(self.library_page))
+        s.open_retrieval.connect(lambda: self.stack.setCurrentWidget(self.retrieval_page))
         s.open_workspaces.connect(lambda: self.stack.setCurrentWidget(self.workspaces_page))
         s.open_settings.connect(lambda: self.stack.setCurrentWidget(self.settings))
 
@@ -286,6 +297,10 @@ class MainWindow(QMainWindow):
             lambda spec, key: self.bus.submit(ProviderUpsert(provider=spec, api_key=key))
         )
         m.delete_requested.connect(lambda pid: self.bus.submit(ProviderDelete(provider_id=pid)))
+        # rev68：供应商启停（禁用 = 模型不再可解析，槽位保留可逆）
+        m.provider_toggle.connect(
+            lambda pid, enabled: self.bus.submit(ProviderToggle(provider_id=pid, enabled=enabled))
+        )
         m.test_requested.connect(
             lambda pid, mid: self.bus.submit(TestConnection(provider_id=pid, model_id=mid))
         )
@@ -452,6 +467,20 @@ class MainWindow(QMainWindow):
         self.settings.feature_toggle.connect(
             self._on_feature_toggle
         )
+        # 检索页（rev68；用户裁决：独立一页，不与设置页黏连）信号 ↔ 总线。
+        self.retrieval_page.engine_toggle.connect(
+            lambda engine, enabled: self.bus.submit(RetrievalConfigUpdate(engines={engine: enabled}))
+        )
+        self.retrieval_page.key_set.connect(
+            lambda engine, value: self.bus.submit(RetrievalKeySet(engine=engine, value=value))
+        )
+        self.retrieval_page.test_requested.connect(
+            lambda engine: self.bus.submit(RetrievalTest(engine=engine))
+        )
+        self.retrieval_page.tool_toggle.connect(
+            lambda name, enabled: self.bus.submit(BuiltinToolToggle(name=name, enabled=enabled))
+        )
+        self.retrieval_page.refresh_requested.connect(lambda: self.bus.submit(RetrievalRefresh()))
 
         self.detail.close_requested.connect(self._toggle_detail)
         self.detail.save_requested.connect(self._on_session_save)
@@ -492,6 +521,7 @@ class MainWindow(QMainWindow):
                 "terminal": self.terminal_page,
                 "thinking": self.thinking_page,
                 "library": self.library_page,
+                "retrieval": self.retrieval_page,
                 "workspaces": self.workspaces_page,
                 "settings": self.settings,
             }
@@ -677,6 +707,7 @@ class MainWindow(QMainWindow):
         # 样式表字号不参与 sizeHint：居中/紧凑布局里的标题会被裁，故重算最小宽高（rev11/rev16）
         self.chat.empty.refresh_metrics(used_font)
         self.models.refresh_metrics(used_font)
+        self.retrieval_page.refresh_metrics(used_font)
         self.settings.refresh_metrics(used_font)
         self.thinking_page.refresh_metrics(used_font)
         self.library_page.set_theme(used)
@@ -763,14 +794,14 @@ class MainWindow(QMainWindow):
             self.models.on_models_result(event)
         elif t == "feature.state":
             self.settings.set_features(event.features)
-        elif t == "retrieval.state":
-            self.settings.set_retrieval_state(event.engines, event.default_engines, event.module_state)
-        elif t == "retrieval.test.result":
-            self.settings.set_retrieval_test_result(event.engine, event.findings, event.summary)
             dpim = next((item for item in event.features if item.get("name") == "dpim"), {})
             self.library_page.set_available(
                 bool(dpim.get("enabled")), str(dpim.get("state", "disabled"))
             )
+        elif t == "retrieval.state":
+            self.retrieval_page.set_state(event.engines, event.tools, event.default_engines, event.module_state)
+        elif t == "retrieval.test.result":
+            self.retrieval_page.set_test_result(event.engine, event.findings, event.summary)
         elif t == "settings.state":
             ui = event.data.get("ui", {})
             self._apply_appearance(ui.get("theme"), ui.get("font_size"))

@@ -74,6 +74,7 @@ class Sidebar(QWidget):
     open_thinking = Signal()
     open_workspaces = Signal()
     open_library = Signal()
+    open_retrieval = Signal()  # rev68：联网检索页（独立一页）
     open_settings = Signal()
     toggle_requested = Signal()  # 折叠/展开请求（宽度由 MainWindow 的 QSplitter 落实）
 
@@ -110,6 +111,7 @@ class Sidebar(QWidget):
         self._terminal_btn = _rail_button("⌨ 终端", "本机终端（shell 会话与监视）")
         self._thinking_btn = _rail_button("🧠 思考", "副思考链（BTCM）")
         self._library_btn = _rail_button("📚 小图书馆", "本地书库与来源检索（DPIM）")
+        self._retrieval_btn = _rail_button("🔍 检索", "联网检索（搜索 · 抓取 · 引擎开关 · 连通测试）")
         self._settings_btn = _rail_button("🛠 设置", "系统设置")
 
         # 导航态注册表（rev55）：key 与 MainWindow 的页序对应，set_active 由页切换驱动
@@ -122,6 +124,7 @@ class Sidebar(QWidget):
             "terminal": (self._terminal_btn, self.open_terminal),
             "thinking": (self._thinking_btn, self.open_thinking),
             "library": (self._library_btn, self.open_library),
+            "retrieval": (self._retrieval_btn, self.open_retrieval),
             "settings": (self._settings_btn, self.open_settings),
         }
         for key, (button, signal) in self._nav.items():
@@ -135,7 +138,8 @@ class Sidebar(QWidget):
         rail.addStretch(1)
         for button in (self._workspaces_btn, self._models_btn, self._personas_btn,
                        self._skills_btn, self._plugins_btn, self._terminal_btn,
-                       self._thinking_btn, self._library_btn, self._settings_btn):
+                       self._thinking_btn, self._library_btn, self._retrieval_btn,
+                       self._settings_btn):
             rail.addWidget(button)
 
         rail_host = QWidget()
@@ -523,7 +527,11 @@ class Sidebar(QWidget):
 
     def _confirm_delete(self) -> bool:
         return (
-            QMessageBox.question(self, "删除会话", "确定删除该会话？历史目录将保留。")
+            QMessageBox.question(
+                self,
+                "删除会话",
+                "确定删除该会话？将同时删除其全部历史记录（事件流 / 记忆 / 产物），不可恢复。",
+            )
             == QMessageBox.Yes
         )
 

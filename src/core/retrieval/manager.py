@@ -180,6 +180,7 @@ class RetrievalManager(IFeatureHost, IRetrievalManager):
         setattr(config, "builtin", entry)
         self._config_store.save("plugins", config)
         self.refresh()
+        self.state_event()  # 工具开关变化即时回推检索分区（rev68 界面优化）
 
     def refresh(self) -> None:
         """按 builtin 配置注册/注销两个工具（enabled/权限覆盖的唯一真值源）。"""
@@ -235,6 +236,7 @@ class RetrievalManager(IFeatureHost, IRetrievalManager):
         self._emit(
             RetrievalState(
                 engines=self._snapshot(),
+                tools=self.state(),
                 default_engines=[e for e in self._retrieval().default_engines if e in eng.ENGINE_ORDER],
                 module_state=self.host_state(),
             )

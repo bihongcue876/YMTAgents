@@ -36,6 +36,7 @@ from shared.net import is_local_url
 
 from gui import theme
 from gui.widgets import card, section_label, text_fit
+from gui.widgets.switch import Switch
 
 #: 云端预设（URL 即 OpenAI 兼容端点；Cherry Studio 式「选预设 → 填 Key → 取模型」）
 CLOUD_PRESETS = {
@@ -359,6 +360,7 @@ class ModelsPage(QWidget):
     test_requested = Signal(str, str)  # provider_id, model_id
     models_requested = Signal(str)  # provider_id：拉取端点模型列表（rev9 §2）
     slot_requested = Signal(str, str)  # slot, model_id ("" = 未绑定)
+    provider_toggle = Signal(str, bool)  # rev68：供应商启用/禁用
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -436,6 +438,8 @@ class ModelsPage(QWidget):
         self._main_slot.clear()
         self._main_slot.addItem("未绑定", "")
         for provider in self._providers:
+            if not getattr(provider, "enabled", True):
+                continue  # rev68：禁用供应商的模型不进槽位下拉（绑定保留、可逆）
             for model in provider.models:
                 self._main_slot.addItem(f"{provider.name} / {model.id}", model.id)
         current = slots.get("main") or ""
@@ -479,12 +483,24 @@ class ModelsPage(QWidget):
             status, stored = "已存储", True
         else:
             status, stored = "未设置", False
+        if not getattr(provider, "enabled", True):
+            status = f"已停用 · {status}"
         badge = QLabel(status)
         badge.setObjectName("keyBadge")
         badge.setProperty("keyStored", stored)
         self._badges[provider.id] = badge
         header.addWidget(badge)
         header.addStretch(1)
+        # rev68：供应商启停开关（禁用 = 该供应商的模型不再可解析；槽位保留可逆）
+        sw = Switch()
+        sw.setObjectName("providerSwitch")
+        sw.setProperty("providerId", provider.id)
+        sw.setAccessibleName(f"{provider.name} 启用")
+        sw.setChecked(bool(getattr(provider, "enabled", True)))
+        sw.toggled.connect(
+            lambda checked, pid=provider.id: self.provider_toggle.emit(pid, checked)
+        )
+        header.addWidget(sw)
         fetch = QPushButton("获取模型列表")
         fetch.clicked.connect(
             lambda _=False, pid=provider.id: self._on_fetch(pid)

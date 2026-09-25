@@ -365,3 +365,44 @@ def test_models_page_rebinds_dangling_main(qapp, monkeypatch):
 
     assert [m.id for m in upserts[0].models] == ["deepseek-v4-pro", "deepseek-flash"]
     assert slots == [("main", "deepseek-v4-pro")]
+
+
+def test_provider_card_switch_emits_toggle(qapp):
+    """rev68：供应商卡上的启停开关发出 provider_toggle（缺省启用态正确回显）。"""
+    from gui.widgets.switch import Switch
+    from shared.envelope import ModelSpec, ProviderSpec
+
+    page = ModelsPage()
+    page.update_providers(
+        [
+            ProviderSpec(
+                id="prv_1",
+                name="P",
+                base_url="https://api.x.com/v1",
+                models=[ModelSpec(id="m-1", ctx_window=0)],
+                enabled=True,
+            ),
+            ProviderSpec(
+                id="prv_2",
+                name="Q",
+                base_url="https://api.y.com/v1",
+                models=[ModelSpec(id="m-2", ctx_window=0)],
+                enabled=False,
+            ),
+        ],
+        {"main": None},
+    )
+    emitted: list = []
+    page.provider_toggle.connect(lambda pid, enabled: emitted.append((pid, enabled)))
+    switches = page.findChildren(Switch)
+    assert len(switches) == 2
+    states = {str(sw.property("providerId")): sw.isChecked() for sw in switches}
+    assert states == {"prv_1": True, "prv_2": False}
+
+    switches[1].setChecked(True)
+    assert emitted == [("prv_2", True)]
+
+    # 禁用供应商的模型不进槽位下拉（绑定保留由核心侧语义保证）
+    # （update_providers 后 main_slot 不含 prv_2 的模型）
+    items = [page._main_slot.itemData(i) for i in range(page._main_slot.count())]
+    assert "m-2" not in items

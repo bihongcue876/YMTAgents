@@ -33,6 +33,7 @@ from shared.envelope import (
     ProviderDelete,
     ProviderList,
     ProviderModels,
+    ProviderToggle,
     ProviderUpsert,
     RenameSession,
     ResumeSession,
@@ -578,6 +579,7 @@ class CoreController:
         self._emit_libraries()
         self._emit_btcm()
         self._emit_builtin()  # v0.0.11（D-1）：插件页「内置工具」分区首屏快照
+        self._emit_retrieval()  # rev68：检索页首屏（关档也发空态，页面据 module_state 引导）
 
     # -- 工作区（v0.0.6） -----------------------------------------------------
     def _session_counts(self) -> dict[str, int]:
@@ -1346,6 +1348,8 @@ error="写入失败；请检查工作区目录与记忆文件。",
             self._on_upsert(request)
         elif t == "provider.delete":
             self._on_provider_delete(request)
+        elif t == "provider.toggle":
+            self._on_provider_toggle(request)
         elif t == "provider.test":
             self._on_test(request)
         elif t == "provider.models":
@@ -1775,6 +1779,15 @@ error="写入失败；请检查工作区目录与记忆文件。",
             "供应商删除",
             lambda: self.gateway.delete_provider(request.provider_id),
             "供应商删除失败：请检查数据目录是否可写。",
+        )
+        self._emit_providers()
+
+    def _on_provider_toggle(self, request: ProviderToggle) -> None:
+        """供应商启停（rev68；用户裁决）：禁用 = 其模型不再可解析，槽位保留可逆。"""
+        self._persist(
+            "供应商启停",
+            lambda: self.gateway.toggle_provider(request.provider_id, request.enabled),
+            "供应商启停失败：请检查数据目录是否可写。",
         )
         self._emit_providers()
 
