@@ -496,6 +496,7 @@ class ModelsPage(QWidget):
         sw.setObjectName("providerSwitch")
         sw.setProperty("providerId", provider.id)
         sw.setAccessibleName(f"{provider.name} 启用")
+        sw.setToolTip("启用后该供应商的模型才可被会话使用；禁用不影响已保存的槽位绑定（可逆）。")
         sw.setChecked(bool(getattr(provider, "enabled", True)))
         sw.toggled.connect(
             lambda checked, pid=provider.id: self.provider_toggle.emit(pid, checked)

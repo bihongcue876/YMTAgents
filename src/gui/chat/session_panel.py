@@ -182,7 +182,7 @@ class SessionPanel(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         self._tool_apply = QPushButton("应用工具权限")
-        self._tool_apply.setEnabled(False)
+        self._tool_apply.setToolTip("按当前勾选提交；全部勾选 = 恢复全部可用。生效后对话流会出现灰色提示行。")
         self._tool_apply.clicked.connect(self._on_toolset_apply)
         self._tool_all = QPushButton("全部可用")
         self._tool_all.setToolTip("恢复本对话全部工具可用（提交 None）")

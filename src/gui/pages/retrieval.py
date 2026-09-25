@@ -225,6 +225,7 @@ class RetrievalPage(QWidget):
         switch = Switch()
         switch.setObjectName("featureSwitch")
         switch.setAccessibleName(f"{_ENGINE_LABELS.get(name, name)} 启用")
+        switch.setToolTip("启用 = 自动把端点域名加入出口白名单；停用即移除（其它启用引擎仍需要者保留）")
         switch.toggled.connect(lambda checked, n=name: self._on_engine_toggled(n, checked))
 
         top.addLayout(copy, 1)
