@@ -1223,6 +1223,7 @@ error="写入失败；请检查工作区目录与记忆文件。",
                 if t == "gate.respond":
                     if request.call_id == call_id:
                         return request.decision == "allow"
+                    deferred.append(request)  # 他方关卡的裁决：不吞，回投待正常分派兜底登记
                     continue
                 if t == "turn.cancel":
                     self._on_cancel(request)
@@ -1311,8 +1312,6 @@ error="写入失败；请检查工作区目录与记忆文件。",
             self._on_builtin_toggle(request)
         elif t == "tool.builtin.refresh":
             self._emit_builtin()
-        elif t == "tool.builtin.toggle":
-            self._on_builtin_toggle(request)
         elif t == "shell.spawn":
             self._on_shell_spawn(request)
         elif t == "shell.close":

@@ -98,6 +98,17 @@ def _perm_value(perm: Any) -> str:
     return perm.value if isinstance(perm, Permission) else str(perm or Permission.CONFIRM.value)
 
 
+def _redact_deep(value: Any) -> Any:
+    """关卡预览过脱敏（防线纵深）：对照片段可能携带文件原文，密钥形态不得随预览外泄。"""
+    if isinstance(value, str):
+        return redact(value) or value
+    if isinstance(value, dict):
+        return {key: _redact_deep(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_deep(item) for item in value]
+    return value
+
+
 class ToolExecutor(IToolExecutor):
     def __init__(
         self,
@@ -177,7 +188,9 @@ class ToolExecutor(IToolExecutor):
         except Exception:  # noqa: BLE001 - 预览失败不阻断关卡
             log.exception("生成关卡预览失败：%s", spec.name)
             return {}
-        return dict(data) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        return _redact_deep(data)
 
     # -- 执行 --------------------------------------------------------------
     def _find_spec(self, name: str) -> ToolSpec | None:
@@ -276,7 +289,12 @@ class ToolExecutor(IToolExecutor):
                     return reason or error_text(ErrorCode.TOOL_DENIED.value)
                 if kind == "allow":
                     # v0.0.11（α 方案）：策略**显式放行** ⇒ 跳过关卡。
-                    # precheck 只降低打扰、从不提权：声明档仍是 confirm，区外调用照旧弹卡。
+                    # 「从不提权」（安全修订轮收口）：allow 只对非 restricted 声明档生效，
+                    # restricted 的默认拒绝不受策略层放行影响——allow 只降打扰、不提权。
+                    if permission == Permission.RESTRICTED.value:
+                        self._persist_gate(call_id, "deny", "policy", ctx)
+                        self.audit("gate.decision", tool=name, decision="deny", decider="policy")
+                        return error_text(ErrorCode.TOOL_DENIED.value)
                     self._persist_gate(call_id, "allow", "policy", ctx)
                     self.audit("gate.decision", tool=name, decision="skip", decider="policy")
                     return None

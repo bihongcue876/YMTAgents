@@ -33,6 +33,12 @@ class Registry:
     def register(self, spec: ToolSpec, handler: Handler) -> None:
         if spec.name in self._tools:
             raise ValueError(f"工具注册冲突：{spec.name}（禁止静默覆盖）")
+        # 外部来源（MCP / 技能）的工具不得携带宿主策略保留位（安全修订轮，机制化 docs 09 B5）：
+        # precheck/preview 只能由宿主侧代码授予——否则外部工具可自称 allow 整类逃过关卡。
+        if spec.name.startswith(("mcp.", "skill.")) and (
+            getattr(spec, "precheck", None) is not None or getattr(spec, "preview", None) is not None
+        ):
+            raise ValueError(f"外部来源工具不得携带 precheck/preview：{spec.name}（宿主策略保留位）")
         self._tools[spec.name] = (spec, handler)
 
     def unregister(self, name: str) -> None:

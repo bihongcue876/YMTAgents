@@ -30,6 +30,7 @@ from core.files.paths import (
     FilePathError,
     classify,
     needs_review,
+    path_key,
     relative_display,
     resolve_target,
 )
@@ -54,6 +55,16 @@ PROMPT_BLOCK_LIMIT = 600
 
 #: 对照模式单侧最多带多少字符进预览（只给 UI 看，不落事件）。
 _PREVIEW_CHARS = 8000
+
+
+def _int_arg(value: Any, default: int) -> int:
+    """整数参数收口（安全修订轮）：非法值归 invalid_args，不给后端异常留通道。"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise FilePathError("行号参数必须是整数。") from exc
 
 
 def _head_text(path: Path, limit: int) -> str:
@@ -406,12 +417,14 @@ class FilesTools:
             raise FileDenied(access.reason)
         result = ops.read_text(
             target,
-            offset=int(args.get("offset") or 1),
-            limit=int(args.get("limit") or ops.DEFAULT_READ_LIMIT),
+            offset=_int_arg(args.get("offset"), 1),
+            limit=_int_arg(args.get("limit"), ops.DEFAULT_READ_LIMIT),
         )
         self._read_seen.add(self._key(target))
+        # 审计口径（spec §2.4）：区外只记标记——用户磁盘布局不进 audit.jsonl（安全修订轮）。
+        audit_path = relative_display(target, root) if access.inside_workspace else "（工作区外）"
         self._audit("file.read", tool=TOOL_READ, inside=access.inside_workspace,
-                    path=relative_display(target, root), bytes=result["bytes"])
+                    path=audit_path, bytes=result["bytes"])
         total = f"共 {result['total_lines']} 行" if result["total_known"] else "总行数未知（文件过大）"
         head = f"{relative_display(target, root)}（{total}；已显示 {result['shown_from']}–{result['shown_to']}）"
         if result["truncated"]:
@@ -463,7 +476,8 @@ class FilesTools:
         )
         self._read_seen.add(self._key(target))
         rel = relative_display(target, root)
-        self._audit("file.edit", tool=TOOL_EDIT, inside=access.inside_workspace, path=rel,
+        self._audit("file.edit", tool=TOOL_EDIT, inside=access.inside_workspace,
+                    path=rel if access.inside_workspace else "（工作区外）",
                     replacements=result["replacements"])
         if result["noop"]:
             return {"output": f"未修改 {rel}：替换结果与原内容相同。"}
@@ -477,7 +491,8 @@ class FilesTools:
         result = ops.write_text(target, args.get("content"))
         self._read_seen.add(self._key(target))
         rel = relative_display(target, root)
-        self._audit("file.write", tool=TOOL_WRITE, inside=access.inside_workspace, path=rel,
+        self._audit("file.write", tool=TOOL_WRITE, inside=access.inside_workspace,
+                    path=rel if access.inside_workspace else "（工作区外）",
                     bytes=result["bytes"], created=result["created"])
         verb = "新建" if result["created"] else "覆盖"
         return {"output": f"已{verb} {rel}（{result['lines']} 行 / {result['bytes']} 字节）。"}
@@ -490,6 +505,5 @@ class FilesTools:
 
     @staticmethod
     def _key(path: Path) -> str:
-        import os
-
-        return os.path.normcase(os.path.abspath(str(path)))
+        """路径同一性键：与 paths.path_key 同一实现（单一来源，安全修订轮）。"""
+        return path_key(path)

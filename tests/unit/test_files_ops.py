@@ -107,3 +107,30 @@ def test_write_preserves_existing_crlf_and_backs_up(tmp_path):
     ops.write_text(path, "a\nB\n")
     assert path.read_bytes() == b"a\r\nB\r\n"
     assert (root / "crlf.txt.bak").exists()
+
+
+def test_grep_only_scans_prefix_window_of_long_lines(tmp_path):
+    root, data = _root(tmp_path)
+    in_window = "A" * 4000 + "NEEDLE"      # 命中点在 4096 窗口内：可见
+    out_window = "B" * 5000 + "NEEDLE"     # 命中点在窗口外：按「不扫」如实缺席
+    (root / "long.txt").write_text(in_window + "\n" + out_window + "\n", encoding="utf-8")
+    out = ops.grep_files("NEEDLE", base=root, data_root=data)
+    assert [m["line"] for m in out["matches"]] == [1]
+    assert out["overflow"] is False
+
+
+def test_grep_rejects_backtracking_style_pattern(tmp_path):
+    root, data = _root(tmp_path)
+    (root / "x.txt").write_text("aaaa\n", encoding="utf-8")
+    with pytest.raises(FilePathError):
+        ops.grep_files("(a+)+b", base=root, data_root=data)
+    # 正常带组/量词的模式不受误伤
+    ok = ops.grep_files("(a+)(b+)", base=root, data_root=data)
+    assert ok["count"] == 0
+
+
+def test_write_rejects_oversized_content(tmp_path, monkeypatch):
+    root, _data = _root(tmp_path)
+    monkeypatch.setattr(ops, "MAX_WRITE_CHARS", 16)
+    with pytest.raises(FilePathError):
+        ops.write_text(root / "big.txt", "x" * 17)

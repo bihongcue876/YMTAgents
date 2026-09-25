@@ -160,3 +160,15 @@ def test_glob_and_grep_tools(tmp_path):
     assert globbed.ok is True and "top.py" in globbed.output and "pkg/mod.py" in globbed.output
     grepped = registry.execute(TOOL_GREP, {"pattern": "TARGET", "include": "*.py"}, _ctx())
     assert grepped.ok is True and "pkg/mod.py:1:" in grepped.output
+
+
+def test_outside_read_audit_records_marker_only(tmp_path):
+    """安全修订轮：区外读取审计只记标记，不把用户磁盘布局写进 audit.jsonl。"""
+    _tools, registry, _root, _data, audit = _setup(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    result = registry.execute(TOOL_READ, {"path": str(outside)}, _ctx())
+    assert result.ok is True
+    entry = next(fields for action, fields in audit if action == "file.read")
+    assert entry["inside"] is False
+    assert entry["path"] == "（工作区外）"

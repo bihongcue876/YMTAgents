@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,18 @@ PRIVATE_UNDER_DATA_ROOT: tuple[str, ...] = (
 )
 
 _LOWER_DIRNAME_DENY = tuple(name.lower() for name in DIRNAME_DENY)
+
+#: Windows 保留设备名（去扩展名后判定；任意扩展名形态均算，安全修订轮）：
+#: 写向设备会落空、读设备可能挂死，一律按不可接受路径处理。
+_RESERVED_STEMS: frozenset[str] = frozenset(
+    {"con", "prn", "aux", "nul",
+     *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+)
+
+
+def is_reserved_name(name: str) -> bool:
+    """文件名主干（去扩展名）是否为 Windows 保留设备名。"""
+    return name.lower().split(".", 1)[0] in _RESERVED_STEMS
 
 
 class FilePathError(ValueError):
@@ -152,19 +165,29 @@ def needs_review(access: Access) -> bool:
 
 
 def reject_symlinks(target: str | Path) -> None:
-    """逐段拒绝符号链接（含中间目录）；只判**已存在**的层级。"""
+    """逐段拒绝符号链接（含中间目录）与 junction/reparse 点；只判**已存在**的层级。
+
+    junction 不被「is_symlink」识别（Windows 目录挂接点），但同样能把路径引到
+    判定区之外——classify 基于**词典路径**比较，链接必须在判定的入口处拒掉（安全修订轮）。
+    """
     path = abs_path(target)
     parts = path.parts
     if not parts:
         return
     current = Path(parts[0])
+    reparse_mask = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     for part in parts[1:]:
         current = current / part
         try:
-            if current.is_symlink():
-                raise FileDenied("路径不得包含符号链接。")
+            st = os.lstat(str(current))
+        except FileNotFoundError:
+            continue  # 该段尚不存在：不存在即不是链接，交由 must_exist 收口
+        except NotADirectoryError:
+            continue  # 中途已是文件：交由后续操作自然失败，不算链接
         except OSError:  # 权限不足等：fail-closed 反向处理，不因探测失败而放行
             raise FileDenied("无法确认该路径是否为符号链接，拒绝访问。")
+        if stat.S_ISLNK(st.st_mode) or (getattr(st, "st_file_attributes", 0) & reparse_mask):
+            raise FileDenied("路径不得包含符号链接或 junction。")
 
 
 def resolve_target(raw: str | Path, *, root: str | Path, base: str | Path | None = None,
@@ -183,6 +206,10 @@ def resolve_target(raw: str | Path, *, root: str | Path, base: str | Path | None
     else:
         anchor = base if base is not None else root
         target = abs_path(Path(anchor) / text)
+    # 保留设备名两段查（安全修订轮）：abspath 会把「…\NUL」规范化成设备路径
+    # 「\\.\NUL」，target.name 变空串——必须在原始 candidate.name 上先拦一道。
+    if is_reserved_name(candidate.name) or is_reserved_name(target.name):
+        raise FilePathError("目标名是 Windows 保留设备名，拒绝访问。")
     reject_symlinks(target)
     if must_exist and not target.is_file():
         raise FileMissing("目标不是已存在的普通文件。")

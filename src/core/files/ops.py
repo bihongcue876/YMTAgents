@@ -12,6 +12,8 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import stat
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -42,6 +44,28 @@ MAX_SEARCH_FILE_BYTES = 2_097_152
 MAX_SEARCH_LINE_CHARS = 300
 TRUNCATION_MARK = "\n\n…[内容已截断]"
 LONG_LINE_MARK = " …[本行已截断]"
+#: 单行正则扫描窗口（灾难回溯防线，安全修订轮）：超长行（如压缩 JSON）按前缀扫描。
+MAX_SEARCH_SCAN_CHARS = 4096
+#: 写族体量上限（字符）：模型不得借文件工具写任意大文件；与附件上限同量级。
+MAX_WRITE_CHARS = 1_000_000
+#: edit 需整读原文：目标文件超过此体量拒绝（安全修订轮）。
+MAX_EDIT_FILE_BYTES = 8_388_608
+#: grep 单次调用时间预算（秒）：超预算即停并如实标记 overflow（安全修订轮）。
+GREP_TIME_BUDGET_S = 10.0
+#: 正则模式长度上限：超长模式先于一切判为不可执行（安全修订轮）。
+MAX_PATTERN_CHARS = 1024
+#: 灾难回溯形态启发式：量词嵌套（组内有量词再叠量词）与相邻双量词。
+_REDOS_HINT = re.compile(
+    r"\((?:[^()\\]|\\.)*[+*]\)\s*(?:[+*]|\{\d)"
+    r"|(?:[^()\\]|\\.)*[+*]\s*[+*]"
+)
+
+
+def _redos_suspect(pattern: str) -> bool:
+    """模式可能引发灾难性回溯则拒执行（fail-closed；stdlib re 无线性时间保证）。"""
+    if len(pattern) > MAX_PATTERN_CHARS:
+        return True
+    return bool(_REDOS_HINT.search(pattern))
 
 
 def _read_raw(path: Path) -> str:
@@ -88,17 +112,18 @@ def read_text(path: Path, *, offset: int = 1, limit: int = DEFAULT_READ_LIMIT) -
         window = lines[start - 1:end]
         total_known = True
     else:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            head: list[str] = []
-            used = 0
-            index = 0
-            for line in handle:
-                index += 1
-                piece = _clip_line(line.replace("\r\n", "\n").rstrip("\n"))
-                if used + len(piece) > MAX_READ_BYTES:
-                    break
-                head.append(piece)
-                used += len(piece) + 1
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                head: list[str] = []
+                used = 0
+                for line in handle:
+                    piece = _clip_line(line.replace("\r\n", "\n").rstrip("\n"))
+                    if used + len(piece) > MAX_READ_BYTES:
+                        break
+                    head.append(piece)
+                    used += len(piece) + 1
+        except UnicodeDecodeError as exc:  # 非 UTF-8：与 _read_raw 同口径拒绝
+            raise FilePathError("该文件不是 UTF-8 文本，不予读取。") from exc
         total = None
         total_known = False
         window = head[start - 1:end]
@@ -137,7 +162,7 @@ def _walk(base: Path, *, data_root: Path, include_hidden: bool) -> Iterator[Path
                 return
             name = entry.name
             try:
-                if entry.is_symlink():
+                if entry.is_symlink() or _is_reparse(entry):
                     continue
                 if entry.is_dir():
                     if is_denied_dir(name) or is_private_dir(entry.path, data_root):
@@ -162,6 +187,17 @@ def _display(path: Path, base: Path) -> str:
         return path.relative_to(base).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _is_reparse(entry: os.DirEntry) -> bool:
+    """条目是否为 reparse 点（junction 等；is_symlink 查不出，安全修订轮）。"""
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return True  # 不可确认 = 视为 reparse（fail-closed，不下钻）
+    return bool(
+        getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
 
 
 def glob_files(pattern: str, *, base: Path, data_root: Path,
@@ -201,6 +237,8 @@ def grep_files(pattern: str, *, base: Path, data_root: Path, include: str = "",
     text = str(pattern or "").strip()
     if not text:
         raise FilePathError("pattern 不能为空。")
+    if _redos_suspect(text):
+        raise FilePathError("该正则可能引发灾难性回溯，不予执行；请改用更简单的模式。")
     try:
         engine = re.compile(text)
     except re.error as exc:
@@ -209,6 +247,7 @@ def grep_files(pattern: str, *, base: Path, data_root: Path, include: str = "",
     hits: list[dict] = []
     files_scanned = 0
     overflow = False
+    started = time.monotonic()
     for path in _walk(base, data_root=data_root, include_hidden=include_hidden):
         relative = _display(path, base)
         if include_text and not fnmatch.fnmatch(path.name, include_text):
@@ -219,11 +258,15 @@ def grep_files(pattern: str, *, base: Path, data_root: Path, include: str = "",
         except OSError:
             continue
         files_scanned += 1
+        if files_scanned % 50 == 0 and time.monotonic() - started > GREP_TIME_BUDGET_S:
+            overflow = True  # 时间预算耗尽：如实标记并停止（不给灾难模式拖死核心线程的机会）
+            break
         try:
             with path.open("r", encoding="utf-8", newline="") as handle:
                 for number, line in enumerate(handle, start=1):
                     stripped = line.replace("\r\n", "\n").rstrip("\n")
-                    if not engine.search(stripped):
+                    # 灾难回溯防线（安全修订轮）：只扫前缀窗口，超长行不拖死核心线程。
+                    if not engine.search(stripped[:MAX_SEARCH_SCAN_CHARS]):
                         continue
                     hits.append({"path": relative, "line": number,
                                  "text": stripped[:MAX_SEARCH_LINE_CHARS]})
@@ -245,6 +288,10 @@ def edit_text(path: Path, old_string: str, new_string: str, *, replace_all: bool
     if not old:
         raise FilePathError("old_string 不能为空。")
     new = str(new_string or "").replace("\r\n", "\n")
+    if len(old) > MAX_WRITE_CHARS or len(new) > MAX_WRITE_CHARS:
+        raise FilePathError("替换片段超过体量上限，拒绝执行。")
+    if _size_of(path) > MAX_EDIT_FILE_BYTES:
+        raise FilePathError("目标文件过大（超过 8 MB），不支持编辑。")
     raw = _read_raw(path)
     eol = detect_eol(raw)
     text = raw.replace("\r\n", "\n")
@@ -268,6 +315,8 @@ def write_text(path: Path, content: str) -> dict:
     if not path.parent.is_dir():
         raise FilePathError("目标目录不存在（不自动创建目录）。")
     text = str(content if content is not None else "").replace("\r\n", "\n")
+    if len(text) > MAX_WRITE_CHARS:
+        raise FilePathError("写入内容超过体量上限（约 1M 字符），拒绝执行。")
     if path.exists():
         if not path.is_file():
             raise FilePathError("目标不是普通文件。")

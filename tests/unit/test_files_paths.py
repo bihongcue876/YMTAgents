@@ -9,6 +9,7 @@ import pytest
 from core.files.paths import (
     FileDenied,
     FileMissing,
+    FilePathError,
     classify,
     needs_review,
     resolve_target,
@@ -84,3 +85,27 @@ def test_resolve_target_rejects_symlink(tmp_path):
         pytest.skip("本机不允许创建符号链接")
     with pytest.raises(FileDenied):
         resolve_target("link.txt", root=root)
+
+
+def test_resolve_target_rejects_windows_reserved_names(tmp_path):
+    root, _data = _layout(tmp_path)
+    for name in ("NUL", "con.txt", "COM1", "aux.md", "lpt2.log"):
+        with pytest.raises(FilePathError):
+            resolve_target(name, root=root)
+
+
+def test_resolve_target_rejects_junction_into_private_zone(tmp_path):
+    root, data = _layout(tmp_path)
+    (data / "config" / "settings.json").write_text("{}", encoding="utf-8")
+    junction = root / "link"
+    created = False
+    try:
+        import _winapi  # type: ignore[import-not-found]
+
+        _winapi.CreateJunction(str(data / "config"), str(junction))
+        created = True
+    except (ImportError, OSError, NotImplementedError):
+        pytest.skip("本机无法创建 junction")
+    # junction 不被 is_symlink 识别：必须与符号链接同拒（安全修订轮）。
+    with pytest.raises(FileDenied):
+        resolve_target("link/settings.json", root=root)
